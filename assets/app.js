@@ -33,6 +33,9 @@
   function editMax() { return DATA.edit_max_size || 0; }
   function allowKeys() { return !!DATA.allow_keys; }
   function allowSettings() { return !!DATA.allow_settings; }
+  // allowUsers 表示当前账号能在页面上增删改用户。服务端在下发页面/登录响应时
+  // 就已经按「功能开关 + 是否启用鉴权 + 是否管理员」算好了。
+  function allowUsers() { return !!DATA.allow_users; }
   // uploadMax 返回单文件上传上限（字节），0 表示不限制。
   function uploadMax() { return typeof DATA.upload_max_size === 'number' ? DATA.upload_max_size : 0; }
 
@@ -53,6 +56,9 @@
     if (typeof info.upload_date_dir === 'string') DATA.upload_date_dir = info.upload_date_dir;
     if (typeof info.allow_keys === 'boolean') DATA.allow_keys = info.allow_keys;
     if (typeof info.allow_settings === 'boolean') DATA.allow_settings = info.allow_settings;
+    // allow_users 必须在这里补齐：未登录外壳里刻意不下发它，
+    // 漏了这一行就表现为「登录后仍然看不到『用户』入口」。
+    if (typeof info.allow_users === 'boolean') DATA.allow_users = info.allow_users;
     if (typeof info.upload_max_size === 'number') DATA.upload_max_size = info.upload_max_size;
     if (typeof info.edit_max_size === 'number') DATA.edit_max_size = info.edit_max_size;
     if (info.user !== undefined) DATA.user = info.user;
@@ -86,6 +92,19 @@
   function uploadTargetDir(basePath) {
     if (!archiveAt(basePath)) return basePath;
     return joinPath(basePath, uploadDateDir());
+  }
+
+  // isNarrow 判断当前是不是手机宽度（与 CSS 的 560px 断点保持一致）。
+  //
+  // 有几处文案必须在窄屏换一种说法，而不是靠 CSS 截断：
+  //   「3 个目录 · 8 个文件 · 文件合计 54 KiB」在 375px 下会折成 3 行；
+  //   「可上传 · 可删除 · 可在线编辑 · 可在线解压」同理。
+  // 换口号比换字号有效得多。
+  //
+  // ⚠️ jsdom 没有实现 window.matchMedia，直接调用会抛异常并把整页逻辑带崩，
+  // 所以这里必须判空。缺失时按「宽屏」处理 —— 那也是文案更完整的那个分支。
+  function isNarrow() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 560px)').matches);
   }
 
   var state = {
@@ -884,22 +903,35 @@
     var dirsAll = countOf(state.entries);
     var files = listed - dirs;
     var size = typeof l.file_size === 'number' ? l.file_size : dirsAll.bytes;
+    var picked = pickedEntries();
+    // 窄屏走紧凑口径（单位词去掉「个」、大小不写「文件合计」）。
+    // 375px 下完整口径会折成 3 行，把工具条撑到 100px 以上。
+    var narrow = isNarrow();
 
     var out = '';
-    var picked = pickedEntries();
     if (picked.length) {
       var pk = countOf(picked);
-      out += '已选 ' + picked.length + ' 项（' + pk.dirs + ' 个目录 · ' + pk.files + ' 个文件';
-      if (pk.bytes > 0) out += ' · ' + fmtSize(pk.bytes);
-      out += '）　/　';
+      if (narrow) {
+        out += '已选 ' + picked.length + ' 项';
+        if (pk.bytes > 0) out += ' · ' + fmtSize(pk.bytes);
+      } else {
+        out += '已选 ' + picked.length + ' 项（' + pk.dirs + ' 个目录 · ' + pk.files + ' 个文件';
+        if (pk.bytes > 0) out += ' · ' + fmtSize(pk.bytes);
+        out += '）';
+      }
+      out += '　/　';
     }
 
     if (state.query) {
-      out += '搜索命中 ' + listed + ' 项（' + dirs + ' 个目录 · ' + files + ' 个文件）';
+      out += narrow
+        ? '命中 ' + listed + ' 项'
+        : '搜索命中 ' + listed + ' 项（' + dirs + ' 个目录 · ' + files + ' 个文件）';
     } else {
-      out += dirs + ' 个目录 · ' + files + ' 个文件';
+      out += narrow
+        ? dirs + ' 目录 · ' + files + ' 文件'
+        : dirs + ' 个目录 · ' + files + ' 个文件';
     }
-    if (size > 0) out += ' · 文件合计 ' + fmtSize(size);
+    if (size > 0) out += narrow ? ' · ' + fmtSize(size) : ' · 文件合计 ' + fmtSize(size);
 
     if (l.truncated) {
       out += '　·　已截断：该目录共 ' + (l.total_all || 0) + ' 项，仅列出前 ' + listed + ' 项';
@@ -1155,6 +1187,7 @@
     $('btn-mkdir').hidden = !can('write');
     $('btn-zip').hidden = !can('archive');
     $('btn-keys').hidden = !allowKeys();
+    $('btn-users').hidden = !allowUsers();
     $('btn-settings').hidden = !allowSettings();
     if (can('write')) {
       $('btn-upload').title = uploadLimitHint();
@@ -1164,6 +1197,9 @@
     }
     if (!$('btn-keys').hidden) {
       $('btn-keys').title = '上传密钥：给脚本一个只能上传、可设有效期、可随时撤销的凭证';
+    }
+    if (!$('btn-users').hidden) {
+      $('btn-users').title = '用户与权限：新建账号、按路径分配只读 / 读写权限';
     }
     if (!$('btn-settings').hidden) {
       $('btn-settings').title = '服务设置：切换服务根目录、调整单文件上传上限';
@@ -1201,6 +1237,10 @@
   // 为什么要有常驻区：只有拖拽过程中才出现的浮层，在用户**开始拖之前**
   // 是不可见的，等于没有告诉任何人「这个页面支持拖拽」。把入口画在页面上，
   // 并写明落点，才算真的把能力暴露出来。
+  //
+  // 窄屏是另一种东西：手机不能拖拽，所以那句「拖到这里」是错的，
+  // 整条改写成一行可点的上传入口（点一下就是文件选择框），
+  // 并且搬到了列表上方 —— 长列表下面的一行字等于不存在。
   function renderDropZone() {
     var zone = $('drop-zone');
     if (!zone) return;
@@ -1208,11 +1248,24 @@
     zone.hidden = !allowed;
     if (!allowed) return;
 
+    var narrow = isNarrow();
     var dir = uploadTargetDir(state.path);
-    $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
-      (dir !== state.path ? '（按日期自动归档）' : '');
     var lim = uploadLimitText();
-    if (lim) $('drop-zone-target').textContent += '　·　' + lim;
+
+    if (narrow) {
+      // 一行放得下才不会被截断：手机上一句「存入 /2026/09/28/ · 自动归档 · ≤ 10 GiB」
+      // 约 240px，紧凑但完整；<strong> 那句「拖到这里」由 CSS 隐藏。
+      $('drop-zone-lead').textContent = '上传文件';
+      $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
+        (dir !== state.path ? ' · 自动归档' : '') +
+        ' · ≤ ' + (uploadMax() > 0 ? fmtSize(uploadMax()) : '不限');
+    } else {
+      $('drop-zone-lead').textContent = '把文件或文件夹拖到这里即可上传';
+      $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
+        (dir !== state.path ? '（按日期自动归档）' : '');
+      if (lim) $('drop-zone-target').textContent += '　·　' + lim;
+    }
+    zone.title = narrow ? '选择文件或文件夹上传到 ' + dir + '/' : '';
   }
 
   // renderFooter 渲染页脚。它随登录状态与权限实时变化，因此必须在
@@ -1220,26 +1273,36 @@
   function renderFooter() {
     $('footer-left').textContent = 'gofs ' + (DATA.version || '');
 
+    var narrow = isNarrow();
     var who;
     if (!DATA.auth_on) {
       // 服务本身没开鉴权，提「登录」只会让人困惑。
       who = can('write') ? '无需登录 · 可读写' : '无需登录 · 只读';
     } else if (DATA.user) {
-      who = '已登录 ' + DATA.user + ' · ' + (can('write') ? '可读写' : '只读');
+      // 窄屏省掉「已登录」三个字：页脚只有一行位置，
+      // 「admin · 可读写」已经把所有信息说完了。
+      who = narrow
+        ? DATA.user + ' · ' + (can('write') ? '可读写' : '只读')
+        : '已登录 ' + DATA.user + ' · ' + (can('write') ? '可读写' : '只读');
     } else {
       who = '未登录 · 只读';
     }
 
     var caps = [];
-    if (can('write')) caps.push('可上传');
-    if (can('delete')) caps.push('可删除');
-    if (can('edit')) caps.push('可在线编辑');
-    if (can('extract')) caps.push('可在线解压');
+    if (can('write')) caps.push(narrow ? '上传' : '可上传');
+    if (can('delete')) caps.push(narrow ? '删除' : '可删除');
+    if (can('edit')) caps.push(narrow ? '编辑' : '可在线编辑');
+    if (can('extract')) caps.push(narrow ? '解压' : '可在线解压');
     // 归档只在根目录生效，页脚也要跟着当前目录变 —— 站在子目录里还写
     // 「上传归档到 2026/09/28/」就是假的。
-    if (can('write') && archiveAt(state.path)) caps.push('上传归档到 ' + uploadDateDir() + '/');
+    if (can('write') && archiveAt(state.path)) {
+      caps.push(narrow ? '归档 ' + uploadDateDir() + '/' : '上传归档到 ' + uploadDateDir() + '/');
+    }
 
-    $('footer-right').textContent = caps.length ? who + '　·　' + caps.join(' · ') : who;
+    // 窄屏用「·」连成一串能力词，宽屏保持原来的「可××」长写法。
+    $('footer-right').textContent = caps.length
+      ? who + '　·　' + caps.join(narrow ? '·' : ' · ')
+      : who;
   }
 
   function render() {
@@ -1293,6 +1356,8 @@
       state.query = '';
       state.selected.clear();
       $('search-input').value = '';
+      // 换了目录，顶栏的「更多」下拉不该跨页留着。
+      if (G.closeMore) G.closeMore();
       if (push !== false && DATA.perms.read) {
         // 地址栏更新是「锦上添花」，不能让它拖垮导航：目录已经取回来了，
         // 万一 pushState 因为任何原因失败（URL 构造问题、跨源限制、
@@ -2338,6 +2403,65 @@
     $('btn-upload').onclick = function () { $('file-input').click(); };
     $('btn-upload-dir').onclick = function () { $('dir-input').click(); };
 
+    // ---- 顶栏「更多」折叠菜单（仅手机端可见） ----
+    //
+    // 桌面端 .more-wrap/.more-panel 是 display: contents，菜单项本来就摆在
+    // 顶栏上，这个开关点不到也不影响任何东西；手机端才把低频操作收进来。
+    //
+    // 三个「关闭」路径都要有，缺一个就会留下一个关不掉的浮层：
+    // 再点一次开关、点面板外的任意位置、按 Esc。
+    var moreWrap = $('more-wrap');
+    var morePanel = $('more-panel');
+    var moreToggle = $('btn-more');
+
+    function closeMore() {
+      if (!morePanel) return;
+      morePanel.classList.remove('open');
+      if (moreToggle) moreToggle.setAttribute('aria-expanded', 'false');
+    }
+    function toggleMore() {
+      if (!morePanel) return;
+      var open = morePanel.classList.toggle('open');
+      if (moreToggle) moreToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    if (moreToggle) {
+      moreToggle.onclick = function (e) {
+        e.stopPropagation();   // 别让下面的 document 监听立刻把它关掉
+        toggleMore();
+      };
+    }
+    // 点菜单项后立刻收起：否则改完设置回到页面，菜单还挂在那儿。
+    if (morePanel) {
+      morePanel.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('button') : null;
+        if (b && !b.hidden) closeMore();
+      });
+    }
+    document.addEventListener('click', function (e) {
+      if (!moreWrap || moreWrap.contains(e.target)) return;
+      closeMore();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeMore();
+    });
+    // 换目录时菜单不该跨页留着。
+    G.closeMore = closeMore;
+
+    // 旋转屏幕 / 拖动窗口跨过 560px 断点时，有三处文案是按屏宽选的
+    // （工具条统计口径、页脚能力、投放区那句话），要重算一次；
+    // 不重算就得刷新页面才正确。只在真的跨过断点时才算，避免拖动时抖动。
+    var wasNarrow = isNarrow();
+    window.addEventListener('resize', function () {
+      var now = isNarrow();
+      if (now === wasNarrow) return;
+      wasNarrow = now;
+      syncSelection();
+      renderFooter();
+      renderDropZone();
+    });
+
+    $('btn-users').onclick = function () { G.openUsers(); };
     $('btn-mkdir').onclick = openMkdirDialog;
     $('btn-refresh').onclick = function () { navigate(state.path, false); };
 
@@ -2557,6 +2681,8 @@
   G.data = DATA;
   G.can = can;
   G.allowKeys = allowKeys;
+  G.allowUsers = allowUsers;
+  G.isNarrow = isNarrow;
   G.canEdit = canEdit;
   G.editMax = editMax;
   G.applySession = applySession;

@@ -1,4 +1,4 @@
-.PHONY: all build test vet fmt run clean cross testdata uitest layout layout-sweep touch-sweep touch-modals cdp run-auth settings-check
+.PHONY: all build test vet fmt run clean cross testdata uitest layout layout-sweep touch-sweep touch-modals cdp run-auth settings-check users-check users-deploy-check
 
 BINARY := gofs
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
@@ -32,15 +32,29 @@ testv:
 uitest:
 	NODE_PATH=$(NODE_MODULES) $(NODE_BIN) scripts/test-ui.mjs $(GOFS_URL)
 
-## run-auth: 以鉴权模式启动，供 uitest / settings-check 使用
+## run-auth: 以鉴权模式启动，供 uitest / settings-check / users-check 使用
 ##   admin 可写根目录；test 只读，用来验证「改设置需要根目录写权限」
+##   ⚠️ 显式指定 --user-file 指向临时文件：否则测试会写进你真实的
+##      <用户配置目录>/gofs/users.json，那里面可能有你在用的账号。
 run-auth: build
-	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' -a 'test:test@/' ./data
+	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' -a 'test:test@/' \
+	  --user-file /tmp/gofs-run-auth-users.json ./data
 
 ## settings-check: 端到端校验「服务设置」（权限 / 范围约束 / CSRF / 上限生效）
 ##   用法：另开一个终端跑 `make run-auth`，然后 `make settings-check`
 settings-check:
 	./scripts/check-settings.sh
+
+## users-check: 端到端校验用户管理（CRUD / 权限生效 / 改密后旧密码立刻失效 / 落盘）
+##   用法：另开一个终端跑 `make run-auth`，然后 `make users-check`
+##   （脚本会创建/删除测试账号并自行收尾，不会残留）
+users-check:
+	./scripts/check-users.sh
+
+## users-deploy-check: 用户管理的部署形态（重启后仍在 / 损坏文件拒绝启动 / 功能开关）
+##   会自己起停多个实例，不需要预先启动服务
+users-deploy-check:
+	./scripts/check-users-deploy.sh
 
 ## cdp: 启动带调试端口的 headless Chrome，供 layout / layout-sweep 使用
 ##   （前台运行，另开终端跑 make layout）

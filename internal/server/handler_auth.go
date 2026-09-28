@@ -81,6 +81,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"edit_max_size":   s.cfg.EditMaxSize,
 		"upload_max_size": s.settings.UploadMaxSize(),
 		"allow_settings":  admin,
+		"allow_users":     s.cfg.AllowUserManage && admin,
 	}
 	if s.cfg.UploadDated() {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())

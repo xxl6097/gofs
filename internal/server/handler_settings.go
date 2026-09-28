@@ -221,6 +221,12 @@ func (s *Server) isAdminRequest(r *http.Request) bool {
 // 服务级设置（根目录、上传上限）影响所有人，所以只放开给管理员；
 // 一个只被授予 /docs 只读权限的账号不应该能把根目录换到别处。
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireAdminOr(w, r, "修改服务设置")
+}
+
+// requireAdminOr 与 requireAdmin 同一套判定，只是把 403 文案换成具体的操作名，
+// 这样用户看到的提示能直接指出「是哪个动作需要管理员」。
+func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action string) bool {
 	// 未启用鉴权时服务本身就是全开放的，不存在额外的管理员概念。
 	if !s.auth.Enabled() {
 		return true
@@ -236,7 +242,19 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 		return false
 	}
-	http.Error(w, "403 Forbidden: 修改服务设置需要对服务根拥有读写权限",
+	http.Error(w, "403 Forbidden: "+action+"需要对服务根拥有读写权限",
 		http.StatusForbidden)
 	return false
+}
+
+// isUserManageAllowed 判断「这个请求该不该看到用户管理入口」。
+//
+// 与 requireUserManage 共用同一套条件（已开放 + 已启用鉴权 + 管理员），
+// 只是不写响应：页面渲染问的是「显不显示按钮」。
+// 两处共用可以避免「按钮在但点了 403」这类权限逻辑漂移。
+func (s *Server) isUserManageAllowed(r *http.Request) bool {
+	if !s.cfg.AllowUserManage || !s.auth.Enabled() {
+		return false
+	}
+	return s.isAdminRequest(r)
 }

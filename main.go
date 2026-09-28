@@ -180,6 +180,15 @@ func printBanner(cfg *config.Config, scheme string, ln net.Listener) {
 		}
 		fmt.Printf("  上传密钥  : %s\n", keyLoc)
 	}
+	// 用户管理只有在「已启用鉴权」时才可用，所以这里也按同一条件打印，
+	// 免得看到一个用不了的路径。
+	if cfg.AllowUserManage && len(cfg.AuthRules) > 0 {
+		userLoc := cfg.UserFile
+		if userLoc == "" {
+			userLoc = "仅内存（重启后失效）"
+		}
+		fmt.Printf("  用户表    : %s\n", userLoc)
+	}
 	// 把生效中的防护值打出来：这些默认值直接决定了服务被滥用时的表现，
 	// 显式可见比藏在 --help 里更让人放心。
 	fmt.Printf("  防护      : 上传≤%s  打包≤%s/%s  目录≤%s  并发%d  无进展超时%s  跨站校验%s\n",

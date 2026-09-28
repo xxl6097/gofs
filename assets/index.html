@@ -23,9 +23,6 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="search-input" type="search" placeholder="搜索文件…" autocomplete="off" spellcheck="false">
     </div>
-    <button class="btn icon" id="btn-theme" title="切换主题" type="button">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
-    </button>
     <button class="btn icon" id="btn-refresh" title="刷新" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
     </button>
@@ -33,24 +30,53 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
       <span>上传</span>
     </button>
-    <button class="btn" id="btn-upload-dir" type="button" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5"/><path d="m9.5 13.5 2.5-2.5 2.5 2.5"/></svg>
-      <span>文件夹</span>
-    </button>
-    <button class="btn" id="btn-mkdir" type="button" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
-      <span>新建</span>
-    </button>
-    <button class="btn" id="btn-keys" type="button" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m10.6 12.4 8.4-8.4"/><path d="M15.5 4.5h4v4"/></svg>
-      <span>密钥</span>
-    </button>
-    <button class="btn" id="btn-settings" type="button" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4z"/></svg>
-      <span>设置</span>
-    </button>
-    <div class="user" id="user-chip" hidden></div>
+
+    <!-- 低频操作的可折叠组。
+         桌面端 .more-wrap / .more-panel 都是 display: contents，里面的按钮
+         仍然是 .topbar-actions 的直接弹性项 —— 排版与折叠前完全一致。
+         手机端（≤560px）它变成「更多」下拉菜单，把顶栏从 200px 压回一行。
+
+         ⚠️ 折叠**只改布局，不改可见性**：按钮的 hidden 属性照旧由权限控制，
+         菜单项也可以被 hidden 掉。折叠与权限是两件事，别混在一起。 -->
+    <div class="more-wrap" id="more-wrap">
+      <button class="btn icon more-toggle" id="btn-more" type="button"
+              title="更多操作" aria-label="更多操作" aria-expanded="false" aria-controls="more-panel">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+        <span>更多</span>
+      </button>
+      <div class="more-panel" id="more-panel">
+        <button class="btn" id="btn-theme" title="切换主题" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+          <span>主题</span>
+        </button>
+        <button class="btn" id="btn-upload-dir" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5"/><path d="m9.5 13.5 2.5-2.5 2.5 2.5"/></svg>
+          <span>文件夹</span>
+        </button>
+        <button class="btn" id="btn-mkdir" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+          <span>新建</span>
+        </button>
+        <button class="btn" id="btn-keys" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m10.6 12.4 8.4-8.4"/><path d="M15.5 4.5h4v4"/></svg>
+          <span>密钥</span>
+        </button>
+        <button class="btn" id="btn-users" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20"/><circle cx="10" cy="8" r="3.5"/><path d="M20 20v-1.4a3.5 3.5 0 0 0-2.6-3.4"/><path d="M15.4 4.7a3.5 3.5 0 0 1 0 6.6"/></svg>
+          <span>用户</span>
+        </button>
+        <button class="btn" id="btn-settings" type="button" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4z"/></svg>
+          <span>设置</span>
+        </button>
+      </div>
+    </div>
   </div>
+
+  <!-- 账号芯片放在 .topbar-actions 之外：
+       桌面端它本来就是这个 flex 行的最后一个元素，位置不变；
+       手机端要把它挪到第一行（跟路径并排），在里面就做不到。 -->
+  <div class="user" id="user-chip" hidden></div>
 </header>
 
 <main class="content">
@@ -93,11 +119,15 @@
   <!-- 常驻的拖拽投放区。
        只靠「拖进来时才出现的浮层」不够：用户在没有开始拖之前，
        根本不知道这个页面支持拖拽上传。这里把能力写在页面上，
-       并明确标出文件会落到哪个目录。 -->
+       并明确标出文件会落到哪个目录。
+
+       手机端（触摸、窄屏）改写成一条紧凑的可点横条，并挪到列表上方：
+       手机不可能拖拽，原来那句「拖到这里」是错的；而且它原本排在长列表
+       之后，一屏之外的入口等于不存在。文案由 renderDropZone() 按屏宽生成。 -->
   <div class="drop-zone" id="drop-zone" hidden>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
     <div class="drop-zone-text">
-      <strong>把文件或文件夹拖到这里即可上传</strong>
+      <strong id="drop-zone-lead">把文件或文件夹拖到这里即可上传</strong>
       <span id="drop-zone-target">当前目录</span>
     </div>
     <button class="btn" id="drop-zone-pick" type="button">选择文件…</button>
@@ -132,6 +162,7 @@
 <script src="__GOFS_ASSETS__app.js"></script>
 <script src="__GOFS_ASSETS__editor.js"></script>
 <script src="__GOFS_ASSETS__keys.js"></script>
+<script src="__GOFS_ASSETS__users.js"></script>
 <script src="__GOFS_ASSETS__settings.js"></script>
 </body>
 </html>

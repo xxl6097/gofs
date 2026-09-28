@@ -36,6 +36,20 @@ func DefaultKeyFile() string {
 	return filepath.Join(dir, "gofs", "keys.json")
 }
 
+// DefaultUserFile 的返回值是用户表的默认持久化路径。
+// 与密钥文件同理放在用户配置目录：不污染被服务的文件树，也不会因为换服务目录而丢。
+func DefaultUserFile() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(dir, "gofs", "users.json")
+}
+
 // 解压相关的硬性安全上限，可由命令行覆盖。
 const (
 	// DefaultExtractMaxTotal 单次解压允许写出的字节总量上限，默认 10 GiB。
@@ -128,7 +142,11 @@ type Config struct {
 	// AllowKeys 表示允许在页面上管理上传密钥。
 	AllowKeys bool
 	// KeyFile 为上传密钥的持久化路径；为空表示只保存在内存中，重启即失效。
-	KeyFile      string
+	KeyFile string
+	// AllowUserManage 表示允许在页面上增删改用户（默认开启，需已有鉴权规则）。
+	AllowUserManage bool
+	// UserFile 为用户表的持久化路径；为空表示只保存在内存中，重启即失效。
+	UserFile     string
 	AllowUpload  bool
 	AllowDelete  bool
 	AllowSearch  bool
@@ -326,6 +344,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		EditMaxSize:      envInt64("GOFS_EDIT_MAX_SIZE", DefaultEditMaxSize),
 		AllowKeys:        envBool("GOFS_ALLOW_KEYS", false),
 		KeyFile:          envStr("GOFS_KEY_FILE", DefaultKeyFile()),
+		AllowUserManage:  envBool("GOFS_ALLOW_USER_MANAGE", true),
+		UserFile:         envStr("GOFS_USER_FILE", DefaultUserFile()),
 		AllowUpload:      envBool("GOFS_ALLOW_UPLOAD", false),
 		AllowDelete:      envBool("GOFS_ALLOW_DELETE", false),
 		AllowSearch:      envBool("GOFS_ALLOW_SEARCH", false),
@@ -374,6 +394,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	var noUploadDated bool
 	// 同理：换根默认开启，用否定形式关闭。
 	var noRootSwitch bool
+	// 用户管理默认开启，用否定形式关闭。
+	var noUserManage bool
 
 	fs.StringVar(&cfg.Bind, "b", cfg.Bind, "指定监听地址或 unix socket")
 	fs.StringVar(&cfg.Bind, "bind", cfg.Bind, "指定监听地址或 unix socket")
@@ -399,6 +421,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.Int64Var(&cfg.EditMaxSize, "edit-max-size", cfg.EditMaxSize, "在线编辑允许打开的最大文件尺寸（字节）")
 	fs.BoolVar(&cfg.AllowKeys, "allow-keys", cfg.AllowKeys, "允许管理上传密钥（未指定时跟随 --allow-upload）")
 	fs.StringVar(&cfg.KeyFile, "key-file", cfg.KeyFile, "上传密钥存储路径，置空则只保存在内存中")
+	fs.BoolVar(&noUserManage, "no-user-manage", false, "禁止在页面上增删改用户")
+	fs.StringVar(&cfg.UserFile, "user-file", cfg.UserFile, "用户表存储路径，置空则只保存在内存中")
 	fs.BoolVar(&cfg.AllowDelete, "allow-delete", cfg.AllowDelete, "允许删除文件/目录")
 	fs.BoolVar(&cfg.AllowSearch, "allow-search", cfg.AllowSearch, "允许搜索文件/目录")
 	fs.BoolVar(&cfg.AllowArchive, "allow-archive", cfg.AllowArchive, "允许把目录打包成压缩包下载")
@@ -507,6 +531,9 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	// --no-root-switch 关掉运行期换根能力（服务方不希望用户改根目录时使用）。
 	if noRootSwitch {
 		cfg.AllowRootSwitch = false
+	}
+	if noUserManage {
+		cfg.AllowUserManage = false
 	}
 
 	// -A 是各项权限的并集。
@@ -688,6 +715,9 @@ func usageText() string {
       --allow-keys           允许管理上传密钥（未指定时跟随 --allow-upload）
       --key-file <path>      上传密钥存储路径，默认 <用户配置目录>/gofs/keys.json；
                              置空则只保存在内存中，重启即失效
+      --user-file <path>     用户表存储路径，默认 <用户配置目录>/gofs/users.json；
+                             置空则只保存在内存中，重启即失效
+      --no-user-manage       禁止在页面上增删改用户（账号只能由 -a 定义）
       --allow-delete         允许删除
       --allow-search         允许搜索
       --allow-archive        允许目录打包为 zip 下载
@@ -773,6 +803,16 @@ func usageText() string {
   使用   curl -T f.txt -H 'X-Gofs-Upload-Key: <token>' http://host/path
          或 curl -T f.txt 'http://host/path?key=<token>'
          密钥只允许上传，且只能落在 scope 限定的目录内
+
+用户管理:
+  GET    /__gofs__/users                  列出账号（启动参数定义的会标 from_startup）
+  POST   /__gofs__/users                  请求体 {"name","password","rules":[{"path","perm"}]}
+  PUT    /__gofs__/users                  同上；省略 password 表示不改密码
+  DELETE /__gofs__/users?name=<name>      删除
+  perm   "rw" 可读写 / "r" 只读，按最长前缀匹配，未命中的路径一律拒绝
+  权限   只有「对服务根拥有读写权限」的账号能用；且服务必须已启用鉴权
+         （先用 -a 配一个账号，再来页面创建其他用户）
+  密码   只保存 PBKDF2-HMAC-SHA256 摘要，每用户独立随机盐，服务端拿不回明文
 
 服务设置（运行期，免重启）:
   GET    /__gofs__/settings               读取当前设置

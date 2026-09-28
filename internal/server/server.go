@@ -53,7 +53,8 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	authn, err := auth.Parse(cfg.AuthRules)
+	// 鉴权：启动参数给的规则 + 用户表（可运行期增删改）。
+	authn, err := auth.Open(cfg.AuthRules, cfg.UserFile)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/__gofs__/auth", s.handleAuth)
 	mux.HandleFunc("/__gofs__/keys", s.handleKeys)
 	mux.HandleFunc("/__gofs__/settings", s.handleSettings)
+	mux.HandleFunc("/__gofs__/users", s.handleUsers)
 	mux.HandleFunc("/__gofs__/extract", s.handleExtract)
 	mux.HandleFunc("/__gofs__/text", s.handleText)
 	mux.HandleFunc("/__gofs__/assets/", s.handleAsset)

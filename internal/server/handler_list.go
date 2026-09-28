@@ -78,6 +78,8 @@ type pageData struct {
 	// AllowSettings 表示当前用户可以在页面上修改服务级设置
 	// （切换根目录、调整上传上限）。
 	AllowSettings bool `json:"allow_settings"`
+	// AllowUsers 表示当前用户可以在页面上管理用户（增删改）。
+	AllowUsers bool `json:"allow_users"`
 }
 
 // extractLimits 把解压安全上限透给前端展示。
@@ -123,6 +125,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		AllowKeys:        s.cfg.AllowKeys && p.Perm == auth.PermReadWrite,
 		UploadMaxSize:    s.settings.UploadMaxSize(),
 		AllowSettings:    admin,
+		AllowUsers:       s.cfg.AllowUserManage && s.auth.Enabled() && admin,
 		Extract: extractLimits{
 			MaxTotalBytes: s.cfg.ExtractMaxTotal,
 			MaxFiles:      s.cfg.ExtractMaxFiles,

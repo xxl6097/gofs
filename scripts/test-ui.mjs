@@ -364,14 +364,15 @@ check('失效凭据已从本地清除', !dom3.window.sessionStorage.getItem('gof
 
 section('⑧ 跨模块接口完整性（漏暴露会让按钮「点了没反应」）');
 
-// app.js / editor.js / keys.js 之间靠 window.GOFS 通信。
+// app.js / editor.js / keys.js / users.js / settings.js 之间靠 window.GOFS 通信。
 // 任何一个接口漏暴露，调用处都会直接抛异常 —— 表现为「点了没反应」，
 // 而且控制台才看得到。这里把约定接口列出来逐个校验。
 const REQUIRED_G = [
   'apiFetch', 'authHeaders', 'toast', 'progressToast', 'openModal', 'confirm', 'btn',
   'fmtSize', 'fmtTime', 'fmtDuration', 'fileURL', 'raw', 'encPath', 'baseName', 'joinPath',
   'navigate', 'refresh', 'downloadFile', 'downloadEntry', 'state', 'data',
-  'can', 'allowKeys', 'canEdit', 'editMax', 'applySession', 'openEditor', 'openKeys'
+  'can', 'allowKeys', 'canEdit', 'editMax', 'applySession', 'openEditor', 'openKeys',
+  'openSettings', 'openUsers', 'allowUsers', 'modalFoot',
 ];
 
 const G0 = win.GOFS || {};
@@ -1174,6 +1175,226 @@ section('⑲ 文件夹上传：入口、目录结构保留、拖拽目录');
   if (leftover) {
     const x = leftover.querySelector('.modal-head button');
     if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  }
+}
+
+// ---------------------------------------------------------------- 20. 用户与权限
+
+section('⑳ 用户与权限：入口、表单、提交格式');
+
+// 用户管理会**改动服务端状态**（写 users.json），所以这一节不真的打服务器：
+// 把 fetch 换成桩，只断言界面行为与「发出去的请求长什么样」。
+// 服务端那一侧的 CRUD / 权限生效 / 落盘由 scripts/check-users.sh 覆盖。
+{
+  const RealFetch = win.fetch;
+  const calls = [];
+  const USERS = () => ({
+    users: [
+      { name: 'admin', rules: [{ path: '/', perm: 'rw' }], from_startup: true },
+      {
+        name: 'alice',
+        rules: [{ path: '/docs', perm: 'rw' }, { path: '/', perm: 'r' }],
+        from_startup: false,
+        created_at: '2026-09-28T10:00:00+08:00',
+        updated_at: '2026-09-28T10:00:00+08:00',
+      },
+    ],
+    anonymous: [{ path: '/public', perm: 'r' }],
+    editable: true,
+    user_file: '/tmp/gofs-users.json',
+    auth_on: true,
+  });
+
+  win.fetch = (input, init) => {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const method = (init && init.method) || 'GET';
+    calls.push({ method: method, url: url, body: init && init.body });
+    const payload = method === 'GET' ? USERS() : USERS();
+    // ⚠️ jsdom 没有实现 Response，只有 Node 的全局 Response 可用。
+    // 写成 new win.Response(...) 会抛异常，表现为「列表加载失败」。
+    return Promise.resolve(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+  };
+
+  check('顶栏有「用户」入口且可见（管理员）',
+    $('btn-users') && !$('btn-users').hidden);
+  check('「用户」按钮的提示说明了用途',
+    /用户|账号|权限/.test($('btn-users').title), $('btn-users').title);
+
+  $('btn-users').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  const opened = await waitFor(() => doc.querySelector('.key-list'), 5000, '用户面板');
+  // ⚠️ 面板出现 ≠ 列表渲染完：列表要等 fetch 回来才填。
+  // 只等 .key-list 会让紧随其后的「列出两个账号」看到 0 条。
+  await waitFor(() => doc.querySelectorAll('.key-item').length > 0, 5000, '账号列表渲染');
+  check('用户面板可以打开', opened && /用户与权限/.test(
+    doc.querySelectorAll('.modal-head div')[doc.querySelectorAll('.modal-head div').length - 1].textContent));
+
+  const items = Array.from(doc.querySelectorAll('.key-item'));
+  check('列出了两个账号', items.length === 2, '实际 ' + items.length);
+  const startupItem = items.find((i) => /admin/.test(i.textContent));
+  check('启动参数的账号标了「来自启动参数」',
+    !!startupItem && /来自启动参数/.test(startupItem.textContent));
+  check('启动参数的账号不能编辑（显示为只读）',
+    !!startupItem && /只读/.test(startupItem.textContent) &&
+    !Array.from(startupItem.querySelectorAll('.btn')).some((b) => /编辑/.test(b.textContent)));
+  const aliceItem = items.find((i) => /alice/.test(i.textContent));
+  check('用户表里的账号可以编辑与删除',
+    !!aliceItem &&
+    Array.from(aliceItem.querySelectorAll('.btn')).some((b) => /编辑/.test(b.textContent)) &&
+    Array.from(aliceItem.querySelectorAll('.btn')).some((b) => /删除/.test(b.textContent)));
+  check('权限以胶囊形式逐条列出（/docs 可读写）',
+    !!aliceItem && /\/docs/.test(aliceItem.textContent) && /可读写/.test(aliceItem.textContent));
+  check('匿名访问单独说明',
+    /匿名访问/.test(doc.querySelector('.modal-body').textContent));
+
+  // ---- 新建表单 ----
+  const newBtn = Array.from(doc.querySelectorAll('.modal-foot .btn'))
+    .find((b) => /新建用户/.test(b.textContent));
+  check('面板底部有「新建用户」', !!newBtn);
+  newBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+  const formOpen = await waitFor(() => doc.querySelector('.rule-list'), 5000, '新建用户表单');
+  check('新建表单打开', formOpen);
+  check('表单有用户名输入框',
+    !!doc.querySelector('.modal-body input.key-input[type=text]'));
+  const pwInput = doc.querySelector('.pw-row input');
+  check('密码框默认是遮蔽的', pwInput && pwInput.type === 'password');
+  check('默认给了一行权限（/ + 只读）',
+    doc.querySelectorAll('.rule-row').length === 1 &&
+    doc.querySelector('.rule-row .rule-path').value === '/',
+    doc.querySelector('.rule-row .rule-path').value);
+
+  const pwBtns = Array.from(doc.querySelectorAll('.pw-row .btn'));
+  const showBtn = pwBtns.find((b) => /显示/.test(b.textContent));
+  showBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  check('点「显示」后密码可见', pwInput.type === 'text');
+  const genBtn = pwBtns.find((b) => /随机生成/.test(b.textContent));
+  genBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  check('「随机生成」填入了足够长的随机密码',
+    pwInput.type === 'text' && pwInput.value.length >= 12, '长度 ' + pwInput.value.length);
+
+  // 权限行的增删
+  const addRule = Array.from(doc.querySelectorAll('.modal-body .btn'))
+    .find((b) => /添加路径/.test(b.textContent));
+  addRule.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  check('「添加路径」能加一行', doc.querySelectorAll('.rule-row').length === 2);
+  const lastRow = doc.querySelectorAll('.rule-row')[1];
+  lastRow.querySelector('.rule-path').value = '/public';
+  lastRow.querySelector('.rule-perm').value = 'r';
+  const delRow = Array.from(lastRow.querySelectorAll('.btn')).find((b) => /移除/.test(b.textContent));
+  delRow.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  check('「移除」能删掉一行', doc.querySelectorAll('.rule-row').length === 1);
+
+  // 填好再提交，检查发出去的请求
+  const nameInput = doc.querySelector('.modal-body input.key-input[type=text]');
+  nameInput.value = 'bob';
+  pwInput.type = 'text';
+  pwInput.value = 'bobpass123';
+  doc.querySelector('.rule-row .rule-path').value = '/docs';
+  doc.querySelector('.rule-row .rule-perm').value = 'rw';
+  calls.length = 0;
+  Array.from(doc.querySelectorAll('.modal-foot .btn'))
+    .find((b) => /^创建$/.test(b.textContent.trim()))
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await waitFor(() => calls.some((c) => c.method === 'POST'), 5000, '提交请求');
+
+  const post = calls.find((c) => c.method === 'POST');
+  check('新建用的是 POST /__gofs__/users',
+    !!post && /\/__gofs__\/users$/.test(post.url), post && (post.method + ' ' + post.url));
+  let sent = null;
+  try { sent = JSON.parse(post.body); } catch (e) { sent = null; }
+  check('请求体带上了用户名与密码',
+    !!sent && sent.name === 'bob' && sent.password === 'bobpass123',
+    post && String(post.body));
+  check('请求体里的规则是结构化的 {path, perm}',
+    !!sent && Array.isArray(sent.rules) && sent.rules.length === 1 &&
+    sent.rules[0].path === '/docs' && sent.rules[0].perm === 'rw',
+    post && String(post.body));
+
+  // ---- 编辑：用户名不可改、留空密码不覆盖 ----
+  await waitFor(() => !doc.querySelector('.rule-list'), 5000, '表单关闭');
+  const openRow = (name) => {
+    const item = Array.from(doc.querySelectorAll('.key-item'))
+      .find((i) => i.querySelector('.key-name') &&
+        i.querySelector('.key-name').textContent.indexOf(name) === 0);
+    return item || null;
+  };
+  const aliceAgain = openRow('alice');
+  if (!aliceAgain) {
+    // 列表没渲染出来时不要一路崩下去：记一条失败，后面的断言跳过。
+    check('列表里有 alice 可供编辑', false, '列表里找不到 alice');
+  } else {
+  Array.from(aliceAgain.querySelectorAll('.btn'))
+    .find((b) => /编辑/.test(b.textContent))
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await waitFor(() => doc.querySelector('.rule-list'), 5000, '编辑表单');
+
+  const editName = doc.querySelector('.modal-body input.key-input[type=text]');
+  check('编辑时用户名输入框被禁用（用户名就是身份）', editName.disabled === true);
+  check('编辑时密码框提示「留空则不修改」',
+    /留空/.test(doc.querySelector('.pw-row input').placeholder),
+    doc.querySelector('.pw-row input').placeholder);
+  check('编辑时带出了原有的两行权限',
+    doc.querySelectorAll('.rule-row').length === 2,
+    String(doc.querySelectorAll('.rule-row').length));
+
+  calls.length = 0;
+  Array.from(doc.querySelectorAll('.modal-foot .btn'))
+    .find((b) => /^保存$/.test(b.textContent.trim()))
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await waitFor(() => calls.some((c) => c.method === 'PUT'), 5000, '保存请求');
+  const put = calls.find((c) => c.method === 'PUT');
+  check('保存用的是 PUT', !!put && put.method === 'PUT');
+  let putBody = null;
+  try { putBody = JSON.parse(put.body); } catch (e) { putBody = null; }
+  check('没填新密码时不发送 password 字段（避免把密码清空）',
+    !!putBody && !('password' in putBody), put && String(put.body));
+  check('保存时带上了两行权限',
+    !!putBody && putBody.rules.length === 2, put && String(put.body));
+  }
+
+  // ---- 删除要先确认 ----
+  await waitFor(() => !doc.querySelector('.rule-list'), 5000, '表单关闭');
+  const alice3 = openRow('alice');
+  if (!alice3) {
+    check('列表里有 alice 可供删除', false, '列表里找不到 alice');
+  } else {
+  Array.from(alice3.querySelectorAll('.btn'))
+    .find((b) => /删除/.test(b.textContent))
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  const confirmShown = await waitFor(() => {
+    const masks = doc.querySelectorAll('.modal-mask');
+    return masks.length >= 2 && /删除用户 alice/.test(masks[masks.length - 1].textContent);
+  }, 3000, '删除确认框');
+  check('删除前弹出确认框', confirmShown);
+
+  calls.length = 0;
+  if (confirmShown) {
+    const masks = doc.querySelectorAll('.modal-mask');
+    const box = masks[masks.length - 1];
+    // 破坏性确认按钮是 .danger-solid（实心红）；.danger 是描边款，两者别混
+    check('删除确认框用的是实心红按钮',
+      !!box.querySelector('.btn.danger-solid'));
+    Array.from(box.querySelectorAll('.btn'))
+      .find((b) => /^删除$/.test(b.textContent.trim()))
+      .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await waitFor(() => calls.some((c) => c.method === 'DELETE'), 5000, '删除请求');
+  }
+  const del = calls.find((c) => c.method === 'DELETE');
+  check('删除用的是 DELETE 且带 name 参数',
+    !!del && /name=alice/.test(del.url), del && del.url);
+  }
+
+  win.fetch = RealFetch;
+  // 收尾：把所有还开着的弹窗关掉
+  for (let i = 0; i < 4; i++) {
+    const masks = doc.querySelectorAll('.modal-mask');
+    if (!masks.length) break;
+    const x = masks[masks.length - 1].querySelector('.modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
   }
 }
 

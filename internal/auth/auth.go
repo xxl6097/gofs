@@ -13,6 +13,12 @@
 //   - 多条规则按「最长前缀优先」匹配，未命中任何规则即拒绝。
 //
 // 鉴权只是权限上限，最终仍受全局 --allow-* 开关约束。
+//
+// 账号有两个来源，合并后一起参与匹配：
+//   - **启动参数**（-a / GOFS_AUTH）：启动后不可改，界面上标记为「来自启动参数」；
+//   - **用户表**（users.json，见 user.go）：页面上可增删改，密码只存 PBKDF2 摘要。
+//
+// 所有查询方法都是并发安全的（改动只发生在管理接口里，用写锁串行化）。
 package auth
 
 import (
@@ -20,6 +26,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Permission 表示对某个路径的授权级别。
@@ -34,6 +41,18 @@ const (
 	PermReadWrite
 )
 
+// String 返回权限的可读形式（也是 API / 界面里用的取值）。
+func (p Permission) String() string {
+	switch p {
+	case PermReadWrite:
+		return "rw"
+	case PermRead:
+		return "r"
+	default:
+		return "none"
+	}
+}
+
 // pathRule 为单条路径规则。
 type pathRule struct {
 	Path string
@@ -41,22 +60,47 @@ type pathRule struct {
 }
 
 // account 为单个账号（或匿名）的规则集合。
+//
+// 密码有两种形态，二选一：
+//   - password：明文，只可能来自启动参数（用户自己写在命令行里，加密存储没有意义）；
+//   - hash：PBKDF2 摘要，来自页面上创建的用户。
 type account struct {
 	Username string
-	Password string
+	password string
+	hash     *passwordHash
 	Rules    []pathRule
 	anon     bool
+
+	// fromStartup 标记账号来自 -a / GOFS_AUTH，界面上只读。
+	fromStartup bool
+	createdAt   int64 // Unix 秒；启动参数来的账号为 0
+	updatedAt   int64
 }
 
 // Authenticator 保存解析后的全部鉴权规则。
 type Authenticator struct {
-	accounts []*account
-	enabled  bool
+	// mu 保护下面所有字段。管理接口会改写它们，而每个请求都要读。
+	mu      sync.RWMutex
+	users   []*account // 来自用户表的账号（可改）
+	anonAcc *account   // 匿名规则（只有启动参数能定义）
+	static  []*account // 来自启动参数的账号（只读）
+	enabled bool
+
+	userFile string   // 用户表落盘路径，空串表示仅内存
+	pwCache  *pwCache // 「账号+密码」校验结果的缓存，见 pwCache 的注释
 }
 
 // Parse 解析全部鉴权规则串。
 func Parse(rules []string) (*Authenticator, error) {
-	a := &Authenticator{}
+	return Open(rules, "")
+}
+
+// Open 解析启动参数里的规则，并加载用户表。
+//
+// userFile 为空时用户表只存在于内存中（重启即失效），
+// 与上传密钥的 --key-file 语义保持一致。
+func Open(rules []string, userFile string) (*Authenticator, error) {
+	a := &Authenticator{userFile: userFile, pwCache: newPWCache()}
 	for _, raw := range rules {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -66,15 +110,77 @@ func Parse(rules []string) (*Authenticator, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := a.merge(acc); err != nil {
+		acc.fromStartup = true
+		if acc.anon {
+			if a.anonAcc != nil {
+				a.anonAcc.Rules = mergeRules(a.anonAcc.Rules, acc.Rules)
+				continue
+			}
+			a.anonAcc = acc
+			continue
+		}
+		if err := a.mergeStatic(acc); err != nil {
 			return nil, err
 		}
 	}
-	a.enabled = len(a.accounts) > 0
+
+	if userFile != "" {
+		users, err := loadUsers(userFile)
+		if err != nil {
+			return nil, err
+		}
+		for _, u := range users {
+			acc, err := u.toAccount()
+			if err != nil {
+				return nil, fmt.Errorf("用户表 %s 中的账号 %q 无效: %w", userFile, u.Name, err)
+			}
+			// 与启动参数重名时**以启动参数为准**并跳过，而不是启动失败：
+			// 用户表的文件可能比命令行先存在，谁对谁错很难说，但
+			// 「命令行是权威」这条规则简单且不会把服务卡死。
+			if a.findStatic(acc.Username) != nil {
+				continue
+			}
+			a.users = append(a.users, acc)
+		}
+	}
+
+	a.refreshEnabled()
 	if !a.enabled {
 		return nil, nil
 	}
 	return a, nil
+}
+
+// refreshEnabled 重新计算「是否有任何鉴权规则」。调用方需持有写锁。
+func (a *Authenticator) refreshEnabled() {
+	a.enabled = a.anonAcc != nil || len(a.static) > 0 || len(a.users) > 0
+}
+
+// findStatic 按用户名查启动参数里的账号。调用方需持有锁。
+func (a *Authenticator) findStatic(name string) *account {
+	for _, acc := range a.static {
+		if acc.Username == name {
+			return acc
+		}
+	}
+	return nil
+}
+
+// findUser 按用户名查用户表里的账号。调用方需持有锁。
+func (a *Authenticator) findUser(name string) *account {
+	for _, acc := range a.users {
+		if acc.Username == name {
+			return acc
+		}
+	}
+	return nil
+}
+
+// mergeRules 合并两组路径规则，保持「长的在前」，便于最长前缀匹配。
+func mergeRules(dst, src []pathRule) []pathRule {
+	out := append(append([]pathRule{}, dst...), src...)
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i].Path) > len(out[j].Path) })
+	return out
 }
 
 // parseRule 解析单条规则串。
@@ -92,7 +198,7 @@ func parseRule(raw string) (*account, error) {
 	} else {
 		if i := strings.Index(cred, ":"); i >= 0 {
 			acc.Username = cred[:i]
-			acc.Password = cred[i+1:]
+			acc.password = cred[i+1:]
 		} else {
 			acc.Username = cred
 		}
@@ -114,9 +220,16 @@ func parseRule(raw string) (*account, error) {
 		case strings.HasSuffix(item, ":rw"):
 			perm = PermReadWrite
 			item = strings.TrimSuffix(item, ":rw")
-		case strings.HasSuffix(item, ":ro"):
+		case strings.HasSuffix(item, ":ro"), strings.HasSuffix(item, ":r"):
+			// :ro 是 dufs 的写法；:r 是页面上「只读」的取值，一并接受 ——
+			// 否则 `bob:pw@/docs:r` 会被当成一个叫「/docs:r」的目录，
+			// bob 就莫名其妙什么权限都没有了（这种静默失败很难排查）。
 			perm = PermRead
-			item = strings.TrimSuffix(item, ":ro")
+			if strings.HasSuffix(item, ":ro") {
+				item = strings.TrimSuffix(item, ":ro")
+			} else {
+				item = strings.TrimSuffix(item, ":r")
+			}
 		}
 		p := normalizePath(item)
 		acc.Rules = append(acc.Rules, pathRule{Path: p, Perm: perm})
@@ -131,21 +244,16 @@ func parseRule(raw string) (*account, error) {
 	return acc, nil
 }
 
-// merge 把新账号并入集合；同名账号的规则会累加。
-func (a *Authenticator) merge(in *account) error {
-	for _, exist := range a.accounts {
-		if exist.anon == in.anon && exist.Username == in.Username {
-			if !in.anon && exist.Password != in.Password {
-				return fmt.Errorf("账号 %q 出现了不一致的密码", in.Username)
-			}
-			exist.Rules = append(exist.Rules, in.Rules...)
-			sort.SliceStable(exist.Rules, func(i, j int) bool {
-				return len(exist.Rules[i].Path) > len(exist.Rules[j].Path)
-			})
-			return nil
+// mergeStatic 把新账号并入启动参数集合；同名账号的规则会累加。
+func (a *Authenticator) mergeStatic(in *account) error {
+	if exist := a.findStatic(in.Username); exist != nil {
+		if exist.password != in.password {
+			return fmt.Errorf("账号 %q 出现了不一致的密码", in.Username)
 		}
+		exist.Rules = mergeRules(exist.Rules, in.Rules)
+		return nil
 	}
-	a.accounts = append(a.accounts, in)
+	a.static = append(a.static, in)
 	return nil
 }
 
@@ -165,7 +273,14 @@ func normalizePath(p string) string {
 }
 
 // Enabled 表示是否存在任何鉴权规则。
-func (a *Authenticator) Enabled() bool { return a != nil && a.enabled }
+func (a *Authenticator) Enabled() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.enabled
+}
 
 // Verify 判断一组凭据是否对应某个已知的具名账号。
 //
@@ -176,18 +291,50 @@ func (a *Authenticator) Verify(username, password string) bool {
 	if !a.Enabled() {
 		return true
 	}
-	for _, acc := range a.accounts {
-		if acc.anon || acc.Username != username {
-			continue
-		}
-		return subtleEqual(acc.Password, password)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if acc := a.lookupAccount(username); acc != nil {
+		return a.passwordMatches(acc, password)
 	}
 	return false
+}
+
+// lookupAccount 按用户名找账号（先用户表再启动参数，重名以启动参数为准）。
+// 调用方需持有锁。
+func (a *Authenticator) lookupAccount(username string) *account {
+	if username == "" {
+		return nil
+	}
+	if acc := a.findUser(username); acc != nil {
+		if a.findStatic(username) == nil {
+			return acc
+		}
+	}
+	return a.findStatic(username)
 }
 
 // subtleEqual 做定长时间比较，避免通过响应耗时逐字节猜测密码。
 func subtleEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// passwordMatches 校验密码。明文账号直接定长比较；用户表的账号走 PBKDF2。
+//
+// 这里带一层结果缓存：PBKDF2 是按「故意很慢」设计的，而 HTTP Basic 意味着
+// **每个请求都要验一次密码**，真按 21 万轮算的话每个请求要多花约 100ms。
+// 缓存键是「用户名 + 密码」的摘要，命中就完全跳过计算；
+// 任何一次用户表改动都会清空缓存（见 invalidate()）。
+func (a *Authenticator) passwordMatches(acc *account, password string) bool {
+	if acc.hash == nil {
+		return subtleEqual(acc.password, password)
+	}
+	key := pwCacheKey(acc.Username, password)
+	if ok, hit := a.pwCache.get(key); hit {
+		return ok
+	}
+	ok := acc.hash.verify(password)
+	a.pwCache.put(key, ok)
+	return ok
 }
 
 // HasAnyWrite 判断该账号是否在**任意**一条规则的路径上具备写权限。
@@ -200,25 +347,17 @@ func (a *Authenticator) HasAnyWrite(username, password string, authenticated boo
 	if !a.Enabled() {
 		return true
 	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	var acc *account
 	if authenticated {
-		for _, x := range a.accounts {
-			if x.anon || x.Username != username {
-				continue
-			}
-			if !subtleEqual(x.Password, password) {
-				return false
-			}
-			acc = x
-			break
+		acc = a.lookupAccount(username)
+		if acc != nil && !a.passwordMatches(acc, password) {
+			return false
 		}
 	} else {
-		for _, x := range a.accounts {
-			if x.anon {
-				acc = x
-				break
-			}
-		}
+		acc = a.anonAcc
 	}
 	if acc == nil {
 		return false
@@ -237,23 +376,22 @@ func (a *Authenticator) Lookup(urlPath, username, password string, authenticated
 	if !a.Enabled() {
 		return PermReadWrite
 	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	// 先尝试具名账号，再回落到匿名规则。
 	if authenticated {
-		for _, acc := range a.accounts {
-			if acc.anon || acc.Username != username {
-				continue
-			}
-			if acc.Password != password {
-				return PermNone
-			}
-			return acc.match(urlPath)
+		acc := a.lookupAccount(username)
+		if acc == nil {
+			return PermNone
 		}
-		return PermNone
+		if !a.passwordMatches(acc, password) {
+			return PermNone
+		}
+		return acc.match(urlPath)
 	}
-	for _, acc := range a.accounts {
-		if acc.anon {
-			return acc.match(urlPath)
-		}
+	if a.anonAcc != nil {
+		return a.anonAcc.match(urlPath)
 	}
 	return PermNone
 }
@@ -263,10 +401,10 @@ func (a *Authenticator) NeedsAuth(urlPath string) bool {
 	if !a.Enabled() {
 		return false
 	}
-	for _, acc := range a.accounts {
-		if acc.anon && acc.match(urlPath) != PermNone {
-			return false
-		}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.anonAcc != nil && a.anonAcc.match(urlPath) != PermNone {
+		return false
 	}
 	return true
 }
