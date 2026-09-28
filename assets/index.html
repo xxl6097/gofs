@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>gofs</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h6l2 2h8v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="__GOFS_ASSETS__style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="__GOFS_BASE__/" title="回到根目录">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    <span>gofs</span>
+  </a>
+
+  <nav class="breadcrumb" id="breadcrumb" aria-label="路径"></nav>
+
+  <div class="topbar-actions">
+    <div class="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="search-input" type="search" placeholder="搜索文件…" autocomplete="off" spellcheck="false">
+    </div>
+    <button class="btn icon" id="btn-theme" title="切换主题" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+    </button>
+    <button class="btn icon" id="btn-refresh" title="刷新" type="button">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+    </button>
+    <button class="btn primary" id="btn-upload" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
+      <span>上传</span>
+    </button>
+    <button class="btn" id="btn-mkdir" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+      <span>新建</span>
+    </button>
+    <button class="btn" id="btn-keys" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m10.6 12.4 8.4-8.4"/><path d="M15.5 4.5h4v4"/></svg>
+      <span>密钥</span>
+    </button>
+    <div class="user" id="user-chip" hidden></div>
+  </div>
+</header>
+
+<main class="content">
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar-left">
+      <label class="checkbox">
+        <input type="checkbox" id="check-all">
+        <span>全选</span>
+      </label>
+      <span class="stat" id="stat"></span>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn ghost" id="btn-zip" type="button" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 9v7"/><path d="m9 13 3 3 3-3"/></svg>
+        <span>打包下载</span>
+      </button>
+      <button class="btn danger" id="btn-delete-sel" type="button" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 12h10l1-12"/></svg>
+        <span>删除所选</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="listing" id="table">
+      <thead>
+        <tr>
+          <th class="col-check"></th>
+          <th class="col-name sortable" data-sort="name">名称</th>
+          <th class="col-size sortable" data-sort="size">大小</th>
+          <th class="col-time sortable" data-sort="mtime">修改时间</th>
+          <th class="col-ops">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden></div>
+  </div>
+</main>
+
+<footer class="footer">
+  <span id="footer-left">gofs</span>
+  <span id="footer-right"></span>
+</footer>
+
+<div class="drop-hint" id="drop-hint">
+  <div class="drop-hint-inner">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
+    <strong>松开即可上传</strong>
+    <span id="drop-target">当前目录</span>
+  </div>
+</div>
+
+<div class="modal-root" id="modal-root"></div>
+<div class="toasts" id="toasts"></div>
+<input type="file" id="file-input" multiple hidden>
+
+<script id="gofs-data" type="application/json">__GOFS_DATA__</script>
+<script src="__GOFS_ASSETS__app.js"></script>
+<script src="__GOFS_ASSETS__editor.js"></script>
+<script src="__GOFS_ASSETS__keys.js"></script>
+</body>
+</html>
