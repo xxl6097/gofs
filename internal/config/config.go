@@ -170,9 +170,9 @@ type Config struct {
 
 	// UploadMaxSize 为单次上传允许的最大字节数，0 表示不限制。
 	UploadMaxSize int64
-	// UploadReadTimeout 为单次上传允许的最长读取时间。
+	// UploadReadTimeout 为单次上传「无进展」多久后断开。
 	UploadReadTimeout time.Duration
-	// DownloadTimeout 为单次下载允许的最长写出时间。
+	// DownloadTimeout 为单次下载「无进展」多久后断开；0 表示不限制。
 	DownloadTimeout time.Duration
 	// ListMaxEntries 为单次目录列举返回的最大条目数。
 	ListMaxEntries int
@@ -413,7 +413,7 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "日志输出文件，默认 stdout")
 	fs.StringVar(&cfg.Compress, "compress", cfg.Compress, "打包压缩级别：none/low/medium/high")
 	fs.StringVar(&cfg.UploadDateLayout, "upload-date-layout", cfg.UploadDateLayout,
-		"上传时自动归档的日期目录布局（Go 时间布局），如 2006/01/02 或 2006-01；置空则关闭")
+		"上传时自动归档的日期目录布局（Go 时间布局），如 2006/01/02；只对传到服务根目录的上传生效")
 	fs.BoolVar(&noUploadDated, "no-upload-dated", false, "关闭上传按日期自动归档（等同于 --upload-date-layout=''）")
 	fs.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "HTTPS 证书路径")
 	fs.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "HTTPS 私钥路径")
@@ -501,7 +501,13 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		if specified["upload-date-layout"] {
 			return nil, errors.New("--no-upload-dated 与 --upload-date-layout 不能同时使用")
 		}
-		cfg.UploadDateLayout = ""	}
+		cfg.UploadDateLayout = ""
+	}
+
+	// --no-root-switch 关掉运行期换根能力（服务方不希望用户改根目录时使用）。
+	if noRootSwitch {
+		cfg.AllowRootSwitch = false
+	}
 
 	// -A 是各项权限的并集。
 	if cfg.AllowAll {
@@ -697,8 +703,12 @@ func usageText() string {
       --compress <level>     打包压缩级别：none/low/medium/high，默认 low
       --upload-date-layout <layout>
                              上传时自动归档的日期目录布局（Go 时间布局字面量），
-                             默认 "2006/01/02"，即在目标目录下按 年/月/日 建三级目录；
+                             默认 "2006/01/02"，即按 年/月/日 建三级目录；
                              置空（--upload-date-layout=""）则关闭
+                             ★ 只对「直接传到服务根目录」的上传生效：
+                               /pic.jpg      → /2026/09/28/pic.jpg
+                               /sub/pic.jpg  → /sub/pic.jpg（子目录原地放）
+                             单次可覆盖：?dated=0 跳过、?dated=1 强制归档
       --no-upload-dated      关闭上传按日期自动归档
       --tls-cert <path>      HTTPS 证书
       --tls-key <path>       HTTPS 私钥
@@ -710,10 +720,12 @@ func usageText() string {
 
 防护选项（默认即为较安全的取值，一般无需调整）:
       --upload-max-size <n>  单次上传的最大字节数，默认 10GiB；0 表示不限制
+                             （登录后也可以在页面的「服务设置」里改）
       --upload-read-timeout <d>
-                             单次上传的最长读取时间，默认 30m
-      --download-timeout <d> 单次下载的最长写出时间，默认 30m；0 表示不限制
-                             （防的是「连上后不读数据」的客户端长期占住名额）
+                            上传「连续多久没有进展」就断开，默认 2m
+                            （只要还在往里传就不会被打断，防的是占着名额不发的连接）
+      --download-timeout <d> 下载「连续多久没有进展」就断开，默认 2m；0 表示不限制
+                            （防的是「连上后不读数据」的客户端长期占住名额）
       --list-max-entries <n> 单次目录列举最多返回多少条，默认 20000；0 表示不限制
       --archive-max-items <n> 单次打包的条目数上限，默认 200000
       --archive-max-bytes <n> 单次打包的原始字节上限，默认 50GiB
@@ -731,6 +743,10 @@ func usageText() string {
       --no-html-sandbox      关闭 HTML/SVG/XML 的 CSP sandbox
                              （默认开启：上传的网页在不透明源里渲染，
                               脚本读不到本站数据，堵住存储型 XSS）
+      --no-root-switch       禁止登录后在页面上切换服务根目录
+      --root-allow <prefix>  允许把服务根目录切换到的路径前缀，可重复指定
+                             （默认可切换范围 = 启动根目录的父目录，
+                               比如启动根是 /srv/data 时可切到 /srv/*）
 
 示例:
   gofs                                 以只读模式服务当前目录
@@ -757,6 +773,13 @@ func usageText() string {
   使用   curl -T f.txt -H 'X-Gofs-Upload-Key: <token>' http://host/path
          或 curl -T f.txt 'http://host/path?key=<token>'
          密钥只允许上传，且只能落在 scope 限定的目录内
+
+服务设置（运行期，免重启）:
+  GET    /__gofs__/settings               读取当前设置
+  PUT    /__gofs__/settings               请求体 {"root":"/srv/data","upload_max_size":10737418240}
+                                          upload_max_size 为 0 表示不限制
+  权限   需要对服务根拥有读写权限（否则 403）；受 --no-root-switch /
+         --root-allow 约束，可切换范围之外的路径会被拒绝（400）
 
 认证:
   页面使用 HTTP Basic 认证。浏览器导航未登录时返回应用外壳（200），

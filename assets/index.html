@@ -33,6 +33,10 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
       <span>上传</span>
     </button>
+    <button class="btn" id="btn-upload-dir" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5"/><path d="m9.5 13.5 2.5-2.5 2.5 2.5"/></svg>
+      <span>文件夹</span>
+    </button>
     <button class="btn" id="btn-mkdir" type="button" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
       <span>新建</span>
@@ -40,6 +44,10 @@
     <button class="btn" id="btn-keys" type="button" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m10.6 12.4 8.4-8.4"/><path d="M15.5 4.5h4v4"/></svg>
       <span>密钥</span>
+    </button>
+    <button class="btn" id="btn-settings" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4z"/></svg>
+      <span>设置</span>
     </button>
     <div class="user" id="user-chip" hidden></div>
   </div>
@@ -81,6 +89,20 @@
     </table>
     <div class="empty" id="empty" hidden></div>
   </div>
+
+  <!-- 常驻的拖拽投放区。
+       只靠「拖进来时才出现的浮层」不够：用户在没有开始拖之前，
+       根本不知道这个页面支持拖拽上传。这里把能力写在页面上，
+       并明确标出文件会落到哪个目录。 -->
+  <div class="drop-zone" id="drop-zone" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
+    <div class="drop-zone-text">
+      <strong>把文件或文件夹拖到这里即可上传</strong>
+      <span id="drop-zone-target">当前目录</span>
+    </div>
+    <button class="btn" id="drop-zone-pick" type="button">选择文件…</button>
+    <button class="btn" id="drop-zone-dir" type="button">选择文件夹…</button>
+  </div>
 </main>
 
 <footer class="footer">
@@ -93,16 +115,23 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
     <strong>松开即可上传</strong>
     <span id="drop-target">当前目录</span>
+    <span class="drop-note" id="drop-note"></span>
   </div>
 </div>
 
 <div class="modal-root" id="modal-root"></div>
 <div class="toasts" id="toasts"></div>
 <input type="file" id="file-input" multiple hidden>
+<!-- webkitdirectory：让浏览器把「选中的整个目录」递归展开成文件列表，
+     每个文件带 webkitRelativePath（形如 apps/web/index.html）。
+     非标准属性，Chromium / Safari / Firefox 现在都支持；不支持的浏览器
+     会退化成普通的文件选择（用户仍可拖拽文件夹）。 -->
+<input type="file" id="dir-input" webkitdirectory directory multiple hidden>
 
 <script id="gofs-data" type="application/json">__GOFS_DATA__</script>
 <script src="__GOFS_ASSETS__app.js"></script>
 <script src="__GOFS_ASSETS__editor.js"></script>
 <script src="__GOFS_ASSETS__keys.js"></script>
+<script src="__GOFS_ASSETS__settings.js"></script>
 </body>
 </html>

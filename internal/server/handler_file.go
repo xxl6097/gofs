@@ -21,20 +21,34 @@ import (
 const maxFormMemory = 32 << 20
 
 // applyUploadLayout 依据配置把上传目标重写到日期归档目录下。
-// 例如 urlPath="/photos/a.jpg"、布局为 2006/01/02、当前为 2026-09-28 时，
-// 返回 "/photos/2026/09/28/a.jpg"。未开启归档时原样返回归一化后的路径。
 //
-// 追加查询参数 ?dated=0（或 false/no/off）可让本次上传跳过归档，
-// 便于脚本把文件放到指定位置。
+// **归档只在「直接传到服务根目录」时生效**：urlPath="/pic.jpg" 会变成
+// "/2026/09/28/pic.jpg"。传到子目录（"/sub/a.txt"、"docs/b.txt"）时原样落盘 ——
+// 子目录本身通常已经是有意义的分层（项目名、月份、业务线…），再往里套一层
+// 年/月/日 只会让目录越陷越深，反而不好找。
+//
+// 查询参数可以覆盖这个默认行为：
+//
+//	?dated=0（false/no/off）  跳过归档，脚本要精确指定落点时用
+//	?dated=1（true/yes/on）   强制归档，即使在子目录里
 func (s *Server) applyUploadLayout(r *http.Request, urlPath string) string {
 	clean := fsutil.CleanURLPath(urlPath)
 	dateDir := s.cfg.UploadDateDir(time.Now())
 	if dateDir == "" {
 		return clean
 	}
-	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("dated"))) {
+	dated := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("dated")))
+	switch dated {
 	case "0", "false", "no", "off":
 		return clean
+	case "1", "true", "yes", "on":
+		// 显式要求归档，位置校验交给下面的调用方。
+	default:
+		// 只在根目录的直属文件上归档。path.Dir("/a.txt") == "/"，
+		// 而 path.Dir("/sub/a.txt") == "/sub"。
+		if path.Dir(clean) != "/" {
+			return clean
+		}
 	}
 	dir, name := path.Split(clean)
 	return path.Join(dir, dateDir, name)
@@ -73,7 +87,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 只有连接真正停滞（比如每秒发几个字节占着名额）才会被断开。
 	withReadProgress(w, r, s.cfg.UploadReadTimeout)
 	// 单文件大小上限：没有它，一个请求就能把磁盘写满。
-	if !requestBody(w, r, s.cfg.UploadMaxSize, "上传内容") {
+	// 取值走 settings 而不是 cfg —— 它可以在页面上被管理员随时调整。
+	maxSize := s.settings.UploadMaxSize()
+	if !requestBody(w, r, maxSize, "上传内容") {
 		return
 	}
 
@@ -135,9 +151,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 					s.logger.Errorf("清理超限的半截文件 %s 失败: %v", abs, rmErr)
 				}
 			}
-			s.logger.Errorf("上传 %s 超过单文件上限 %d 字节，已中止", destPath, s.cfg.UploadMaxSize)
-			http.Error(w, fmt.Sprintf("413 Payload Too Large: 超过单文件上限 %s（%d 字节）",
-				humanSize(s.cfg.UploadMaxSize), s.cfg.UploadMaxSize), http.StatusRequestEntityTooLarge)
+			s.logger.Errorf("上传 %s 超过单文件上限 %d 字节，已中止", destPath, maxSize)
+			http.Error(w, fmt.Sprintf("413 Payload Too Large: 超过单文件上限 %s（%d 字节）"+
+				"；管理员可在「服务设置」里调整该上限",
+				humanSize(maxSize), maxSize), http.StatusRequestEntityTooLarge)
 			return
 		}
 		// 其它中断（网络断开等）：已写入部分保留，便于客户端续传。
@@ -184,14 +201,15 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 	}
 	defer release()
 	withReadProgress(w, r, s.cfg.UploadReadTimeout)
-	if !requestBody(w, r, s.cfg.UploadMaxSize, "表单内容") {
+	formMax := s.settings.UploadMaxSize()
+	if !requestBody(w, r, formMax, "表单内容") {
 		return
 	}
 
 	if err := r.ParseMultipartForm(maxFormMemory); err != nil {
 		if isBodyTooLarge(err) {
 			http.Error(w, fmt.Sprintf("413 Payload Too Large: 表单总量超过上限 %s",
-				humanSize(s.cfg.UploadMaxSize)), http.StatusRequestEntityTooLarge)
+				humanSize(formMax)), http.StatusRequestEntityTooLarge)
 			return
 		}
 		s.writeErr(w, err)
@@ -212,13 +230,17 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		}
 		destDir = path.Join(destDir, sub)
 	}
-	// 表单里可用 dated=0 让本次上传跳过归档。
-	skipDated := false
+	// 归档的判断与 handlePut 保持一致：只在「直接传到根目录」时按年月日建三级目录，
+	// 传到子目录（含表单显式指定的 path）就原地放。
+	// dated 字段可以覆盖：0 跳过归档，1 强制归档。
+	var skipDated, forceDated bool
 	switch strings.ToLower(strings.TrimSpace(r.FormValue("dated"))) {
 	case "0", "false", "no", "off":
 		skipDated = true
+	case "1", "true", "yes", "on":
+		forceDated = true
 	}
-	if !skipDated {
+	if !skipDated && (forceDated || destDir == "/") {
 		if dateDir := s.cfg.UploadDateDir(time.Now()); dateDir != "" {
 			destDir = path.Join(destDir, dateDir)
 		}

@@ -78,6 +78,7 @@ const dom = await JSDOM.fromURL(BASE + '/', {
   pretendToBeVisual: true,
   beforeParse(win) {
     installFetch(win);
+    if (process.env.DEBUG_NAV) win.__navDebug = true;
   }
 });
 
@@ -162,10 +163,15 @@ check('目录行有「打开」', dirRows.length === 0 || allOps.has('打开'));
 
 section('④ 点击可编辑文件应打开编辑器');
 
-const editRow = rows.find((tr) => {
-  const p = tr.dataset.path || '';
-  return /\.(md|txt|json|xml|html|go|ya?ml)$/i.test(p);
-});
+// 可在线编辑的文本类文件
+const TEXT_LIKE = /\.(md|markdown|txt|json|xml|html?|ya?ml|go|css|js|ts|log|ini|conf|sh|sql|csv)$/i;
+// 其中「可预览」的只有这几类：编辑器会多出一个 预览 / 格式化 / 校验 按钮。
+// 选择时优先挑可预览的文件，否则 ⑤ 段就拿不到那个按钮（那是文件类型决定的，
+// 不是功能缺失）—— 之前正是因为根目录只有 notes.txt 才误报失败。
+const PREVIEWABLE = /\.(md|markdown|json|xml|html?|ya?ml)$/i;
+
+const textRows = rows.filter((tr) => TEXT_LIKE.test(tr.dataset.path || ''));
+const editRow = textRows.find((tr) => PREVIEWABLE.test(tr.dataset.path || '')) || textRows[0];
 
 if (!editRow) {
   check('找到可编辑文件', false, '目录里没有文本文件');
@@ -199,7 +205,12 @@ section('⑤ 预览面板（Markdown / JSON）');
 if (doc.querySelector('.ed-root')) {
   const tools = Array.from(doc.querySelectorAll('.ed-tools .btn'));
   const pvBtn = tools.find((b) => /预览|格式化|校验/.test(b.textContent));
-  check('存在预览入口', !!pvBtn, tools.map((b) => b.textContent).join(', '));
+  const openedPath = doc.querySelector('.ed-root') && editRow ? editRow.dataset.path : '';
+  const expectPreview = PREVIEWABLE.test(openedPath);
+  check(expectPreview
+    ? '存在预览入口（' + openedPath + '）'
+    : '纯文本文件不提供预览入口（符合预期）', expectPreview ? !!pvBtn : !pvBtn,
+    tools.map((b) => b.textContent).join(', '));
 
   if (pvBtn) {
     pvBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
@@ -557,6 +568,613 @@ const leftover = doc.querySelector('.modal-mask');
 if (leftover) {
   const closeBtn = leftover.querySelector('.modal-head button');
   if (closeBtn) closeBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+}
+
+// ---------------------------------------------------------------- 12. 页脚 / 统计 / 拖拽 / 设置
+
+section('⑫ 页脚与统计（登录后不能再显示「只读模式」）');
+
+{
+  const foot = $('footer-right').textContent;
+  check('页脚显示已登录的用户名', /已登录\s+admin/.test(foot), foot);
+  check('页脚不再出现「只读模式」', !/只读模式/.test(foot), foot);
+  check('页脚列出了实际具备的能力',
+    /可上传/.test(foot) && /可在线编辑/.test(foot) && /可在线解压/.test(foot), foot);
+
+  const stat = () => $('stat').textContent;
+  check('统计给出目录数与文件数', /个目录/.test(stat()) && /个文件/.test(stat()),
+    stat());
+  check('统计给出文件合计大小', /文件合计/.test(stat()), stat());
+  check('未选中时不显示「已选」', !/已选/.test(stat()), stat());
+
+  // 勾选一个普通文件，统计里应当出现「已选 …」，并且仍然保留整个目录的规模。
+  const fileRow = Array.from(doc.querySelectorAll('#tbody tr'))
+    .find((tr) => !tr.querySelector('.name-cell.dir'));
+  if (fileRow) {
+    const cb = fileRow.querySelector('input[type=checkbox]');
+    cb.checked = true;
+    cb.dispatchEvent(new win.Event('change', { bubbles: true }));
+
+    const picked = stat();
+    check('选中后统计出现「已选 1 项」', /已选\s+1\s+项/.test(picked), picked);
+    check('选中后仍保留整个目录的规模', /个目录/.test(picked) && /个文件/.test(picked), picked);
+    check('选中项自身的大小也有给出', /已选\s+1\s+项（[^）]*\d/.test(picked), picked);
+
+    cb.checked = false;
+    cb.dispatchEvent(new win.Event('change', { bubbles: true }));
+    check('取消选中后统计回到目录规模', !/已选/.test(stat()), stat());
+  } else {
+    check('目录里应至少有一个文件行用于统计测试', false, '未找到');
+  }
+
+  // 统计的口径必须写清楚，否则「共多大」会被误读为含子目录。
+  check('统计带上了口径说明（title）',
+    /不含子目录/.test($('stat').title || ''), $('stat').title);
+}
+
+section('⑬ 拖拽上传：提示、落点与上传速度');
+
+{
+  // ---- 常驻投放区：不拖的时候也要能看见「支持拖拽」----
+  const zone = $('drop-zone');
+  check('常驻投放区可见（有写权限时）', zone && !zone.hidden);
+  check('投放区写明文件会落到哪个目录',
+    /存入\s+\//.test($('drop-zone-target').textContent),
+    $('drop-zone-target').textContent);
+  check('上传按钮的提示里也说明了落点',
+    /存入/.test($('btn-upload').title), $('btn-upload').title);
+
+  // ---- 拖拽浮层 ----
+  const makeDragEvent = (type, dt) => {
+    const ev = new win.Event(type, { bubbles: true });
+    Object.defineProperty(ev, 'dataTransfer', { value: dt });
+    return ev;
+  };
+
+  // 真实的 DataTransferItem 一定带 kind（'file' / 'string'）；
+  // 只有 kind === 'file' 才算条目，否则拖选中的文字也会被算进去。
+  win.dispatchEvent(makeDragEvent('dragenter', {
+    types: ['Files'],
+    items: [{ kind: 'file' }, { kind: 'file' }, { kind: 'file' }],
+  }));
+  check('拖入时出现全屏提示浮层', $('drop-hint').classList.contains('on'));
+  check('浮层写明落点', /存入\s+\//.test($('drop-target').textContent),
+    $('drop-target').textContent);
+  check('浮层给出条目数量', /3 项/.test($('drop-note').textContent),
+    $('drop-note').textContent);
+  check('浮层给出单文件上限', /上限|不限/.test($('drop-note').textContent),
+    $('drop-note').textContent);
+  check('常驻投放区同时高亮', $('drop-zone').classList.contains('on'));
+
+  win.dispatchEvent(makeDragEvent('dragleave', {}));
+  check('离开后浮层收起', !$('drop-hint').classList.contains('on'));
+
+  // ---- 用假的 XHR 走一遍上传，验证「进度 + 速度」 ----
+  const RealXHR = win.XMLHttpRequest;
+  class FakeXHR {
+    constructor() { this.upload = {}; this.status = 0; this._h = {}; }
+    open(m, u) { this.method = m; this.url = u; }
+    setRequestHeader(k, v) { this._h[k] = v; }
+    getResponseHeader(k) {
+      return String(k).toLowerCase() === 'x-gofs-offset' ? String(this._size || 0) : null;
+    }
+    send(body) {
+      const size = (body && body.size) || 0;
+      this._size = size;
+      const up = this.upload;
+      // 两次进度事件之间隔 400ms —— 速度估算要求采样间隔够长，
+      // 否则会被当成噪声丢掉（这正是我们希望的行为）。
+      setTimeout(() => up.onprogress && up.onprogress(
+        { lengthComputable: true, loaded: Math.floor(size / 2), total: size }), 30);
+      setTimeout(() => up.onprogress && up.onprogress(
+        { lengthComputable: true, loaded: size, total: size }), 440);
+      setTimeout(() => {
+        this.status = 201;
+        this.responseText = 'created';
+        if (this.onload) this.onload();
+      }, 620);
+    }
+  }
+  win.XMLHttpRequest = FakeXHR;
+
+  const fake = new win.File([new Uint8Array(512 * 1024)], 'speed-test.bin');
+  win.dispatchEvent(makeDragEvent('drop', { types: ['Files'], files: [fake] }));
+
+  check('松手后浮层立即收起', !$('drop-hint').classList.contains('on'));
+
+  const gotPanel = await waitFor(() => doc.querySelector('.progress-wrap'), 4000, '上传弹窗');
+  check('出现上传进度弹窗', gotPanel);
+
+  if (gotPanel) {
+    const bodyText = doc.querySelector('.modal-body').textContent;
+    check('进度弹窗写明了落点目录', /存入/.test(bodyText), bodyText.slice(0, 90));
+    check('进度弹窗写明了单文件上限', /单文件/.test(bodyText), bodyText.slice(0, 90));
+
+    const metaR = doc.querySelector('.progress-meta span:last-child');
+    const gotSpeed = await waitFor(() => /\/s/.test(metaR.textContent), 4000, '速度出现');
+    check('进度里显示了上传速度', gotSpeed, metaR.textContent);
+    check('进度里给出了剩余时间或总量',
+      /剩余|MiB|KiB|B/.test(metaR.textContent), metaR.textContent);
+  }
+
+  await new Promise((r) => setTimeout(r, 900));
+  win.XMLHttpRequest = RealXHR;
+
+  // 收尾：关掉可能还留着的进度弹窗。
+  const leftover = doc.querySelector('.modal-mask');
+  if (leftover) {
+    const x = leftover.querySelector('.modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  }
+}
+
+section('⑭ 弹窗底部布局统一（取消在左、确认在右、同一套样式）');
+
+{
+  // 逐个打开几类弹窗，检查底部是不是统一的 .modal-foot，
+  // 以及按钮顺序 / 语义色。以前每个弹窗各自拼一个内联 flex 容器，
+  // 结果有的没有分隔线、有的取消在右、手机上也不等宽。
+  async function inspectsFoot(openFn, expectDanger) {
+    openFn();
+    const ok = await waitFor(() => doc.querySelector('.modal-mask .modal'), 3000, '弹窗出现');
+    if (!ok) return null;
+
+    const modal = doc.querySelector('.modal-mask .modal');
+    const foot = modal.querySelector(':scope > .modal-foot');
+    const inBody = modal.querySelector('.modal-body > .modal-foot');
+    const labels = foot
+      ? Array.from(foot.querySelectorAll('.btn')).map((b) => b.textContent.trim())
+      : [];
+
+    const out = {
+      hasFoot: !!foot,
+      footOutsideBody: !!foot && !inBody,
+      labels: labels,
+      cancelFirst: labels[0] === '取消',
+      hasPrimary: !!modal.querySelector('.modal-foot .btn.primary'),
+      hasDangerSolid: !!modal.querySelector('.modal-foot .btn.danger-solid')
+    };
+    if (expectDanger) {
+      check('破坏性确认用实心红按钮', out.hasDangerSolid, JSON.stringify(labels));
+    }
+
+    const x = modal.querySelector('.modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    return out;
+  }
+
+  const mk = await inspectsFoot(() => $('btn-mkdir').click(), false);
+  check('「新建目录」弹窗使用统一的 .modal-foot', mk && mk.hasFoot);
+  check('底部区在正文之外（有独立的分隔线与背景）', mk && mk.footOutsideBody);
+  check('「新建目录」按钮顺序为「取消 / 创建」', mk && mk.cancelFirst,
+    mk && JSON.stringify(mk.labels));
+  check('「新建目录」的确认按钮是主色', mk && mk.hasPrimary);
+
+  const rz = await inspectsFoot(() => {
+    const row = Array.from(doc.querySelectorAll('#tbody tr'))
+      .find((tr) => tr.querySelector('.op-btn[data-kind="rename"]'));
+    if (row) row.querySelector('.op-btn[data-kind="rename"]').click();
+  }, false);
+  check('「重命名」弹窗使用统一的 .modal-foot', rz && rz.hasFoot);
+  check('「重命名」按钮顺序为「取消 / 确定」', rz && rz.cancelFirst,
+    rz && JSON.stringify(rz.labels));
+
+  const de = await inspectsFoot(() => {
+    const row = Array.from(doc.querySelectorAll('#tbody tr'))
+      .find((tr) => tr.querySelector('.op-btn[data-kind="trash"]'));
+    if (row) row.querySelector('.op-btn[data-kind="trash"]').click();
+  }, true);
+  check('「删除确认」弹窗使用统一的 .modal-foot', de && de.hasFoot);
+  check('「删除确认」按钮顺序为「取消 / 删除」', de && de.cancelFirst,
+    de && JSON.stringify(de.labels));
+}
+
+section('⑮ 操作按钮按功能区分颜色');
+
+{
+  const btns = Array.from(doc.querySelectorAll('#tbody .op-btn'));
+  check('行内操作按钮都带 data-kind 标记',
+    btns.length > 0 && btns.every((b) => !!b.dataset.kind),
+    String(btns.length) + ' 个');
+  const kinds = Array.from(new Set(btns.map((b) => b.dataset.kind)));
+  check('出现了多种功能类别', kinds.length >= 3, kinds.join(','));
+
+  // 直接取样式表文本：jsdom 不会解析 CSS 变量，靠 getComputedStyle
+  // 判断颜色会得到空值，读源码更可靠。
+  const css = await (await fetch(BASE + '/__gofs__/assets/style.css')).text();
+  for (const k of ['open', 'download', 'edit', 'unzip', 'list', 'rename', 'trash']) {
+    check('CSS 为「' + k + '」定义了语义色',
+      css.includes('.op-btn[data-kind="' + k + '"]'), k);
+  }
+  check('语义色使用独立变量而不是硬编码',
+    /--op-download:/.test(css) && /--op-edit:/.test(css) && /--op-danger:/.test(css));
+  check('操作区常态透明度已提高到可辨识（不再是 0.35）',
+    /\.ops\s*\{[^}]*opacity:\s*\.7/.test(css));
+}
+
+section('⑯ 服务设置面板（切换根目录 / 调整上传上限）');
+
+{
+  check('顶栏有「设置」入口且可见', $('btn-settings') && !$('btn-settings').hidden,
+    'hidden=' + ($('btn-settings') && $('btn-settings').hidden));
+
+  $('btn-settings').click();
+  const opened = await waitFor(() => doc.querySelector('.settings-panel'), 4000, '设置面板');
+  check('设置面板能打开', opened);
+
+  if (opened) {
+    const panel = doc.querySelector('.settings-panel');
+    const got = await waitFor(() => !/正在读取/.test(panel.textContent), 4000, '设置加载完成');
+    check('设置面板成功读取到当前配置', got, panel.textContent.slice(0, 80));
+
+    const text = panel.textContent;
+    check('显示「服务根目录」一项', /服务根目录/.test(text));
+    check('显示「单文件上传上限」一项', /单文件上传上限/.test(text));
+    check('给出了可切换的范围', /可切换的范围/.test(text), text.slice(0, 200));
+    check('给出当前生效的上传上限', /当前生效/.test(text));
+
+    const inputs = Array.from(panel.querySelectorAll('input[type=text]'));
+    check('根目录输入框已填好当前值', inputs.length > 0 && inputs[0].value.length > 0,
+      inputs.length ? inputs[0].value : '(无输入框)');
+    check('存在单位下拉（MiB/GiB/TiB）',
+      Array.from(panel.querySelectorAll('select option')).map((o) => o.textContent)
+        .join(',').includes('GiB'));
+    check('有「不限制」开关', /不限制/.test(text));
+
+    const foot = doc.querySelector('.modal-mask .modal > .modal-foot');
+    const labels = foot
+      ? Array.from(foot.querySelectorAll('.btn')).map((b) => b.textContent.trim())
+      : [];
+    check('设置面板底部同样统一（取消 / 保存）',
+      labels[0] === '取消' && labels.indexOf('保存') > 0, JSON.stringify(labels));
+
+    const x = doc.querySelector('.modal-mask .modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 100));
+    check('设置面板可以正常关闭', !doc.querySelector('.settings-panel'));
+  }
+}
+
+// ---------------------------------------------------------------- 17. 目录导航
+
+section('⑰ 目录导航：进子目录 / 点「根目录」回退');
+
+// 这一组覆盖的是一类「列表其实取回来了，却弹错误提示」的问题。
+//
+// 曾经的写法是 `history.pushState(..., fileURL(path) + '/')`。根目录 path="/"
+// 时的 fileURL 本身就是 "/"，拼出来是 "//" —— 浏览器把它当「协议相对 URL」，
+// 解析成 http: 加空主机，pushState 直接抛异常。因为它在 navigate 的 try 里，
+// 异常被当成了「打开目录失败」，于是 render() 根本没执行 —— 点「根目录」
+// 就卡在原地，只有控制台看得到真相。
+//
+// 断言里特意检查「没有报错 toast」，这正是当初唯一的可见症状。
+{
+  const errToast = () =>
+    Array.from(doc.querySelectorAll('.toast.err')).map((t) => t.textContent).join(' | ');
+
+  // 地址栏里除了服务目录还会带访问路径前缀（--path-prefix，例如 /fs），
+  // 断言必须把它算进去，否则在带前缀部署下会误报。
+  const PREFIX = new URL(BASE).pathname.replace(/\/+$/, '');   // "" 或 "/fs"
+  const ROOT_URL = PREFIX + '/';
+  const atRoot = () => decodeURIComponent(win.location.pathname) === ROOT_URL;
+  const atDir = (p) => decodeURIComponent(win.location.pathname) === PREFIX + p + '/';
+
+  // 等应用「闲下来」：导航是异步的，前面几节可能有刷新在途
+  // （比如上传完成后的列表刷新）。不等就点，很可能被当成并发导航。
+  await waitFor(() => win.GOFS.state && win.GOFS.state.busy === false, 8000, '导航空闲');
+
+  // ⚠️ 判断「到底进没进子目录」不能只看「存在 .crumb.current」—— 前面某节
+  // 导航留下的面包屑会让 waitFor 立刻返回，于是「进入子目录」其实没发生，
+  // 后面的断言全是假的。必须把「路径真的变成了目标目录」作为等待条件。
+  const pickDir = (scope) => Array.from(scope.querySelectorAll('#tbody tr')).find((tr) => {
+    const p = tr.dataset.path || '';
+    return tr.querySelector('.name-cell.dir') && p && p !== '/';
+  });
+
+  // 无论从哪儿出发，先回到根目录建立一个确定的起点 ——
+  // 子目录里可能一个子目录都没有，探测必须在根目录上做。
+  // （这里不传 push=false：要的就是地址栏也跟着回根目录。）
+  await win.GOFS.navigate('/');
+  await waitFor(
+    () => atRoot() && doc.querySelectorAll('#breadcrumb .crumb').length === 0,
+    8000, '回到根目录起点');
+  check('可以回到根目录作为起点',
+    atRoot() && win.GOFS.state.path === '/',
+    'path=' + win.GOFS.state.path + ' pathname=' + win.location.pathname);
+
+  const dirRow = pickDir(doc);
+  const dirPath = dirRow ? dirRow.dataset.path : '';
+
+  if (!dirPath) {
+    check('根目录里能找到子目录', false, '根目录没有子目录，无法验证导航');
+  } else {
+    check('根目录里能找到子目录（' + dirPath + '）', true);
+
+    dirRow.querySelector('.name-cell .label')
+      .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+    const entered = await waitFor(
+      () => doc.querySelector('#breadcrumb .crumb.current') && win.GOFS.state.path === dirPath,
+      8000, '进入子目录 ' + dirPath);
+    check('点目录名可以进入（' + dirPath + '）', entered,
+      '当前 path=' + win.GOFS.state.path);
+    check('进入子目录没有报错', !errToast(), errToast());
+
+    const crumbs = Array.from(doc.querySelectorAll('#breadcrumb > *'))
+      .map((el) => el.textContent.trim());
+    check('面包屑出现了「根目录」+ 子目录', crumbs[0] === '根目录' && crumbs.length >= 2,
+      JSON.stringify(crumbs));
+    check('地址栏变成了子目录', atDir(dirPath), win.location.pathname);
+
+    // 关键一步：点「根目录」回去。
+    //
+    // ⚠️ 合成事件的 cancelable 必须显式给 true —— `new MouseEvent('click',
+    // {bubbles: true})` 的 cancelable 默认是 **false**，此时 onclick 里的
+    // `e.preventDefault()` 无效，jsdom 会真的去导航（日志里那句
+    // "Not implemented: navigation to another Document"），看起来像
+    // 「应用没拦住默认跳转」。真实用户点击是 cancelable 的。
+    const rootCrumb = Array.from(doc.querySelectorAll('#breadcrumb a'))
+      .find((a) => a.textContent.trim() === '根目录');
+    check('存在「根目录」面包屑链接', !!rootCrumb);
+    rootCrumb.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    const backAtRoot = await waitFor(atRoot, 8000, '回到根目录');
+    check('点「根目录」地址栏回到 ' + ROOT_URL, backAtRoot, win.location.pathname);
+    check('点「根目录」没有报错（曾经的 bug：URL 拼成 // → pushState 抛 http:）',
+      !errToast(), errToast());
+    check('根目录链接的 href 不是协议相对 URL（不能是 //...）',
+      !/^\/\//.test(rootCrumb.getAttribute('href') || '/'),
+      rootCrumb.getAttribute('href'));
+
+    // 列表真的重画了：表格行数应当与 state 里的条目数一致，
+    // 而且回到根目录后条目明显不止一条（子目录里只有 1 条）。
+    const backRows = Array.from(doc.querySelectorAll('#tbody tr'))
+      .map((tr) => tr.dataset.path || '');
+    check('回到根目录后列表已重新渲染',
+      backRows.length === win.GOFS.state.entries.length && backRows.length > 1,
+      backRows.length + ' 行 / state 有 ' + win.GOFS.state.entries.length + ' 条');
+    check('回到根目录后没有残留子目录面包屑',
+      doc.querySelectorAll('#breadcrumb .crumb').length === 0);
+
+    // 并发导航不能被静默丢弃：连着发起多次时，队列里只留最后一次。
+    // （曾经的写法是 `if (state.busy) return;` —— 这一刻的点击就白点了，
+    //   地址栏、列表、提示全都没反应。）
+    //
+    // async 函数体在第一个 await 之前是同步执行的，所以 p1 一定会先把 busy
+    // 置上，p2/p3 必定走「排队」分支 —— 这个竞态是确定性的，不靠运气。
+    const p1 = win.GOFS.navigate(dirPath);
+    const p2 = win.GOFS.navigate('/');       // 排队，随后会被 p3 取代
+    const p3 = win.GOFS.navigate(dirPath);   // 取代 p2，成为最终请求
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    check('在途的那次导航正常完成', r1 === true, 'p1=' + r1);
+    check('被取代的排队导航以 false 结掉（调用方不会一直等下去）', r2 === false,
+      'p2=' + r2);
+    check('最后请求的导航正常完成', r3 === true, 'p3=' + r3);
+    const settled = await waitFor(
+      () => win.GOFS.state.path === dirPath && atDir(dirPath),
+      8000, '并发导航最终落到最后请求的目录');
+    check('导航途中的再次点击不会被丢掉（最终落到最后请求的那个目录）', settled,
+      'path=' + win.GOFS.state.path + ' pathname=' + win.location.pathname);
+
+    await win.GOFS.navigate('/');
+  }
+}
+
+// ---------------------------------------------------------------- 18. 归档只在根目录
+
+section('⑱ 上传归档只在根目录生效（子目录原地放）');
+
+// 规则：只有「直接传到服务根目录」才按 年/月/日 建三级目录；
+// 传进子目录就原地放。前端的三处提示（常驻投放区 / 上传按钮 title / 页脚）
+// 必须与服务端的实际落盘一致 —— 提示与实际不符比不提示更糟。
+{
+  const zoneText = () => $('drop-zone-target').textContent;
+  const dirText = () => (win.GOFS.data && win.GOFS.data.upload_date_dir) || '';
+  const footText = () => $('footer-right').textContent;
+  const atRoot = () => win.GOFS.state.path === '/';
+  const backToRoot = async () => {
+    await win.GOFS.navigate('/');
+    await waitFor(atRoot, 8000, '回到根目录');
+  };
+
+  check('服务端下发了归档日期段（后面的断言依赖它）', !!dirText(), dirText());
+
+  await backToRoot();
+  check('根目录：投放区写的是归档后的日期目录',
+    zoneText().indexOf('/' + dirText()) >= 0, zoneText());
+  check('根目录：投放区标注「按日期自动归档」',
+    /按日期自动归档/.test(zoneText()), zoneText());
+  check('根目录：上传按钮的提示也标注了归档',
+    /按日期自动归档/.test($('btn-upload').title), $('btn-upload').title);
+  check('根目录：页脚显示「上传归档到 …」',
+    /上传归档到/.test(footText()), footText());
+
+  const subRow = Array.from(doc.querySelectorAll('#tbody tr')).find((tr) => {
+    const p = tr.dataset.path || '';
+    return tr.querySelector('.name-cell.dir') && p && p !== '/';
+  });
+
+  if (!subRow) {
+    check('找到子目录（用于验证子目录不归档）', false, '根目录没有子目录');
+  } else {
+    const subPath = subRow.dataset.path;
+    subRow.querySelector('.name-cell .label')
+      .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await waitFor(() => win.GOFS.state.path === subPath, 8000, '进入子目录 ' + subPath);
+
+    check('子目录：投放区指向子目录本身',
+      zoneText().indexOf(subPath + '/') >= 0, zoneText());
+    check('子目录：不再出现日期目录',
+      zoneText().indexOf('/' + dirText()) < 0, zoneText());
+    check('子目录：不再标注「按日期自动归档」',
+      !/按日期自动归档/.test(zoneText()), zoneText());
+    check('子目录：上传按钮的提示也不再提归档',
+      !/按日期自动归档/.test($('btn-upload').title), $('btn-upload').title);
+    check('子目录：页脚不再显示「上传归档到 …」',
+      !/上传归档到/.test(footText()), footText());
+
+    await backToRoot();
+    check('回到根目录后归档提示恢复',
+      /上传归档到/.test(footText()) && zoneText().indexOf('/' + dirText()) >= 0,
+      footText() + ' | ' + zoneText());
+  }
+}
+
+// ---------------------------------------------------------------- 19. 文件夹上传
+
+section('⑲ 文件夹上传：入口、目录结构保留、拖拽目录');
+
+// 文件夹上传有两条来源，最终都收敛成「带相对路径的 File 列表」：
+//   1) <input webkitdirectory> 选目录 —— File 自带 webkitRelativePath；
+//   2) 拖拽目录 —— 走 DataTransferItem.webkitGetAsEntry() 递归遍历，
+//      File 上没有 webkitRelativePath，由代码自己拼。
+// 这里两条都测：断言实际发出的 PUT URL 保留了目录结构。
+{
+  // 记录所有上传请求的 URL，并按需自动成功。
+  const RealXHR = win.XMLHttpRequest;
+  const sent = [];
+  class RecXHR {
+    constructor() { this.upload = {}; this.status = 0; this._h = {}; }
+    open(m, u) { this.method = m; this.url = u; }
+    setRequestHeader(k, v) { this._h[k] = v; }
+    getResponseHeader(k) {
+      return String(k).toLowerCase() === 'x-gofs-offset' ? String(this._size || 0) : null;
+    }
+    send(body) {
+      this._size = (body && body.size) || 0;
+      sent.push({ method: this.method, url: this.url });
+      setTimeout(() => {
+        this.status = 201;
+        this.responseText = 'created';
+        if (this.onload) this.onload();
+      }, 10);
+    }
+  }
+  win.XMLHttpRequest = RecXHR;
+
+  const settle = async (n, label) => {
+    await waitFor(() => sent.filter((s) => s.method === 'PUT').length >= n, 5000, label);
+    // 让池子里的剩余请求与收尾逻辑跑完
+    await new Promise((r) => setTimeout(r, 250));
+  };
+  const putPaths = () => sent.filter((s) => s.method === 'PUT')
+    .map((s) => decodeURIComponent(s.url));
+
+  // ---- 入口 ----
+  check('顶栏有「文件夹」上传入口且可见',
+    $('btn-upload-dir') && !$('btn-upload-dir').hidden);
+  check('顶栏「文件夹」按钮的提示说明了保留结构',
+    /保留目录结构/.test($('btn-upload-dir').title), $('btn-upload-dir').title);
+  check('投放区有「选择文件夹…」',
+    $('drop-zone-dir') && /文件夹/.test($('drop-zone-dir').textContent));
+  check('文件输入框带 webkitdirectory（浏览器据此展开整个目录）',
+    $('dir-input').hasAttribute('webkitdirectory'), $('dir-input').outerHTML);
+  // 投放区整块可点时会直接调 file-input.click()，那条路径不经过顶栏按钮 ——
+  // onchange 必须是启动时就绑好的，否则「选了文件什么也没发生」。
+  check('两个输入框的 change 都已绑定（不依赖点按钮）',
+    typeof $('file-input').onchange === 'function' &&
+    typeof $('dir-input').onchange === 'function');
+
+  // 点「文件夹」应打开的是目录选择框，而不是普通文件框
+  let dirInputClicked = 0;
+  const realDirClick = $('dir-input').click.bind($('dir-input'));
+  $('dir-input').click = function () { dirInputClicked++; };
+  $('btn-upload-dir').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  check('点「文件夹」按钮触发的是目录选择框', dirInputClicked === 1, 'click=' + dirInputClicked);
+  $('dir-input').click = realDirClick;
+
+  // ---- 走一遍「选了目录」：File 带 webkitRelativePath ----
+  const mkFile = (name, rel, size) => {
+    const f = new win.File([new Uint8Array(size || 8)], name);
+    Object.defineProperty(f, 'webkitRelativePath', { value: rel });
+    return f;
+  };
+  const picked = [
+    mkFile('index.html', 'site/index.html', 16),
+    mkFile('app.js', 'site/assets/app.js', 32),
+    mkFile('deep.txt', 'site/assets/nested/deep.txt', 8),
+  ];
+  Object.defineProperty($('dir-input'), 'files', { value: picked, configurable: true });
+  $('dir-input').dispatchEvent(new win.Event('change', { bubbles: true }));
+
+  const panel = await waitFor(() => doc.querySelector('.progress-wrap'), 5000, '文件夹上传弹窗');
+  check('选择目录后出现上传进度弹窗', panel);
+
+  if (panel) {
+    check('弹窗标题标明这是文件夹上传',
+      /文件夹/.test(doc.querySelector('.modal-head div').textContent),
+      doc.querySelector('.modal-head div').textContent);
+    check('进度里给出「第几个 / 共几个」',
+      /1\/3|2\/3|3\/3/.test(doc.querySelector('.progress-current').textContent),
+      doc.querySelector('.progress-current').textContent);
+    check('进度里展示的是相对路径（能看出目录层级）',
+      /site\//.test(doc.querySelector('.progress-current').textContent),
+      doc.querySelector('.progress-current').textContent);
+  }
+
+  await settle(3, '三个文件都发出请求');
+  const paths = putPaths();
+  check('上传请求保留了目录结构（site/index.html）',
+    paths.indexOf('/site/index.html') >= 0, JSON.stringify(paths));
+  check('嵌套子目录也保留（site/assets/nested/deep.txt）',
+    paths.indexOf('/site/assets/nested/deep.txt') >= 0, JSON.stringify(paths));
+  check('一共发了 3 个 PUT', paths.length === 3, JSON.stringify(paths));
+
+  // ---- 拖拽一个「文件夹」：走 webkitGetAsEntry 递归 ----
+  sent.length = 0;
+  const fileEntry = (name, content) => ({
+    isFile: true, isDirectory: false, name,
+    file(cb) { cb(new win.File([content], name)); },
+  });
+  const dirEntry = (name, children) => {
+    let done = false;
+    return {
+      isFile: false, isDirectory: true, name,
+      createReader() {
+        return {
+          readEntries(cb) {
+            // 规范允许分批返回：第一次给一批，之后给空数组表示结束。
+            // 代码必须循环调用到空为止，只调一次会漏文件。
+            if (done) { cb([]); return; }
+            done = true;
+            cb(children);
+          },
+        };
+      },
+    };
+  };
+  const projDir = dirEntry('proj', [
+    fileEntry('readme.md', 'md'),
+    dirEntry('src', [fileEntry('main.go', 'go')]),
+    dirEntry('empty', []),
+  ]);
+  const dt = {
+    items: [{ kind: 'file', webkitGetAsEntry: () => projDir }],
+    files: [],
+    types: ['Files'],
+  };
+  const dropEv = new win.Event('drop', { bubbles: true, cancelable: true });
+  Object.defineProperty(dropEv, 'dataTransfer', { value: dt });
+  win.dispatchEvent(dropEv);
+
+  await settle(2, '拖拽目录后发出请求');
+  const dropPaths = putPaths();
+  check('拖拽目录：顶层文件路径正确（proj/readme.md）',
+    dropPaths.indexOf('/proj/readme.md') >= 0, JSON.stringify(dropPaths));
+  check('拖拽目录：递归进入子目录（proj/src/main.go）',
+    dropPaths.indexOf('/proj/src/main.go') >= 0, JSON.stringify(dropPaths));
+  check('拖拽目录：空目录不会产生请求',
+    !dropPaths.some((p) => /\/empty/.test(p)), JSON.stringify(dropPaths));
+  check('拖拽目录：一共发出 2 个 PUT', dropPaths.length === 2, JSON.stringify(dropPaths));
+
+  win.XMLHttpRequest = RealXHR;
+  // 收尾：关掉可能还留着的进度弹窗
+  const leftover = doc.querySelector('.modal-mask');
+  if (leftover) {
+    const x = leftover.querySelector('.modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  }
 }
 
 // ---------------------------------------------------------------- 汇总

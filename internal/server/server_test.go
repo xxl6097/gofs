@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1508,20 +1509,44 @@ func TestUploadDatedRootFile(t *testing.T) {
 	}
 }
 
-func TestUploadDatedNestedDir(t *testing.T) {
+func TestUploadDatedSubdirNotArchived(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "-A"))
 
+	// 归档只在「直接传到根目录」时生效；传进子目录就原地放 ——
+	// 子目录本身已经是有意义的分层，再套一层年月日只会越陷越深。
 	r := do(t, s, http.MethodPut, "/sub/deep/b.txt", strings.NewReader("x"), nil)
 	if r.code != http.StatusCreated {
 		t.Fatalf("状态码 = %d", r.code)
 	}
-	wantURL := "/sub/deep/" + todayDir("2006/01/02") + "/b.txt"
+	if got := r.head.Get("X-Gofs-Path"); got != "/sub/deep/b.txt" {
+		t.Errorf("X-Gofs-Path = %q, 期望 /sub/deep/b.txt（子目录不归档）", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub", "deep", "b.txt")); err != nil {
+		t.Errorf("文件未落在原路径: %v", err)
+	}
+	// 不能凭空造出日期目录
+	if _, err := os.Stat(filepath.Join(root, "sub", "deep", filepath.FromSlash(todayDir("2006/01/02")))); err == nil {
+		t.Errorf("子目录上传不应创建日期目录")
+	}
+}
+
+func TestUploadDatedForceParam(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "-A"))
+
+	// ?dated=1 显式要求归档：即使在子目录里也按年月日建三级目录。
+	// 这条保留了「归档能力」本身，只是默认不再作用于子目录。
+	r := do(t, s, http.MethodPut, "/sub/a.txt?dated=1", strings.NewReader("x"), nil)
+	if r.code != http.StatusCreated {
+		t.Fatalf("状态码 = %d；%s", r.code, r.body)
+	}
+	wantURL := "/sub/" + todayDir("2006/01/02") + "/a.txt"
 	if got := r.head.Get("X-Gofs-Path"); got != wantURL {
 		t.Errorf("X-Gofs-Path = %q, 期望 %q", got, wantURL)
 	}
-	if _, err := os.Stat(datedOnDisk(root, "/sub/deep/b.txt", "2006/01/02")); err != nil {
-		t.Errorf("文件未落到日期目录: %v", err)
+	if _, err := os.Stat(datedOnDisk(root, "/sub/a.txt", "2006/01/02")); err != nil {
+		t.Errorf("dated=1 时文件未落到日期目录: %v", err)
 	}
 }
 
@@ -1588,42 +1613,62 @@ func TestUploadDatedFormPost(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "-A"))
 
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	fw, err := mw.CreateFormFile("file", "report.pdf")
-	if err != nil {
-		t.Fatal(err)
+	// 传到根目录（不带 path 字段）→ 归档。
+	form := func(fields map[string]string) (*bytes.Buffer, string) {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		fw, err := mw.CreateFormFile("file", "report.pdf")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte("pdf")); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range fields {
+			if err := mw.WriteField(k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := mw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return &buf, mw.FormDataContentType()
 	}
-	if _, err := fw.Write([]byte("pdf")); err != nil {
-		t.Fatal(err)
-	}
-	if err := mw.WriteField("path", "docs"); err != nil {
-		t.Fatal(err)
-	}
-	if err := mw.Close(); err != nil {
-		t.Fatal(err)
+	post := func(fields map[string]string) string {
+		buf, ct := form(fields)
+		r := do(t, s, http.MethodPost, "/", buf, map[string]string{"Content-Type": ct})
+		if r.code != 200 {
+			t.Fatalf("表单上传状态码 = %d；%s", r.code, r.body)
+		}
+		var d struct {
+			Dest string `json:"dest"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &d); err != nil {
+			t.Fatalf("JSON 解析失败: %v\n%s", err, r.body)
+		}
+		return d.Dest
 	}
 
-	r := do(t, s, http.MethodPost, "/", &buf, map[string]string{
-		"Content-Type": mw.FormDataContentType(),
-	})
-	if r.code != 200 {
-		t.Fatalf("状态码 = %d；%s", r.code, r.body)
+	wantDir := "/" + todayDir("2006/01/02")
+	if got := post(nil); got != wantDir {
+		t.Errorf("dest = %q, 期望 %q", got, wantDir)
 	}
-	var d struct {
-		Dest  string   `json:"dest"`
-		Saved []string `json:"saved"`
-	}
-	if err := json.Unmarshal([]byte(r.body), &d); err != nil {
-		t.Fatalf("JSON 解析失败: %v\n%s", err, r.body)
-	}
-	wantDir := "/docs/" + todayDir("2006/01/02")
-	if d.Dest != wantDir {
-		t.Errorf("dest = %q, 期望 %q", d.Dest, wantDir)
-	}
-	target := filepath.Join(root, "docs", filepath.FromSlash(todayDir("2006/01/02")), "report.pdf")
+	target := filepath.Join(root, filepath.FromSlash(todayDir("2006/01/02")), "report.pdf")
 	if _, err := os.Stat(target); err != nil {
 		t.Errorf("表单上传未归档: %v", err)
+	}
+
+	// 表单显式指定子路径 → 就是「传到子目录」，不归档（与 PUT 同一套规则）。
+	if got := post(map[string]string{"path": "docs"}); got != "/docs" {
+		t.Errorf("dest = %q, 期望 /docs（子目录不归档）", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "report.pdf")); err != nil {
+		t.Errorf("表单指定子路径时文件未落在原目录: %v", err)
+	}
+
+	// 需要归档时显式传 dated=1（脚本/客户端想自己指定落点分层的情况）。
+	if got := post(map[string]string{"path": "docs", "dated": "1"}); got != "/docs/"+todayDir("2006/01/02") {
+		t.Errorf("dest = %q, 期望 /docs/%s", got, todayDir("2006/01/02"))
 	}
 }
 
@@ -2548,7 +2593,8 @@ func TestKeyWithDateLayout(t *testing.T) {
 	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "-A"))
 
 	_, token := createKey(t, s, "归档", "/upload", 3600)
-	r := do(t, s, http.MethodPut, "/upload/movie.mp4", strings.NewReader("data"),
+	// 密钥的 scope 是子目录，要归档得显式带 dated=1。
+	r := do(t, s, http.MethodPut, "/upload/movie.mp4?dated=1", strings.NewReader("data"),
 		map[string]string{"X-Gofs-Upload-Key": token})
 	if r.code != http.StatusCreated {
 		t.Fatalf("上传状态码 = %d；%s", r.code, r.body)
@@ -2557,6 +2603,16 @@ func TestKeyWithDateLayout(t *testing.T) {
 	want := filepath.Join(root, "upload", filepath.FromSlash(todayDir("2006/01/02")), "movie.mp4")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("归档后文件未落盘: %v", err)
+	}
+
+	// 不带 dated 时（子目录默认不归档）同样不能越出密钥范围
+	r2 := do(t, s, http.MethodPut, "/upload/plain.mp4", strings.NewReader("data"),
+		map[string]string{"X-Gofs-Upload-Key": token})
+	if r2.code != http.StatusCreated {
+		t.Fatalf("上传状态码 = %d；%s", r2.code, r2.body)
+	}
+	if _, err := os.Stat(filepath.Join(root, "upload", "plain.mp4")); err != nil {
+		t.Errorf("子目录上传未落在密钥范围内: %v", err)
 	}
 }
 
@@ -2952,4 +3008,411 @@ func TestLogSanitizesControlChars(t *testing.T) {
 	if strings.Contains(line, "\x1b") {
 		t.Errorf("日志未清理 ANSI 转义: %q", line)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 运行期设置：切换服务根目录、调整单文件上传上限
+// ---------------------------------------------------------------------------
+
+const jsonHeader = "application/json"
+
+// resolved 返回路径解析软链后的真实路径，与 Resolver.Root() 的口径一致。
+// macOS 上 TempDir 位于 /var → /private/var 的软链之下，不解析就会对不上。
+func resolved(t *testing.T, p string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("解析软链失败 %s: %v", p, err)
+	}
+	return real
+}
+
+// settingsOf 读取当前设置。
+func settingsOf(t *testing.T, s *Server, hdr map[string]string) map[string]any {
+	t.Helper()
+	r := do(t, s, http.MethodGet, "/__gofs__/settings", nil, hdr)
+	if r.code != 200 {
+		t.Fatalf("读取设置失败 %d: %s", r.code, r.body)
+	}
+	var d map[string]any
+	if err := json.Unmarshal([]byte(r.body), &d); err != nil {
+		t.Fatalf("解析设置失败: %v\n%s", err, r.body)
+	}
+	return d
+}
+
+// putSettings 提交一次设置修改。
+func putSettings(t *testing.T, s *Server, body string, hdr map[string]string) resp {
+	t.Helper()
+	h := map[string]string{"Content-Type": jsonHeader}
+	for k, v := range hdr {
+		h[k] = v
+	}
+	return do(t, s, http.MethodPut, "/__gofs__/settings", strings.NewReader(body), h)
+}
+
+func TestSettingsRevealCurrentValues(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+
+	d := settingsOf(t, s, nil)
+	if d["root"] != resolved(t, inner) {
+		t.Errorf("root = %v, 期望 %s", d["root"], resolved(t, inner))
+	}
+	if d["root_switchable"] != true {
+		t.Errorf("默认应允许切换根目录")
+	}
+	roots, _ := d["allow_roots"].([]any)
+	if len(roots) != 1 || roots[0] != resolved(t, base) {
+		t.Errorf("允许范围 = %v, 期望 [%s]", roots, resolved(t, base))
+	}
+	// 上限必须同时给出「当前值」与「启动默认值」，界面才能提供「恢复默认」。
+	if _, ok := d["upload_max_size"].(float64); !ok {
+		t.Errorf("缺少 upload_max_size: %v", d["upload_max_size"])
+	}
+	if _, ok := d["upload_max_size_default"].(float64); !ok {
+		t.Errorf("缺少 upload_max_size_default")
+	}
+}
+
+func TestSettingsSwitchRootWithinAllowedRange(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	sibling := filepath.Join(base, "sibling")
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("inner\n"))
+	writeFile(t, filepath.Join(sibling, "b.txt"), []byte("sibling\n"))
+
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+
+	r := putSettings(t, s, `{"root":`+jsonString(sibling)+`}`, nil)
+	if r.code != 200 {
+		t.Fatalf("切换根目录状态码 = %d: %s", r.code, r.body)
+	}
+
+	// 服务内容应当立刻变成新根下的。
+	r = do(t, s, http.MethodGet, "/?json", nil, nil)
+	if r.code != 200 {
+		t.Fatalf("列举状态码 = %d", r.code)
+	}
+	if !strings.Contains(r.body, "b.txt") || strings.Contains(r.body, "a.txt") {
+		t.Errorf("切换后内容不对: %s", r.body)
+	}
+
+	// 相对路径按「当前根」解释：先切到父目录，再用相对路径下来。
+	if r := putSettings(t, s, `{"root":`+jsonString(base)+`}`, nil); r.code != 200 {
+		t.Fatalf("切到父目录失败 %d: %s", r.code, r.body)
+	}
+	if r := putSettings(t, s, `{"root":"inner"}`, nil); r.code != 200 {
+		t.Fatalf("相对路径切换失败 %d: %s", r.code, r.body)
+	}
+	if d := settingsOf(t, s, nil); d["root"] != resolved(t, inner) {
+		t.Errorf("相对路径解析错误: %v", d["root"])
+	}
+	// 反过来，「..」也应当能从子目录回到父目录。
+	if r := putSettings(t, s, `{"root":".."}`, nil); r.code != 200 {
+		t.Fatalf("用 .. 返回父目录失败 %d: %s", r.code, r.body)
+	}
+	if d := settingsOf(t, s, nil); d["root"] != resolved(t, base) {
+		t.Errorf(".. 解析错误: %v", d["root"])
+	}
+}
+
+func TestSettingsSwitchRootRejectsOutsideRange(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	writeFile(t, filepath.Join(outside, "secret.txt"), []byte("secret\n"))
+
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+
+	r := putSettings(t, s, `{"root":`+jsonString(outside)+`}`, nil)
+	if r.code != 400 {
+		t.Fatalf("越界切换状态码 = %d, 期望 400: %s", r.code, r.body)
+	}
+	// 根目录不能被改动。
+	if d := settingsOf(t, s, nil); d["root"] != resolved(t, inner) {
+		t.Errorf("越界请求改动了根目录: %v", d["root"])
+	}
+	// 目标内容也不能变得可见。
+	if r := do(t, s, http.MethodGet, "/?json", nil, nil); strings.Contains(r.body, "secret.txt") {
+		t.Errorf("越界目录的内容被泄露")
+	}
+}
+
+func TestSettingsSwitchRootRejectsSymlinkEscape(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	writeFile(t, filepath.Join(outside, "secret.txt"), []byte("secret\n"))
+
+	// 在允许范围内放一个指向范围外的软链 —— 不做软链解析就能绕过白名单。
+	link := filepath.Join(base, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("无法创建软链: %v", err)
+	}
+
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+	r := putSettings(t, s, `{"root":`+jsonString(link)+`}`, nil)
+	if r.code != 400 {
+		t.Fatalf("软链逃逸状态码 = %d, 期望 400: %s", r.code, r.body)
+	}
+
+	// 用 .. 拼出来的路径同样要判越界。
+	r = putSettings(t, s, `{"root":`+jsonString(filepath.Join(base, "..", "..", "etc"))+`}`, nil)
+	if r.code == 200 {
+		t.Errorf("含 .. 的越界路径竟然被接受: %s", r.body)
+	}
+}
+
+func TestSettingsSwitchRootValidation(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	writeFile(t, filepath.Join(base, "afile.txt"), []byte("f\n"))
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"空路径", `{"root":"   "}`, "不能为空"},
+		{"不存在的目录", `{"root":` + jsonString(filepath.Join(base, "nope")) + `}`, "不存在"},
+		{"指向文件而非目录", `{"root":` + jsonString(filepath.Join(base, "afile.txt")) + `}`, "不是目录"},
+	} {
+		r := putSettings(t, s, tc.body, nil)
+		if r.code != 400 {
+			t.Errorf("%s: 状态码 = %d, 期望 400", tc.name, r.code)
+			continue
+		}
+		if !strings.Contains(r.body, tc.want) {
+			t.Errorf("%s: 提示信息里应有 %q，实际 %s", tc.name, tc.want, r.body)
+		}
+	}
+}
+
+func TestSettingsUploadLimitTakesEffect(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	// 放宽到 1 MiB：原本能过的 2 MiB 就该被拒。
+	if r := putSettings(t, s, `{"upload_max_size":1048576}`, nil); r.code != 200 {
+		t.Fatalf("设置上限失败 %d: %s", r.code, r.body)
+	}
+	if r := do(t, s, http.MethodPut, "/big.bin", strings.NewReader(strings.Repeat("x", 2<<20)), nil); r.code != http.StatusRequestEntityTooLarge {
+		t.Errorf("超限上传状态码 = %d, 期望 413", r.code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "big.bin")); err == nil {
+		t.Errorf("超限上传留下了残缺文件")
+	}
+	if r := do(t, s, http.MethodPut, "/ok.bin", strings.NewReader(strings.Repeat("y", 1<<20)), nil); r.code != http.StatusCreated {
+		t.Errorf("限内上传状态码 = %d, 期望 201", r.code)
+	}
+
+	// 设为 0 = 不限制。
+	if r := putSettings(t, s, `{"upload_max_size":0}`, nil); r.code != 200 {
+		t.Fatalf("设为不限制失败 %d: %s", r.code, r.body)
+	}
+	if r := do(t, s, http.MethodPut, "/big2.bin", strings.NewReader(strings.Repeat("x", 3<<20)), nil); r.code != http.StatusCreated {
+		t.Errorf("不限制后上传状态码 = %d, 期望 201", r.code)
+	}
+
+	// 负数没有意义。
+	if r := putSettings(t, s, `{"upload_max_size":-1}`, nil); r.code != 400 {
+		t.Errorf("负数上限状态码 = %d, 期望 400", r.code)
+	}
+}
+
+func TestSettingsEmptyPatchRejected(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	if r := putSettings(t, s, `{}`, nil); r.code != 400 {
+		t.Errorf("空 patch 状态码 = %d, 期望 400", r.code)
+	}
+	if r := putSettings(t, s, `not json`, nil); r.code != 400 {
+		t.Errorf("非法 JSON 状态码 = %d, 期望 400", r.code)
+	}
+}
+
+func TestSettingsRootSwitchDisabledByFlag(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	sibling := filepath.Join(base, "sibling")
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	writeFile(t, filepath.Join(sibling, "b.txt"), []byte("b\n"))
+
+	s := newTestServer(t, testConfig(t, inner, "-A", "--no-root-switch"))
+
+	d := settingsOf(t, s, nil)
+	if d["root_switchable"] != false {
+		t.Errorf("--no-root-switch 下 root_switchable 应为 false")
+	}
+	r := putSettings(t, s, `{"root":`+jsonString(sibling)+`}`, nil)
+	if r.code != http.StatusForbidden {
+		t.Errorf("禁用换根后仍可切换，状态码 = %d: %s", r.code, r.body)
+	}
+	// 上传上限不受该开关影响。
+	if r := putSettings(t, s, `{"upload_max_size":1048576}`, nil); r.code != 200 {
+		t.Errorf("禁用换根不该影响改上限: %d %s", r.code, r.body)
+	}
+}
+
+func TestSettingsRequiresAdmin(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, filepath.Join(base, "docs", "a.txt"), []byte("a\n"))
+	s := newTestServer(t, testConfig(t, base, "-A",
+		"-a", "boss:secret@/:rw",
+		"-a", "guest:guest@/docs:r"))
+
+	guest := map[string]string{"Authorization": basicAuth("guest", "guest")}
+	boss := map[string]string{"Authorization": basicAuth("boss", "secret")}
+
+	// 只读账号：能读（只拿到非敏感部分），不能改。
+	d := settingsOf(t, s, guest)
+	if d["root"] != nil && d["root"] != "" {
+		t.Errorf("非管理员不该看到服务根目录: %v", d["root"])
+	}
+	if d["root_switchable"] != false {
+		t.Errorf("非管理员不该具备换根能力")
+	}
+	if r := putSettings(t, s, `{"upload_max_size":1}`, guest); r.code != http.StatusForbidden {
+		t.Errorf("只读账号改设置状态码 = %d, 期望 403: %s", r.code, r.body)
+	}
+
+	// 管理员：全部放行。
+	if d := settingsOf(t, s, boss); d["root_switchable"] != true {
+		t.Errorf("管理员应可换根")
+	}
+	if r := putSettings(t, s, `{"upload_max_size":1048576}`, boss); r.code != 200 {
+		t.Errorf("管理员改设置失败 %d: %s", r.code, r.body)
+	}
+
+	// 未带凭据 → 401（而不是 403，好让前端弹登录框）。
+	if r := do(t, s, http.MethodGet, "/__gofs__/settings", nil, nil); r.code != http.StatusUnauthorized {
+		t.Errorf("未登录读取状态码 = %d, 期望 401", r.code)
+	}
+}
+
+func TestSettingsPageFlagShownOnlyToAdmin(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, filepath.Join(base, "docs", "a.txt"), []byte("a\n"))
+	s := newTestServer(t, testConfig(t, base, "-A",
+		"-a", "boss:secret@/:rw",
+		"-a", "guest:guest@/docs:r"))
+
+	// 页面注入的 allow_settings 决定「设置」入口显隐，
+	// 它必须与接口的实际拦截一致，否则会出现「按钮在但点了 403」。
+	// 注意要请求 HTML 页面而不是 ?json —— 后者是纯列表接口，不含页面状态。
+	body := func(hdr map[string]string) string {
+		r := do(t, s, http.MethodGet, "/", nil, hdr)
+		return r.body
+	}
+	if !strings.Contains(body(map[string]string{"Authorization": basicAuth("boss", "secret")}),
+		`"allow_settings":true`) {
+		t.Errorf("管理员页面未注入 allow_settings=true")
+	}
+	if strings.Contains(body(map[string]string{"Authorization": basicAuth("guest", "guest")}),
+		`"allow_settings":true`) {
+		t.Errorf("只读账号不该拿到 allow_settings=true")
+	}
+}
+
+func TestSettingsAuthResponseCarriesFlag(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, filepath.Join(base, "docs", "a.txt"), []byte("a\n"))
+	s := newTestServer(t, testConfig(t, base, "-A",
+		"-a", "boss:secret@/:rw",
+		"-a", "guest:guest@/docs:r"))
+
+	// 登录响应要带上 allow_settings 与 upload_max_size，
+	// 否则前端登录后仍然不知道该不该显示「设置」入口。
+	r := do(t, s, http.MethodGet, "/__gofs__/auth", nil,
+		map[string]string{"Authorization": basicAuth("boss", "secret")})
+	if !strings.Contains(r.body, `"allow_settings":true`) {
+		t.Errorf("管理员登录响应缺少 allow_settings: %s", r.body)
+	}
+	if !strings.Contains(r.body, `"upload_max_size":`) {
+		t.Errorf("登录响应缺少 upload_max_size: %s", r.body)
+	}
+
+	r = do(t, s, http.MethodGet, "/__gofs__/auth", nil,
+		map[string]string{"Authorization": basicAuth("guest", "guest")})
+	if strings.Contains(r.body, `"allow_settings":true`) {
+		t.Errorf("只读账号登录响应不该给 allow_settings=true: %s", r.body)
+	}
+}
+
+// TestSettingsConcurrentSwitchRoot 用 -race 跑时才有意义：
+// 切换根目录会改 Resolver 的共享状态，而请求正在并发读取它。
+func TestSettingsConcurrentSwitchRoot(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "inner")
+	sibling := filepath.Join(base, "sibling")
+	writeFile(t, filepath.Join(inner, "a.txt"), []byte("a\n"))
+	writeFile(t, filepath.Join(sibling, "b.txt"), []byte("b\n"))
+
+	s := newTestServer(t, testConfig(t, inner, "-A"))
+	h := s.Handler()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 持续切换根目录。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			target := inner
+			if i%2 == 0 {
+				target = sibling
+			}
+			body := strings.NewReader(`{"root":` + jsonString(target) + `}`)
+			req := httptest.NewRequest(http.MethodPut, "/__gofs__/settings", body)
+			req.Header.Set("Content-Type", jsonHeader)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+		}
+	}()
+
+	// 同时不停地列举目录与读设置。
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?json", nil))
+				rec2 := httptest.NewRecorder()
+				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/__gofs__/settings", nil))
+			}
+		}()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// jsonString 把字符串编成一个 JSON 字面量（路径可能含反斜杠、引号）。
+func jsonString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }

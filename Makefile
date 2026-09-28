@@ -1,4 +1,4 @@
-.PHONY: all build test vet fmt run clean cross testdata uitest layout layout-sweep touch-sweep touch-modals cdp
+.PHONY: all build test vet fmt run clean cross testdata uitest layout layout-sweep touch-sweep touch-modals cdp run-auth settings-check
 
 BINARY := gofs
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
@@ -32,9 +32,15 @@ testv:
 uitest:
 	NODE_PATH=$(NODE_MODULES) $(NODE_BIN) scripts/test-ui.mjs $(GOFS_URL)
 
-## run-auth: 以鉴权模式启动，供 uitest 使用
+## run-auth: 以鉴权模式启动，供 uitest / settings-check 使用
+##   admin 可写根目录；test 只读，用来验证「改设置需要根目录写权限」
 run-auth: build
-	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' ./data
+	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' -a 'test:test@/' ./data
+
+## settings-check: 端到端校验「服务设置」（权限 / 范围约束 / CSRF / 上限生效）
+##   用法：另开一个终端跑 `make run-auth`，然后 `make settings-check`
+settings-check:
+	./scripts/check-settings.sh
 
 ## cdp: 启动带调试端口的 headless Chrome，供 layout / layout-sweep 使用
 ##   （前台运行，另开终端跑 make layout）
@@ -73,9 +79,9 @@ touch-sweep:
 	  fi; \
 	done
 
-## touch-modals: 单独校验弹窗类界面（编辑器 / 行操作菜单）的触摸可用性
+## touch-modals: 单独校验弹窗类界面（编辑器 / 行操作菜单 / 服务设置）的触摸可用性
 touch-modals:
-	@for o in sheet editor; do \
+	@for o in sheet editor settings; do \
 	  printf '  %-6s  ' $$o; \
 	  if TOUCH=1 MEASURE_OPEN=$$o $(NODE_BIN) scripts/measure-layout.mjs $(MEASURE_URL) 375 812 >/tmp/gofs-modal.log 2>&1; then \
 	    printf '\033[32mOK\033[0m  '; \

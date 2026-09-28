@@ -11,10 +11,13 @@
 //        --user-data-dir=/tmp/chrome-cdp --remote-debugging-port=9333 about:blank
 //   2) node scripts/measure-layout.mjs <url> [width] [height]
 //      目标开了鉴权时加 MEASURE_AUTH=user:pass
+//      想人眼复核排版时加 MEASURE_SHOT=/tmp/shot.png
+//      想看弹窗内部时加 MEASURE_OPEN=editor|sheet|settings
 //
 // 退出码：0 = 布局正常；1 = 列错位 / 按钮溢出；2 = 测量失败。
 
 import { createRequire } from 'node:module';
+import { writeFile } from 'node:fs/promises';
 
 const CDP_PORT = process.env.CDP_PORT || '9333';
 const TARGET = process.argv[2] || 'http://127.0.0.1:5001/';
@@ -26,9 +29,13 @@ const TOUCH = process.env.TOUCH === '1';
 // 触摸目标的最小边长。Apple HIG 建议 44，Material 建议 48，
 // 这里取 40 作为「可点」的底线，太小的按钮在手机上按不准。
 const MIN_TAP = parseInt(process.env.MIN_TAP || '40', 10);
-// MEASURE_OPEN=editor|sheet 时先打开对应的模态界面再测量，
+// MEASURE_OPEN=editor|sheet|settings 时先打开对应的模态界面再测量，
 // 这样编辑器和操作菜单里的按钮也能一起纳入触摸可用性检查。
 const OPEN = process.env.MEASURE_OPEN || '';
+// MEASURE_SHOT=/tmp/x.png 时，在测量前把当前视口截一张图。
+// 数字判据能告诉你「有没有坏」，但看不出「长什么样」——改动 UI 后想人眼
+// 复核一眼，比在终端里拼数字快得多（尤其排版类改动）。
+const SHOT = process.env.MEASURE_SHOT || '';
 
 // Node 自带 fetch 不受 HTTP_PROXY 影响，直连本地调试端口即可。
 async function pickTarget() {
@@ -251,8 +258,15 @@ const MEASURE = `(() => {
 // openModalUI 按名字打开一个模态界面（编辑器 / 行操作菜单），
 // 好让它们内部的按钮也进入触摸可用性检查。
 async function openModalUI(cdp, which) {
-  const expr = which === 'editor'
-    ? `(async () => {
+  const expr = which === 'settings'
+    ? `(() => {
+         const b = document.getElementById('btn-settings');
+         if (!b || b.hidden) return false;
+         b.click();
+         return true;
+       })()`
+    : which === 'editor'
+      ? `(async () => {
          const tr = document.querySelector('#tbody tr[data-path$=".md"]')
                  || document.querySelector('#tbody tr');
          if (!tr) return false;
@@ -336,6 +350,12 @@ async function main() {
     const ok = await openModalUI(cdp, OPEN);
     if (!ok) console.log('  （未能打开 ' + OPEN + '，仍按当前页面测量）');
     await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  if (SHOT) {
+    const shot = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true });
+    await writeFile(SHOT, Buffer.from(shot.data, 'base64'));
+    console.log('已截图 ' + SHOT);
   }
 
   const m = JSON.parse(await cdp.evalJSON(MEASURE));

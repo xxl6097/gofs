@@ -32,6 +32,9 @@
   function uploadDateDir() { return DATA.upload_date_dir || ''; }
   function editMax() { return DATA.edit_max_size || 0; }
   function allowKeys() { return !!DATA.allow_keys; }
+  function allowSettings() { return !!DATA.allow_settings; }
+  // uploadMax 返回单文件上传上限（字节），0 表示不限制。
+  function uploadMax() { return typeof DATA.upload_max_size === 'number' ? DATA.upload_max_size : 0; }
 
   // applySession 把登录后拿到的权限与配置合并进 DATA。
   //
@@ -49,6 +52,8 @@
     if (typeof info.upload_dated === 'boolean') DATA.upload_dated = info.upload_dated;
     if (typeof info.upload_date_dir === 'string') DATA.upload_date_dir = info.upload_date_dir;
     if (typeof info.allow_keys === 'boolean') DATA.allow_keys = info.allow_keys;
+    if (typeof info.allow_settings === 'boolean') DATA.allow_settings = info.allow_settings;
+    if (typeof info.upload_max_size === 'number') DATA.upload_max_size = info.upload_max_size;
     if (typeof info.edit_max_size === 'number') DATA.edit_max_size = info.edit_max_size;
     if (info.user !== undefined) DATA.user = info.user;
     if (typeof info.auth_on === 'boolean') DATA.auth_on = info.auth_on;
@@ -64,12 +69,23 @@
     return true;
   }
 
+  // archiveAt 判断「在这个目录上传」会不会按日期归档。
+  //
+  // 只有站在**服务根目录**上传才归档（/pic.jpg → /2026/09/28/pic.jpg）；
+  // 进了子目录就原地放。理由：子目录本身通常已经是有意义的分层
+  // （项目名、月份、业务线…），再套一层年/月/日 只会越陷越深。
+  //
+  // 判断必须与服务端 applyUploadLayout 完全一致，否则界面提示与实际落盘不符 ——
+  // 那比不提示更糟。服务端的判据是「目标文件的父目录就是根」。
+  function archiveAt(basePath) {
+    return uploadDated() && !!uploadDateDir() && (basePath || '/') === '/';
+  }
+
   // uploadTargetDir 返回上传文件实际会落到哪个目录（仅用于界面提示）。
   // 真正的路径改写由服务端完成，前端只负责展示，避免两端算法不一致。
   function uploadTargetDir(basePath) {
-    var dir = uploadDateDir();
-    if (!uploadDated() || !dir) return basePath;
-    return joinPath(basePath, dir);
+    if (!archiveAt(basePath)) return basePath;
+    return joinPath(basePath, uploadDateDir());
   }
 
   var state = {
@@ -77,11 +93,19 @@
     query: DATA.query || '',
     name: DATA.name || '/',
     entries: (DATA.listing && DATA.listing.entries) || [],
+    // listing 保存服务端返回的完整目录信息，统计口径以它为准：
+    // 里面带 total_all / truncated / dir_count / file_size，
+    // 这些是「把 entries 再数一遍」算不出来的（尤其截断与隐藏文件的情况）。
+    listing: DATA.listing || null,
     selected: new Set(),
     sortKey: 'name',
     sortDir: 1,
     busy: false
   };
+
+  // pendingNav 保存「在导航途中又被请求的那一次导航」（只留最后一次）。
+  // 见 navigate 里的说明：并发点击不能被静默丢掉。
+  var pendingNav = null;
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -387,11 +411,14 @@
     el.appendChild(m);
     $('toasts').appendChild(el);
     var killed = false;
+    var sp = makeSpeedometer();
     return {
       update: function (loaded, total) {
         if (killed) return;
         var pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
-        m.textContent = title + '　' + fmtSize(loaded) + ' / ' + fmtSize(total) + '（' + pct + '%）';
+        var s = sp.sample(loaded, total);
+        m.textContent = title + '　' + fmtSize(loaded) + ' / ' + fmtSize(total) +
+          '（' + pct + '%）' + speedSuffix(s);
       },
       done: function (msg) {
         if (killed) return;
@@ -439,6 +466,19 @@
   function raw(p) { return BASE + p; }
   function fileURL(p) { return raw(encPath(p)); }
 
+  // dirURL 返回目录的规范 URL：**恰好一个**结尾斜杠。
+  //
+  // 不能图省事写 `fileURL(p) + '/'`：根目录 p="/" 时 fileURL 已经是 "/"，
+  // 拼出来是 "//" —— 浏览器把它当「协议相对 URL」（scheme-relative），
+  // 解析结果是 http: 加一个空主机，于是
+  //   history.pushState(..., '//')
+  // 直接抛 `A history state object with URL 'http:' cannot be created`。
+  // 症状很误导：目录其实已经取回来了，却弹出「打开目录失败」。
+  function dirURL(p) {
+    var u = fileURL(p);
+    return u.charAt(u.length - 1) === '/' ? u : u + '/';
+  }
+
   function joinPath(dir, name) {
     return (dir === '/' ? '' : dir.replace(/\/+$/, '')) + '/' + name;
   }
@@ -466,6 +506,52 @@
     if (ms < 1000) return ms + ' ms';
     if (ms < 60000) return (ms / 1000).toFixed(1) + ' s';
     return Math.floor(ms / 60000) + ' 分 ' + Math.round((ms % 60000) / 1000) + ' 秒';
+  }
+
+  // fmtEta 把剩余秒数写成人类的说法。
+  function fmtEta(sec) {
+    if (!(sec > 0) || !isFinite(sec)) return '';
+    if (sec < 1) return '不到 1 秒';
+    if (sec < 60) return Math.ceil(sec) + ' 秒';
+    if (sec < 3600) return Math.floor(sec / 60) + ' 分 ' + Math.round(sec % 60) + ' 秒';
+    return Math.floor(sec / 3600) + ' 小时 ' + Math.round((sec % 3600) / 60) + ' 分';
+  }
+
+  // makeSpeedometer 估算瞬时速率与剩余时间。
+  //
+  // 用指数平滑，而不是「已传字节 / 已耗时」：后者在速度变化时严重滞后 ——
+  // 一开始慢、后来快的情况，它会把平均值一直拉在低位，看着像卡住了。
+  // 平滑系数 0.35 是实测下来的折中：再大抖动明显，再小反应太慢。
+  function makeSpeedometer() {
+    var speed = 0;
+    var lastT = Date.now();
+    var lastB = 0;
+    return {
+      sample: function (bytes, total) {
+        var now = Date.now();
+        var dt = (now - lastT) / 1000;
+        if (dt >= 0.35) {
+          var inst = (bytes - lastB) / dt;
+          if (inst >= 0) speed = speed > 0 ? speed * 0.65 + inst * 0.35 : inst;
+          lastT = now;
+          lastB = bytes;
+        }
+        return {
+          bps: speed,
+          // 速率没稳下来之前不报剩余时间，否则会闪出一串离谱的数字。
+          eta: (speed > 4096 && total > bytes) ? (total - bytes) / speed : 0
+        };
+      },
+      reset: function () { speed = 0; lastT = Date.now(); lastB = 0; }
+    };
+  }
+
+  // speedSuffix 生成「· 1.2 MiB/s · 剩余 8 秒」这一段。
+  function speedSuffix(s) {
+    if (!s || !(s.bps > 0)) return '';
+    var out = '　·　' + fmtSize(s.bps) + '/s';
+    if (s.eta > 0) out += '　·　剩余 ' + fmtEta(s.eta);
+    return out;
   }
 
   // ---------------------------------------------------------------- 图标
@@ -516,6 +602,10 @@
     var b = document.createElement('button');
     b.type = 'button';
     b.className = 'op-btn' + (cls ? ' ' + cls : '');
+    // data-kind 是给 CSS 用的：每类操作有各自的语义色
+    // （下载青、编辑紫、解压橙、重命名绿、删除红…），
+    // 一眼就能分辨，不用逐个去读文字。
+    b.dataset.kind = kind;
     b.title = label;
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
@@ -604,8 +694,11 @@
     mask.appendChild(box);
     mask.addEventListener('mousedown', function (e) {
       if (e.target === mask && !opts.locked) close();
-    });    var escHandler = function (e) {
-      if (e.key === 'Escape') close();
+    });
+    // locked 的弹窗（上传进度、解压进度）不允许用 ESC 关掉：
+    // 关掉只是把界面藏起来，后台任务还在跑，用户会以为已经取消。
+    var escHandler = function (e) {
+      if (e.key === 'Escape' && !opts.locked) close();
     };
     document.addEventListener('keydown', escHandler);
 
@@ -636,6 +729,30 @@
     b.textContent = label;
     b.onclick = onClick;
     return b;
+  }
+
+  // modalFoot 生成统一的弹窗底部操作区。
+  //
+  // 用法：`footer: modalFoot([{label:'取消', onClick:...}, {label:'创建', cls:'primary', onClick:...}])`
+  //
+  // 为什么要有这个函数：以前每个弹窗都是自己拼一个 flex 容器再挂到 .modal 上，
+  // 于是出现了三种问题 —— 底部没有分隔线与背景（看起来像内容的一部分）、
+  // 按钮顺序不统一（有的取消在右）、手机上按钮不等宽。统一走这里之后，
+  // 「取消在左、确认在右、确认按钮带语义色」就是默认行为。
+  //
+  // items 为 null 的项会被跳过，方便按条件插入（例如只读时不显示保存）。
+  function modalFoot(items) {
+    var foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    (items || []).forEach(function (it) {
+      if (!it) return;
+      var b = btn(it.label, it.cls, it.onClick);
+      if (it.id) b.id = it.id;
+      if (it.title) b.title = it.title;
+      if (it.disabled) b.disabled = true;
+      foot.appendChild(b);
+    });
+    return foot;
   }
 
   // confirmDialog 是 Promise 化的确认弹窗，替代原生 confirm
@@ -670,16 +787,20 @@
       var m = openModal({
         title: opts.title || '确认',
         body: body,
-        onClose: function () { finish(false); }
+        onClose: function () { finish(false); },
+        footer: modalFoot([
+          { label: opts.cancelLabel || '取消', onClick: function () { m.close(); } },
+          {
+            label: opts.okLabel || '确定',
+            // 破坏性操作用实心红：这是「最后一步确认」，后果需要一眼可见。
+            cls: opts.danger ? 'danger-solid' : 'primary',
+            onClick: function () {
+              finish(true);   // 先定值
+              m.close();      // 再关闭（此时 onClose 的 finish(false) 会被忽略）
+            }
+          }
+        ])
       });
-      var foot = document.createElement('div');
-      foot.style.cssText = 'display:flex;gap:8px';
-      foot.appendChild(btn('取消', '', function () { m.close(); }));
-      foot.appendChild(btn(opts.okLabel || '确定', opts.danger ? 'danger' : 'primary', function () {
-        finish(true);   // 先定值
-        m.close();      // 再关闭（此时 onClose 的 finish(false) 会被忽略）
-      }));
-      m.el.appendChild(foot);
     });
   }
 
@@ -727,6 +848,63 @@
       if (r === 0) r = a.name.toLowerCase().localeCompare(b.name.toLowerCase(), 'zh-Hans-CN');
       return r * dir;
     });
+  }
+
+  // pickedEntries 返回当前选中的条目（保持列表顺序）。
+  function pickedEntries() {
+    return state.entries.filter(function (e) { return state.selected.has(e.path); });
+  }
+
+  // countOf 统计一组目录/文件的数量与文件字节数。
+  // 目录大小按 0 计 —— 不做递归统计（一个含百万文件的目录会把页面拖死），
+  // 所以文案里写的是「文件合计」而不是含糊的「共」。
+  function countOf(list) {
+    var r = { dirs: 0, files: 0, bytes: 0 };
+    (list || []).forEach(function (e) {
+      if (e.is_dir) r.dirs++;
+      else { r.files++; r.bytes += e.size || 0; }
+    });
+    return r;
+  }
+
+  // statText 生成工具栏统计文案。
+  //
+  // 口径说明（之前这一行显示不准就是因为口径混了）：
+  //   - 目录数/文件数/大小一律取自服务端返回的 listing，而不是前端把
+  //     entries 再数一遍。两边口径必须一致，否则碰上限截断或隐藏文件时，
+  //     页面会报出一个与真实情况不符的数字；
+  //   - 有选中时先报「已选」的规模，再报整个目录的规模，两者用 / 分开。
+  //     以前选中之后数字完全不变，很容易把「整个目录有多大」误读成
+  //     「我选中的有多大」；
+  //   - 被 --list-max-entries 截断时明确标注，避免看起来像是「目录里就这么多」。
+  function statText() {
+    var l = state.listing || {};
+    var listed = state.entries.length;
+    var dirs = typeof l.dir_count === 'number' ? l.dir_count : countOf(state.entries).dirs;
+    var dirsAll = countOf(state.entries);
+    var files = listed - dirs;
+    var size = typeof l.file_size === 'number' ? l.file_size : dirsAll.bytes;
+
+    var out = '';
+    var picked = pickedEntries();
+    if (picked.length) {
+      var pk = countOf(picked);
+      out += '已选 ' + picked.length + ' 项（' + pk.dirs + ' 个目录 · ' + pk.files + ' 个文件';
+      if (pk.bytes > 0) out += ' · ' + fmtSize(pk.bytes);
+      out += '）　/　';
+    }
+
+    if (state.query) {
+      out += '搜索命中 ' + listed + ' 项（' + dirs + ' 个目录 · ' + files + ' 个文件）';
+    } else {
+      out += dirs + ' 个目录 · ' + files + ' 个文件';
+    }
+    if (size > 0) out += ' · 文件合计 ' + fmtSize(size);
+
+    if (l.truncated) {
+      out += '　·　已截断：该目录共 ' + (l.total_all || 0) + ' 项，仅列出前 ' + listed + ' 项';
+    }
+    return out;
   }
 
   function renderTable() {
@@ -889,12 +1067,18 @@
     head.textContent = entry.path;
     body.appendChild(head);
 
-    var m = openModal({ title: entry.name, body: body });
+    var m = openModal({
+      title: entry.name,
+      body: body,
+      // 手机上习惯有一个明确的「取消」出口，而不是只能点右上角的小叉。
+      footer: modalFoot([{ label: '取消', onClick: function () { m.close(); } }])
+    });
 
     actions.forEach(function (a) {
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'action-item' + (a.cls ? ' ' + a.cls : '');
+      b.dataset.kind = a.kind;
 
       var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.setAttribute('viewBox', '0 0 24 24');
@@ -936,17 +1120,17 @@
   }
 
   function syncSelection() {
+    var listed = state.entries.length;
     var n = state.selected.size;
-    $('check-all').checked = n > 0 && n === state.entries.length;
-    $('check-all').indeterminate = n > 0 && n < state.entries.length;
+    // 全选框要跟「当前实际列出/命中的条目」比，而不是跟磁盘上的条目总数比：
+    // 被截断时用户看到的就只有这些，全选自然也只能覆盖这些。
+    $('check-all').checked = listed > 0 && n >= listed;
+    $('check-all').indeterminate = n > 0 && n < listed;
 
-    var dirs = 0, files = 0, bytes = 0;
-    state.entries.forEach(function (e) {
-      if (e.is_dir) dirs++; else { files++; bytes += e.size || 0; }
-    });
-    $('stat').textContent = state.query
-      ? '搜索结果 ' + state.entries.length + ' 项'
-      : dirs + ' 个目录，' + files + ' 个文件，共 ' + fmtSize(bytes);
+    var stat = $('stat');
+    stat.textContent = statText();
+    stat.title = '「文件合计」只统计当前列表里的文件大小，不含子目录里的内容；' +
+      '目录本身不计入大小。';
 
     var btnDel = $('btn-delete-sel');
     btnDel.hidden = !(can('delete') && n > 0);
@@ -967,19 +1151,95 @@
 
   function renderPerms() {
     $('btn-upload').hidden = !can('write');
+    $('btn-upload-dir').hidden = !can('write');
     $('btn-mkdir').hidden = !can('write');
     $('btn-zip').hidden = !can('archive');
     $('btn-keys').hidden = !allowKeys();
+    $('btn-settings').hidden = !allowSettings();
     if (can('write')) {
-      $('btn-upload').title = uploadDated()
-        ? '上传文件（将自动存入 ' + uploadDateDir() + '/）'
-        : '上传文件';
+      $('btn-upload').title = uploadLimitHint();
+      // 文件夹上传的提示：说清「会保留结构」，这是它和普通上传最大的区别。
+      $('btn-upload-dir').title = '上传整个文件夹（保留目录结构）　·　' +
+        uploadLimitHint();
     }
     if (!$('btn-keys').hidden) {
       $('btn-keys').title = '上传密钥：给脚本一个只能上传、可设有效期、可随时撤销的凭证';
     }
+    if (!$('btn-settings').hidden) {
+      $('btn-settings').title = '服务设置：切换服务根目录、调整单文件上传上限';
+    }
     updateAuthChip();
     $('btn-refresh').title = DATA.auth_on ? '刷新（当前：' + (DATA.user || '匿名') + '）' : '刷新';
+    renderDropZone();
+    // 页脚也要跟着权限刷新 —— 它以前只在启动时算一次，
+    // 结果登录之后一直显示「只读模式」，比不显示更误导。
+    renderFooter();
+  }
+
+  // uploadLimitText 返回单文件上限的说明文字（未下发时返回空串）。
+  function uploadLimitText() {
+    var max = DATA.upload_max_size;
+    if (typeof max !== 'number') return '';
+    return max > 0 ? '单文件上限 ' + fmtSize(max) : '单文件不限大小';
+  }
+
+  // uploadLimitHint 生成「上传」按钮的提示，说明落点与大小上限。
+  function uploadLimitHint() {
+    var parts = ['上传文件（也可直接把文件拖进页面）'];
+    var dir = uploadTargetDir(state.path);
+    parts.push('存入 ' + (dir === '/' ? '/' : dir + '/'));
+    // 只有真的会归档时才提这件事。判断用「实际落点 ≠ 当前目录」，
+    // 与投放区、上传弹窗完全同一套口径。
+    if (dir !== state.path) parts.push('按日期自动归档');
+    var lim = uploadLimitText();
+    if (lim) parts.push(lim);
+    return parts.join('　·　');
+  }
+
+  // renderDropZone 更新常驻拖拽投放区的文案与显隐。
+  //
+  // 为什么要有常驻区：只有拖拽过程中才出现的浮层，在用户**开始拖之前**
+  // 是不可见的，等于没有告诉任何人「这个页面支持拖拽」。把入口画在页面上，
+  // 并写明落点，才算真的把能力暴露出来。
+  function renderDropZone() {
+    var zone = $('drop-zone');
+    if (!zone) return;
+    var allowed = can('write');
+    zone.hidden = !allowed;
+    if (!allowed) return;
+
+    var dir = uploadTargetDir(state.path);
+    $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
+      (dir !== state.path ? '（按日期自动归档）' : '');
+    var lim = uploadLimitText();
+    if (lim) $('drop-zone-target').textContent += '　·　' + lim;
+  }
+
+  // renderFooter 渲染页脚。它随登录状态与权限实时变化，因此必须在
+  // renderPerms 里调用，而不是只在启动时算一次。
+  function renderFooter() {
+    $('footer-left').textContent = 'gofs ' + (DATA.version || '');
+
+    var who;
+    if (!DATA.auth_on) {
+      // 服务本身没开鉴权，提「登录」只会让人困惑。
+      who = can('write') ? '无需登录 · 可读写' : '无需登录 · 只读';
+    } else if (DATA.user) {
+      who = '已登录 ' + DATA.user + ' · ' + (can('write') ? '可读写' : '只读');
+    } else {
+      who = '未登录 · 只读';
+    }
+
+    var caps = [];
+    if (can('write')) caps.push('可上传');
+    if (can('delete')) caps.push('可删除');
+    if (can('edit')) caps.push('可在线编辑');
+    if (can('extract')) caps.push('可在线解压');
+    // 归档只在根目录生效，页脚也要跟着当前目录变 —— 站在子目录里还写
+    // 「上传归档到 2026/09/28/」就是假的。
+    if (can('write') && archiveAt(state.path)) caps.push('上传归档到 ' + uploadDateDir() + '/');
+
+    $('footer-right').textContent = caps.length ? who + '　·　' + caps.join(' · ') : who;
   }
 
   function render() {
@@ -1001,25 +1261,63 @@
   }
 
   async function navigate(path, push) {
-    if (state.busy) return;
+    // 已经在导航中：**不要静默丢弃**这次请求，把它记下来，等当前这次结束后补跑。
+    //
+    // 静默 return 的症状就是「点了没反应」：用户点「根目录」的那一刻，如果恰好
+    // 有一次「上传完成后的列表刷新」在途（那是很常见的），这次点击就白点了 ——
+    // 地址栏不动、列表不动、也没有任何提示，用户只能反复点。
+    // 队列里只保留最后一次请求即可（中间那些本来就会被覆盖），被取代的那次
+    // 立刻以 false 结掉，免得它的调用方一直等下去。
+    if (state.busy) {
+      if (window.__navDebug) console.log('[nav] 排队', path);
+      if (pendingNav) pendingNav.resolve(false);
+      return new Promise(function (resolve) {
+        // 返回的 Promise 要等到这次排队的导航真正跑完才 resolve，
+        // 调用方才能用 `await navigate(...)` 判断「到了没有」。
+        pendingNav = { path: path, push: push, resolve: resolve };
+      });
+    }
+    // 打开 window.__navDebug = true 就能看到每次导航的调用来源，
+    // 排查「点了没反应 / 列表没刷新」这类问题时比一步步断点快得多。
+    if (window.__navDebug) {
+      console.log('[nav] 进入', path, 'busy=false',
+        new Error().stack.split('\n')[2]);
+    }
     state.busy = true;
     try {
       var data = await fetchListing(path);
       state.path = data.path || path;
       state.name = data.name || path;
       state.entries = data.entries || [];
+      state.listing = data;
       state.query = '';
       state.selected.clear();
       $('search-input').value = '';
       if (push !== false && DATA.perms.read) {
-        history.pushState({ path: state.path }, '', fileURL(state.path) + '/');
+        // 地址栏更新是「锦上添花」，不能让它拖垮导航：目录已经取回来了，
+        // 万一 pushState 因为任何原因失败（URL 构造问题、跨源限制、
+        // 浏览器历史条目上限），也应该照常把列表渲染出来。
+        try {
+          history.pushState({ path: state.path }, '', dirURL(state.path));
+        } catch (e) {
+          if (window.console && console.warn) console.warn('更新地址栏失败：', e);
+        }
       }
       render();
     } catch (err) {
       toast('err', '打开目录失败：' + err.message);
+      if (pendingNav) pendingNav.resolve(false);
+      pendingNav = null;
       return false;
     } finally {
       state.busy = false;
+      var next = pendingNav;
+      pendingNav = null;
+      if (next) {
+        // 补跑排队中的那次；结果回传给它的调用方（async 函数体在第一个
+        // await 之前是同步执行的，所以这里忙碌标志已经被重新置上）。
+        navigate(next.path, next.push).then(next.resolve, function () { next.resolve(false); });
+      }
     }
     return true;
   }
@@ -1032,6 +1330,7 @@
       var data = await res.json();
       state.query = q;
       state.entries = data.entries || [];
+      state.listing = data;
       state.selected.clear();
       render();
       $('search-input').value = q;
@@ -1201,38 +1500,215 @@
     }
   }
 
+  // ---- 文件夹上传 ----------------------------------------------------------
+  //
+  // 浏览器给的两条路都能拿到「相对路径」，从而实现保留目录结构：
+  //   1) <input webkitdirectory> 选目录 → 每个 File 自带 webkitRelativePath；
+  //   2) 拖拽目录 → 只有 DataTransferItem.webkitGetAsEntry() 能递归拿到
+  //      FileSystemDirectoryEntry，它的 file() 返回的 File **没有**
+  //      webkitRelativePath，所以边遍历边自己拼一个。
+  // 两条路最终都收敛成「带相对路径的 File 列表」，后面的上传逻辑完全共用。
+
+  // uploadConcurrency 同时进行的上传请求数。
+  //
+  // 为什么不是 1：传文件夹时绝大多数是几 KB 的小文件，串行的话每个文件都要
+  // 等一个 RTT，几百个文件会慢得离谱。取 3 是个折中 —— 小文件能吃到并行，
+  // 又远低于服务端的并发闸门，且总带宽不会被切得太碎（速度读数也还稳）。
+  var uploadConcurrency = 3;
+
+  // uploadBatchWarn 超过这个数量先弹一次确认。
+  // 传文件夹时手滑拖进整个 home 目录是很容易发生的，先问一句。
+  var uploadBatchWarn = 200;
+
+  // relPathOf 取文件的相对路径（没有就退化成文件名）。
+  function relPathOf(f) {
+    return f.webkitRelativePath || f.__relPath || f.name;
+  }
+
+  // sanitizeRel 清洗相对路径：丢掉空段、`.`、`..`，以及含分隔符/反斜杠的段。
+  // 正常来源（浏览器给的相对路径、遍历得到的 entry.name）都不会命中，
+  // 但这是从「用户设备上的文件名」拼出来的路径，值得在下发前挡一道。
+  function sanitizeRel(rel) {
+    var parts = String(rel || '').split('/');
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i];
+      if (!seg || seg === '.' || seg === '..') continue;
+      if (seg.indexOf('\\') >= 0 || seg.indexOf(':') >= 0) continue;
+      out.push(seg);
+    }
+    return out.join('/');
+  }
+
+  // readAllEntries 反复调 readEntries 直到返回空数组。
+  // 规范允许一次只返回一批（Chromium 是 100 条），只调一次会漏文件。
+  function readAllEntries(reader) {
+    return new Promise(function (resolve) {
+      var acc = [];
+      var step = function () {
+        reader.readEntries(function (batch) {
+          if (!batch || !batch.length) { resolve(acc); return; }
+          acc = acc.concat(Array.prototype.slice.call(batch));
+          step();
+        }, function () { resolve(acc); });
+      };
+      step();
+    });
+  }
+
+  // collectEntryFiles 递归展开拖进来的目录，返回带相对路径的 File 列表。
+  async function collectEntryFiles(items) {
+    var out = [];
+    var skipped = 0;
+
+    async function walk(entry, prefix) {
+      if (!entry) return;
+      if (entry.isFile) {
+        var f = await new Promise(function (resolve) {
+          entry.file(resolve, function () { resolve(null); });
+        });
+        if (!f) { skipped++; return; }
+        // 原生 File 没有 webkitRelativePath，自己挂一个（只读属性，用 defineProperty）
+        var rel = sanitizeRel(prefix + entry.name);
+        if (!rel) { skipped++; return; }
+        try {
+          Object.defineProperty(f, '__relPath', { value: rel });
+        } catch (e) { /* 挂不上就退化用 name */ }
+        out.push(f);
+        return;
+      }
+      if (entry.isDirectory) {
+        var reader = entry.createReader();
+        var children = await readAllEntries(reader);
+        for (var i = 0; i < children.length; i++) {
+          await walk(children[i], prefix + entry.name + '/');
+        }
+      }
+    }
+
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it || it.kind !== 'file' || typeof it.webkitGetAsEntry !== 'function') continue;
+      await walk(it.webkitGetAsEntry(), '');
+    }
+    return { files: out, skipped: skipped };
+  }
+
+  // pickDroppedFiles 从一次 drop 里取出文件。
+  //
+  // ⚠️ DataTransferItemList 只在事件派发期间有效，任何 await 之后都会失效，
+  // 所以必须**同步**先把 items 取出来（并立刻调用 webkitGetAsEntry 拿到 entry），
+  // 再去异步遍历。
+  async function pickDroppedFiles(dt) {
+    if (!dt) return { files: [], skipped: 0 };
+    var entries = [];
+    var items = dt.items;
+    if (items && items.length) {
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (!it || it.kind !== 'file') continue;
+        if (typeof it.webkitGetAsEntry === 'function') {
+          var e = null;
+          try { e = it.webkitGetAsEntry(); } catch (err) { e = null; }
+          if (e) { entries.push(e); continue; }
+        }
+        // 拿不到 entry（老浏览器 / 非文件项）：退回 getAsFile
+        if (typeof it.getAsFile === 'function') {
+          var f0 = it.getAsFile();
+          if (f0) entries.push({ isFile: true, _file: f0, name: f0.name });
+        }
+      }
+    }
+    if (entries.length) {
+      var res = await collectEntryFiles(entries.map(function (e) {
+        // 统一成「像 DataTransferItem」的形状，复用同一段遍历代码
+        return { kind: 'file', webkitGetAsEntry: function () { return e; } };
+      }));
+      if (res.files.length) return res;
+    }
+    // 最后兜底：扁平文件列表（拖文件夹时这里会拿不到内容，但至少不丢普通文件）
+    var files = Array.prototype.slice.call(dt.files || []);
+    return { files: files, skipped: 0 };
+  }
+
+  // countDroppedItems 数出拖拽浮层里要显示的条目数。
+  function countDroppedItems(dt) {
+    if (!dt) return 0;
+    if (dt.items && dt.items.length) {
+      var n = 0;
+      for (var i = 0; i < dt.items.length; i++) {
+        if (dt.items[i] && dt.items[i].kind === 'file') n++;
+      }
+      return n;
+    }
+    return (dt.files && dt.files.length) || 0;
+  }
+
+  // ---- 上传 ----------------------------------------------------------------
+
   async function uploadFiles(files, targetDir) {
     if (!files || !files.length) return;
     if (!can('write')) { toast('warn', '当前没有上传权限'); return; }
 
     var jobs = [];
+    var skippedNames = 0;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      // webkitRelativePath 用于文件夹上传，保留相对结构。
-      var rel = f.webkitRelativePath || f.name;
-      jobs.push({ file: f, dest: joinPath(targetDir, rel) });
+      // 相对路径用于文件夹上传，保留目录结构。
+      var rel = sanitizeRel(relPathOf(f));
+      if (!rel) { skippedNames++; continue; }
+      jobs.push({ file: f, rel: rel, dest: joinPath(targetDir, rel) });
+    }
+    if (!jobs.length) {
+      toast('warn', skippedNames ? '这些条目没有可用的文件名，已跳过' : '没有可上传的文件');
+      return;
+    }
+
+    // 传文件夹很容易一次带上成千上万个文件。批量确认一次，
+    // 免得手滑把整个 home 目录拖进来。
+    var isTree = jobs.length > 1 && jobs.some(function (j) { return j.rel.indexOf('/') >= 0; });
+    if (jobs.length > uploadBatchWarn) {
+      var okGo = await confirmDialog({
+        title: '确认上传 ' + jobs.length + ' 个文件？',
+        message: '这次包含 ' + (isTree ? '文件夹，共 ' : '') + jobs.length + ' 个文件，合计 ' +
+          fmtSize(jobs.reduce(function (s, j) { return s + j.file.size; }, 0)) + '。',
+        detail: '会保留原有的文件夹结构逐个写入服务器；上传过程中点右上角 ✕ 可取消剩余文件。',
+        okLabel: '开始上传'
+      });
+      if (!okGo) return;
     }
 
     var totalBytes = jobs.reduce(function (s, j) { return s + j.file.size; }, 0);
-    var doneBytes = 0;
     var destDir = uploadTargetDir(targetDir);
+    // 每个文件已传字节，用来在并发时汇总总进度。
+    var loadedByJob = new Array(jobs.length);
+    for (var z = 0; z < jobs.length; z++) loadedByJob[z] = 0;
+    var loadedTotal = 0;
+    var finished = 0;
+    var failures = [];
+    var cancelled = false;
+    var poolDone = false;
 
     var body = document.createElement('div');
 
-    // 开了日期归档时，明确告知文件会落到哪一级目录。
+    // 无论是否开启归档，都明确写出「文件会落到哪个目录」——
+    // 上传最让人不安的就是不知道东西存哪去了。
+    var note = document.createElement('div');
+    note.className = 'hint-box';
+    note.style.marginBottom = '14px';
+    var nb = document.createElement('b');
+    nb.textContent = '存入';
+    note.appendChild(nb);
+    note.appendChild(document.createTextNode('：'));
+    var code = document.createElement('code');
+    code.textContent = destDir + '/';
+    note.appendChild(code);
     if (destDir !== targetDir) {
-      var note = document.createElement('div');
-      note.className = 'hint-box';
-      note.style.marginBottom = '2px';
-      var nb = document.createElement('b');
-      nb.textContent = '按日期归档';
-      note.appendChild(nb);
-      note.appendChild(document.createTextNode('：文件将存入 '));
-      var code = document.createElement('code');
-      code.textContent = destDir + '/';
-      note.appendChild(code);
-      body.appendChild(note);
+      note.appendChild(document.createTextNode('（按日期自动归档）'));
     }
+    note.appendChild(document.createTextNode('　·　单文件上限：' +
+      (uploadMax() > 0 ? fmtSize(uploadMax()) : '不限')));
+    body.appendChild(note);
 
     var bar = document.createElement('i');
     var wrap = document.createElement('div');
@@ -1254,48 +1730,83 @@
     body.appendChild(wrap);
 
     var m = openModal({
-      title: '上传 ' + jobs.length + ' 个文件',
+      title: (isTree ? '上传文件夹' : '上传 ' + jobs.length + ' 个文件'),
       body: body,
-      locked: true
+      locked: true,
+      // locked 的弹窗不能用 ESC / 点遮罩关掉，但右上角的 ✕ 仍然可点 ——
+      // 传文件夹时那正是「我不想再传了」的出口。只有池子还没跑完时才算取消：
+      // 正常收尾时我们自己调 m.close()，那一刻不能再把自己标成取消。
+      beforeClose: function () {
+        if (!poolDone) cancelled = true;
+        return true;
+      }
     });
 
-    function update(name, loaded) {
-      var pct = totalBytes > 0 ? Math.min(100, ((doneBytes + loaded) / totalBytes) * 100) : 0;
+    var sp = makeSpeedometer();
+    function repaint(name, seq) {
+      var pct = totalBytes > 0 ? Math.min(100, (loadedTotal / totalBytes) * 100) : 0;
       bar.style.width = pct.toFixed(1) + '%';
       metaL.textContent = Math.round(pct) + '%';
-      metaR.textContent = fmtSize(doneBytes + loaded) + ' / ' + fmtSize(totalBytes);
-      cur.textContent = name;
+      metaR.textContent = fmtSize(loadedTotal) + ' / ' + fmtSize(totalBytes) +
+        speedSuffix(sp.sample(loadedTotal, totalBytes));
+      // 传文件夹时把「第几个 / 共几个」和当前相对路径都写出来，
+      // 否则一整个目录只看得到数字在动，完全不知道进行到哪了。
+      if (name !== undefined) {
+        cur.textContent = (seq && jobs.length > 1 ? seq + '/' + jobs.length + '　' : '') + name;
+      }
     }
+    repaint();
 
-    var failed = 0;
-    for (var k = 0; k < jobs.length; k++) {
-      var job = jobs[k];
-      var base = doneBytes;
-      try {
-        await putFile(fileURL(job.dest), job.file, function (loaded) {
-          update(job.file.name, loaded);
-        });
-        doneBytes = base + job.file.size;
-        update(job.file.name, job.file.size);
-      } catch (err) {
-        failed++;
-        toast('err', '上传失败 ' + job.file.name + '：' + err.message);
+    // 有界并发：worker 池 + 共享游标，避免一次性发起 N 个请求。
+    var cursor = 0;
+    async function worker() {
+      for (;;) {
+        if (cancelled) return;
+        var idx = cursor++;
+        if (idx >= jobs.length) return;
+        var job = jobs[idx];
+        repaint(job.rel, idx + 1);
+        try {
+          await putFile(fileURL(job.dest), job.file, function (loaded) {
+            loadedTotal += loaded - loadedByJob[idx];
+            loadedByJob[idx] = loaded;
+            repaint(job.rel, idx + 1);
+          });
+          loadedTotal += job.file.size - loadedByJob[idx];
+          loadedByJob[idx] = job.file.size;
+        } catch (err) {
+          failures.push(job.rel + '：' + err.message);
+        }
+        finished++;
       }
     }
 
-    var okCount = jobs.length - failed;
-    bar.style.width = '100%';
-    m.close();
-    if (failed === 0) {
-      bar.style.background = 'var(--ok)';
-    }
+    var n = Math.min(uploadConcurrency, jobs.length);
+    var pool = [];
+    for (var w = 0; w < n; w++) pool.push(worker());
+    await Promise.all(pool);
+    poolDone = true;
 
-    var msg = '已上传 ' + okCount + '/' + jobs.length + ' 个文件（共 ' + fmtSize(totalBytes) + '）';
+    var okCount = jobs.length - failures.length;
+    bar.style.width = '100%';
+    if (!failures.length) bar.style.background = 'var(--ok)';
+    m.close();
+
+    var msg = (cancelled ? '已取消，' : '') + '已上传 ' + okCount + '/' + jobs.length + ' 个文件（共 ' +
+      fmtSize(totalBytes) + '）';
     if (destDir !== targetDir) msg += '\n存入 ' + destDir + '/';
-    toast(failed ? 'warn' : 'ok', msg, null, okCount > 0 ? {
-      label: '查看',
-      onClick: function () { navigate(destDir); }
-    } : null);
+    if (cancelled) msg += '\n余下 ' + (jobs.length - finished) + ' 个文件未上传';
+    if (failures.length) {
+      // 传文件夹时失败很容易成片出现，逐个弹 toast 会把界面刷爆 ——
+      // 汇总成一条，列出前几个具体原因。
+      msg += '\n失败 ' + failures.length + ' 个：' + failures.slice(0, 3).join('；') +
+        (failures.length > 3 ? ' …等' : '');
+    }
+    toast(failures.length ? 'err' : (cancelled ? 'warn' : 'ok'), msg,
+      null, okCount > 0 ? {
+        label: '查看',
+        onClick: function () { navigate(destDir); }
+      } : null);
 
     // 停留在原目录，这样连续拖拽不会越陷越深（不会生成 日期/日期 的嵌套）。
     navigate(state.path, false);
@@ -1319,7 +1830,14 @@
     hint.textContent = '将创建在：' + (state.path === '/' ? '/' : state.path + '/');
     field.appendChild(hint);
 
-    var m = openModal({ title: '新建目录', body: field });
+    var m = openModal({
+      title: '新建目录',
+      body: field,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        { label: '创建', cls: 'primary', onClick: function () { submit(); } }
+      ])
+    });
 
     async function submit() {
       var name = input.value.trim();
@@ -1340,12 +1858,6 @@
     }
 
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
-    var foot = document.createElement('div');
-    foot.style.display = 'flex';
-    foot.style.gap = '8px';
-    foot.appendChild(btn('取消', '', function () { m.close(); }));
-    foot.appendChild(btn('创建', 'primary', submit));
-    m.el.appendChild(foot);
   }
 
   // ---------------------------------------------------------------- 重命名 / 移动
@@ -1366,7 +1878,14 @@
     hint.textContent = '填写相对路径可移动到其他目录，例如 sub/new.txt';
     field.appendChild(hint);
 
-    var m = openModal({ title: '重命名 / 移动', body: field });
+    var m = openModal({
+      title: '重命名 / 移动',
+      body: field,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        { label: '确定', cls: 'primary', onClick: function () { submit(); } }
+      ])
+    });
 
     async function submit() {
       var name = input.value.trim();
@@ -1395,11 +1914,6 @@
     }
 
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
-    var foot = document.createElement('div');
-    foot.style.cssText = 'display:flex;gap:8px';
-    foot.appendChild(btn('取消', '', function () { m.close(); }));
-    foot.appendChild(btn('确定', 'primary', submit));
-    m.el.appendChild(foot);
   }
 
   // ---------------------------------------------------------------- 删除
@@ -1427,7 +1941,18 @@
     }
     box.appendChild(ul);
 
-    var m = openModal({ title: '确认删除', body: box });
+    var m = openModal({
+      title: '确认删除',
+      body: box,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        {
+          label: entries.length > 1 ? '删除 ' + entries.length + ' 项' : '删除',
+          cls: 'danger-solid',
+          onClick: function () { submit(); }
+        }
+      ])
+    });
 
     async function submit() {
       var failed = [];
@@ -1452,12 +1977,6 @@
       }
       navigate(state.path, false);
     }
-
-    var foot = document.createElement('div');
-    foot.style.cssText = 'display:flex;gap:8px';
-    foot.appendChild(btn('取消', '', function () { m.close(); }));
-    foot.appendChild(btn('确认删除', 'danger', submit));
-    m.el.appendChild(foot);
   }
 
   // ---------------------------------------------------------------- 压缩包预览
@@ -1465,7 +1984,23 @@
   async function openArchivePreview(entry) {
     var body = document.createElement('div');
     body.textContent = '正在读取压缩包…';
-    var m = openModal({ title: entry.name, body: body, wide: true });
+    var m = openModal({
+      title: entry.name,
+      body: body,
+      wide: true,
+      footer: modalFoot([
+        { label: '关闭', onClick: function () { m.close(); } },
+        // 看完内容通常就是想解压，把入口放在这里比退回列表再点更顺手。
+        can('extract') && {
+          label: '解压到…',
+          cls: 'zip',
+          onClick: function () {
+            m.close();
+            openExtractDialog(entry);
+          }
+        }
+      ])
+    });
 
     try {
       var res = await apiFetch(API + '?path=' + encodeURIComponent(entry.path));
@@ -1508,6 +2043,7 @@
           var take = document.createElement('button');
           take.type = 'button';
           take.className = 'op-btn';
+          take.dataset.kind = 'download';
           take.textContent = '取出';
           take.onclick = function () {
             take.disabled = true;
@@ -1578,7 +2114,14 @@
     wrap.appendChild(owWrap);
     wrap.appendChild(limitBox);
 
-    var m = openModal({ title: '解压 ' + entry.name, body: wrap });
+    var m = openModal({
+      title: '解压 ' + entry.name,
+      body: wrap,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        { label: '开始解压', cls: 'primary', onClick: function () { submit(); } }
+      ])
+    });
 
     async function submit() {
       var dest = input.value.trim();
@@ -1589,11 +2132,6 @@
     }
 
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
-    var foot = document.createElement('div');
-    foot.style.cssText = 'display:flex;gap:8px';
-    foot.appendChild(btn('取消', '', function () { m.close(); }));
-    foot.appendChild(btn('开始解压', 'primary', submit));
-    m.el.appendChild(foot);
   }
 
   function defaultDest(p) {
@@ -1637,19 +2175,15 @@
     wrap.appendChild(cur);
     wrap.appendChild(logBox);
 
-    var closeBtn = btn('后台运行', '', function () { m.close(); });
-
     var m = openModal({
       title: '解压 ' + entry.name,
       body: wrap,
       locked: true,
-      onClose: null
+      footer: modalFoot([
+        // 解压是后台任务，关掉弹窗不会中断它 —— 按钮文案如实说明这一点。
+        { label: '后台运行', onClick: function () { m.close(); } }
+      ])
     });
-
-    var foot = document.createElement('div');
-    foot.style.cssText = 'display:flex;gap:8px';
-    foot.appendChild(closeBtn);
-    m.el.appendChild(foot);
 
     function log(msg) {
       logBox.textContent = msg;
@@ -1786,13 +2320,23 @@
   // ---------------------------------------------------------------- 事件绑定
 
   function bindEvents() {
-    $('btn-upload').onclick = function () { $('file-input').click(); };
-
-    $('file-input').onchange = function (e) {
+    // 上传文件 / 上传文件夹：两个输入框共用同一段处理逻辑，
+    // 区别只是 dir-input 带 webkitdirectory（浏览器会带上相对路径）。
+    //
+    // ⚠️ onchange 必须在这里一次性绑好，不能放在按钮的 onclick 里 ——
+    // 投放区整块可点时也会直接调 $('file-input').click()，那条路径不经过
+    // 按钮，onchange 漏绑就等于「选了文件什么也没发生」。
+    function onPicked(e) {
       var files = Array.prototype.slice.call(e.target.files || []);
+      // 清空 value，否则连续选择同一个目录时不会再触发 change。
       e.target.value = '';
       uploadFiles(files, state.path);
-    };
+    }
+    $('file-input').onchange = onPicked;
+    $('dir-input').onchange = onPicked;
+
+    $('btn-upload').onclick = function () { $('file-input').click(); };
+    $('btn-upload-dir').onclick = function () { $('dir-input').click(); };
 
     $('btn-mkdir').onclick = openMkdirDialog;
     $('btn-refresh').onclick = function () { navigate(state.path, false); };
@@ -1800,7 +2344,7 @@
     // 打包下载：默认打包整个目录；一旦勾选了条目，就只打包所选。
     $('btn-zip').onclick = function () {
       var dirName = baseName(state.path) || 'root';
-      var picked = state.entries.filter(function (e) { return state.selected.has(e.path); });
+      var picked = pickedEntries();
       var label = picked.length ? ('所选 ' + picked.length + ' 项') : dirName;
       var t = progressToast('打包 ' + label);
 
@@ -1830,9 +2374,10 @@
     };
 
     $('btn-keys').onclick = function () { G.openKeys(); };
+    $('btn-settings').onclick = function () { G.openSettings(); };
 
     $('btn-delete-sel').onclick = function () {
-      var picked = state.entries.filter(function (e) { return state.selected.has(e.path); });
+      var picked = pickedEntries();
       if (picked.length) doDelete(picked);
     };
 
@@ -1841,7 +2386,6 @@
       if (e.target.checked) state.entries.forEach(function (x) { state.selected.add(x.path); });
       renderTable();
     };
-
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
       th.onclick = function () {
         var k = th.dataset.sort;
@@ -1862,31 +2406,72 @@
       if (e.key === 'Escape') { e.target.value = ''; doSearch(''); }
     };
 
-    // 拖拽上传
+    // 拖拽上传。两层提示：
+    //   - 常驻的 .drop-zone 让「可以拖」这件事在没有拖拽时也能看见；
+    //   - 拖进窗口后的全屏浮层显示**落点**，避免拖到别的目录里去。
     var dragDepth = 0;
+
+    // dropFileCount 尽量数出正在拖的条目数量。
+    // dragenter 阶段 dataTransfer.files 还是空的，只有 items 可用。
+    // 数的是「拖进来的顶层条目」——一个文件夹算 1 项，展开后可能是几百个文件，
+    // 真实数量要等 drop 之后异步遍历才知道（那时会另开进度弹窗）。
+    function dropFileCount(dt) {
+      return countDroppedItems(dt);
+    }
+
+    function dragHasFiles(dt) {
+      if (!dt || !dt.types) return false;
+      return Array.prototype.indexOf.call(dt.types, 'Files') >= 0;
+    }
+
+    function showDropHint(n) {
+      var dir = uploadTargetDir(state.path);
+      $('drop-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/');
+      var notes = [];
+      if (n > 0) notes.push(n + ' 项');
+      var lim = uploadLimitText();
+      if (lim) notes.push(lim);
+      $('drop-note').textContent = notes.join('　·　');
+      $('drop-hint').classList.add('on');
+      $('drop-zone').classList.add('on');
+    }
+
+    function hideDropHint() {
+      $('drop-hint').classList.remove('on');
+      $('drop-zone').classList.remove('on');
+    }
+
     window.addEventListener('dragenter', function (e) {
       if (!can('write')) return;
-      if (!e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') < 0) return;
+      if (!dragHasFiles(e.dataTransfer)) return;
       e.preventDefault();
       dragDepth++;
-      $('drop-target').textContent = uploadTargetDir(state.path) + '/';
-      $('drop-hint').classList.add('on');
+      showDropHint(dropFileCount(e.dataTransfer));
     });
     window.addEventListener('dragover', function (e) {
       if (can('write')) e.preventDefault();
     });
     window.addEventListener('dragleave', function (e) {
       dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) $('drop-hint').classList.remove('on');
+      if (dragDepth === 0) hideDropHint();
     });
-    window.addEventListener('drop', function (e) {
+    window.addEventListener('drop', async function (e) {
       if (!can('write')) return;
       e.preventDefault();
       dragDepth = 0;
-      $('drop-hint').classList.remove('on');
-      var files = Array.prototype.slice.call((e.dataTransfer && e.dataTransfer.files) || []);
-      if (files.length) uploadFiles(files, state.path);
+      hideDropHint();
+      // ⚠️ dataTransfer.items 只在事件派发期间有效，必须先同步取出来，
+      // 再交给异步的目录遍历（否则 items 已经清空，拖文件夹会什么都拿不到）。
+      var picked = await pickDroppedFiles(e.dataTransfer);
+      if (picked.skipped) toast('warn', '有 ' + picked.skipped + ' 个条目没有可用的文件名，已跳过');
+      if (picked.files.length) uploadFiles(picked.files, state.path);
     });
+
+    // 常驻投放区整块可点：点哪儿都能打开文件选择框，符合网盘的直觉。
+    // 「选择文件夹…」按钮要 stopPropagation，否则会连带触发外层的选文件。
+    $('drop-zone').onclick = function () { $('file-input').click(); };
+    $('drop-zone-pick').onclick = function (e) { e.stopPropagation(); $('file-input').click(); };
+    $('drop-zone-dir').onclick = function (e) { e.stopPropagation(); $('dir-input').click(); };
 
     // 浏览器前进/后退
     window.addEventListener('popstate', function (e) {
@@ -1943,12 +2528,9 @@
     render();
   }
 
-  $('footer-left').textContent = 'gofs ' + (DATA.version || '');
-  var footerParts = [];
-  if (uploadDated() && can('write')) footerParts.push('上传自动归档到 ' + uploadDateDir() + '/');
-  if (can('edit')) footerParts.push('支持在线编辑文本文件');
-  if (can('extract')) footerParts.push('支持在线解压：zip / tar / tar.gz / tgz / gz');
-  $('footer-right').textContent = footerParts.join('　·　') || (can('write') ? '可上传' : '只读模式');
+  // 页脚与权限相关的显隐由 render() -> renderPerms() -> renderFooter() 负责，
+  // 这里不再单独算一次 —— 之前那份「只在启动时执行」的代码就是
+  // 「登录后仍显示只读模式」的原因。
 
   // 暴露给 editor.js / keys.js 复用，避免它们重复实现请求封装与 UI 组件。
   G.apiFetch = apiFetch;
@@ -1956,6 +2538,7 @@
   G.toast = toast;
   G.progressToast = progressToast;
   G.openModal = openModal;
+  G.modalFoot = modalFoot;
   G.confirm = confirmDialog;
   G.btn = btn;
   G.fmtSize = fmtSize;

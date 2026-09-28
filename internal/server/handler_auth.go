@@ -66,15 +66,21 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 
 	// 除了权限，还要把「未登录外壳里刻意没下发」的配置一并补齐，
 	// 否则前端登录后仍然不知道上传归档、在线编辑、密钥等能力是否可用。
+	//
+	// allow_settings 要按**服务根**的权限算，而不是调用方所在的路径：
+	// 只有能读写整个服务的账号才该看到「服务设置」入口。
+	admin := s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
 	reply := map[string]any{
-		"auth_on":       true,
-		"authenticated": true,
-		"user":          user,
-		"anonymous":     false,
-		"perms":         s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
-		"upload_dated":  s.cfg.UploadDated(),
-		"allow_keys":    s.cfg.AllowKeys && perm == auth.PermReadWrite,
-		"edit_max_size": s.cfg.EditMaxSize,
+		"auth_on":         true,
+		"authenticated":   true,
+		"user":            user,
+		"anonymous":       false,
+		"perms":           s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
+		"upload_dated":    s.cfg.UploadDated(),
+		"allow_keys":      s.cfg.AllowKeys && perm == auth.PermReadWrite,
+		"edit_max_size":   s.cfg.EditMaxSize,
+		"upload_max_size": s.settings.UploadMaxSize(),
+		"allow_settings":  admin,
 	}
 	if s.cfg.UploadDated() {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())

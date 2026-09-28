@@ -73,6 +73,11 @@ type pageData struct {
 	AuthRequired bool `json:"auth_required"`
 	// AllowKeys 表示当前用户可以在页面上管理上传密钥。
 	AllowKeys bool `json:"allow_keys"`
+	// UploadMaxSize 为当前生效的单文件上传上限（字节），0 表示不限制。
+	UploadMaxSize int64 `json:"upload_max_size"`
+	// AllowSettings 表示当前用户可以在页面上修改服务级设置
+	// （切换根目录、调整上传上限）。
+	AllowSettings bool `json:"allow_settings"`
 }
 
 // extractLimits 把解压安全上限透给前端展示。
@@ -98,7 +103,8 @@ func (s *Server) buildPerms(p permResult) permsData {
 }
 
 // newPageData 组装注入页面的初始状态。
-func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string) pageData {
+// admin 决定是否显示「服务设置」入口（切换根目录、调整上传上限）。
+func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string, admin bool) pageData {
 	return pageData{
 		Version:          config.Version,
 		PathPrefix:       s.cfg.PathPrefix,
@@ -115,6 +121,8 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		UploadDateLayout: s.cfg.UploadDateLayout,
 		EditMaxSize:      s.cfg.EditMaxSize,
 		AllowKeys:        s.cfg.AllowKeys && p.Perm == auth.PermReadWrite,
+		UploadMaxSize:    s.settings.UploadMaxSize(),
+		AllowSettings:    admin,
 		Extract: extractLimits{
 			MaxTotalBytes: s.cfg.ExtractMaxTotal,
 			MaxFiles:      s.cfg.ExtractMaxFiles,
@@ -125,7 +133,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 
 // renderIndex 渲染目录页面。
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, listing *fsutil.Listing, p permResult) {
-	s.writeHTML(w, s.newPageData(p, listing, ""))
+	s.writeHTML(w, s.newPageData(p, listing, "", s.isAdminRequest(r)))
 }
 
 // serveSearch 处理 ?q= 搜索。
@@ -155,7 +163,7 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 		s.writeJSON(w, listing)
 		return
 	}
-	s.writeHTML(w, s.newPageData(p, listing, pattern))
+	s.writeHTML(w, s.newPageData(p, listing, pattern, s.isAdminRequest(r)))
 }
 
 // writeHTML 把初始数据注入 index.html 后输出。

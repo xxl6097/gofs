@@ -24,6 +24,9 @@ w("docs/readme.md", "# gofs 测试文档\n\n这是普通 Markdown 文件。\n")
 w("docs/guide.txt", "使用说明\n" + "内容行\n" * 200)
 w("中文目录/中文文件.txt", "中文内容测试\n")
 w("notes.txt", "顶层文件\n")
+# 根目录放一个「可预览」的文本文件：前端 UI 测试要靠它验证编辑器里的
+# 预览 / 格式化 / 校验入口，只有 md/json/xml/html 这几类才会出现该按钮。
+w("demo.json", '{\n  "name": "gofs",\n  "ok": true,\n  "items": [1, 2, 3]\n}\n')
 
 # ---- 一个稍大的文件，用于验证压缩与进度 ----
 w("docs/big.bin", bytes(range(256)) * 4096)  # 1 MiB

@@ -25,14 +25,16 @@ import (
 
 // Server 持有全部运行时依赖。
 type Server struct {
-	cfg    *config.Config
-	res    *fsutil.Resolver
-	auth   *auth.Authenticator
-	keys   *uploadkey.Store
-	guard  *guard
-	assets fs.FS
-	ui     *uiTemplate
-	logger *Logger
+	cfg   *config.Config
+	res   *fsutil.Resolver
+	auth  *auth.Authenticator
+	keys  *uploadkey.Store
+	guard *guard
+	// settings 存放可以在运行期修改、且会被并发读取的设置。
+	settings *runtimeSettings
+	assets   fs.FS
+	ui       *uiTemplate
+	logger   *Logger
 }
 
 // WebDAV 风格的方法，标准库未定义。
@@ -86,14 +88,15 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:    cfg,
-		res:    res,
-		auth:   authn,
-		keys:   keys,
-		guard:  newGuard(cfg),
-		assets: assetsFS,
-		ui:     ui,
-		logger: logger,
+		cfg:      cfg,
+		res:      res,
+		auth:     authn,
+		keys:     keys,
+		guard:    newGuard(cfg),
+		settings: newRuntimeSettings(cfg, res.Root()),
+		assets:   assetsFS,
+		ui:       ui,
+		logger:   logger,
 	}, nil
 }
 
@@ -108,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/__gofs__/health", s.handleHealth)
 	mux.HandleFunc("/__gofs__/auth", s.handleAuth)
 	mux.HandleFunc("/__gofs__/keys", s.handleKeys)
+	mux.HandleFunc("/__gofs__/settings", s.handleSettings)
 	mux.HandleFunc("/__gofs__/extract", s.handleExtract)
 	mux.HandleFunc("/__gofs__/text", s.handleText)
 	mux.HandleFunc("/__gofs__/assets/", s.handleAsset)

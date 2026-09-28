@@ -132,7 +132,12 @@
     listBox.className = 'key-list';
     body.appendChild(listBox);
 
-    var m = G.openModal({ title: '上传密钥', body: body, wide: true });
+    var m = G.openModal({
+      title: '上传密钥',
+      body: body,
+      wide: true,
+      footer: G.modalFoot([{ label: '关闭', onClick: function () { m.close(); } }])
+    });
 
     // ---- 创建 ----
 
@@ -226,11 +231,14 @@
       });
       box.appendChild(usage);
 
-      var modal = G.openModal({ title: '密钥已生成', body: box, wide: true });
-      var foot = document.createElement('div');
-      foot.style.cssText = 'display:flex;gap:8px';
-      foot.appendChild(G.btn('我已保存', 'primary', function () { modal.close(); }));
-      modal.el.appendChild(foot);
+      var modal = G.openModal({
+        title: '密钥已生成',
+        body: box,
+        wide: true,
+        footer: G.modalFoot([
+          { label: '我已保存', cls: 'primary', onClick: function () { modal.close(); } }
+        ])
+      });
     }
 
     // ---- 列表 ----

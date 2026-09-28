@@ -19,6 +19,17 @@
   --ok: #16a34a;
   --warn: #d97706;
   --zip: #b45309;
+  /* 操作按钮的语义色：一眼分辨「这排按钮各自干什么」。
+     常态就带色，而不是只有 hover 才出现 —— 「哪个是删除」应该一眼可见。 */
+  --op-open: #2563eb;
+  --op-download: #0e7490;
+  --op-edit: #7c3aed;
+  --op-unzip: #b45309;
+  --op-list: #475569;
+  --op-rename: #0f766e;
+  --op-danger: #dc2626;
+  /* 实心危险按钮上的文字色（深色主题下浅红底要配深字才有对比度）。 */
+  --danger-text: #ffffff;
   --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
   --radius: 10px;
   --radius-sm: 7px;
@@ -45,6 +56,14 @@
     --ok: #4ade80;
     --warn: #fbbf24;
     --zip: #fbbf24;
+  --op-open: #60a5fa;
+  --op-download: #22d3ee;
+  --op-edit: #a78bfa;
+  --op-unzip: #fbbf24;
+  --op-list: #94a3b8;
+  --op-rename: #2dd4bf;
+  --op-danger: #f87171;
+  --danger-text: #2a0b0b;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
   }
 }
@@ -68,6 +87,14 @@
   --ok: #4ade80;
   --warn: #fbbf24;
   --zip: #fbbf24;
+  --op-open: #60a5fa;
+  --op-download: #22d3ee;
+  --op-edit: #a78bfa;
+  --op-unzip: #fbbf24;
+  --op-list: #94a3b8;
+  --op-rename: #2dd4bf;
+  --op-danger: #f87171;
+  --danger-text: #2a0b0b;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
 
@@ -226,6 +253,17 @@ svg {
 
 .btn.danger { color: var(--danger); }
 .btn.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
+/* 确认弹窗里的破坏性操作：实心红底，让「这是最后一步、后果不可逆」一眼可见。
+   工具栏上的「删除所选」仍用描边款（.btn.danger），否则整页会一直有个红块。 */
+.btn.danger-solid {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--danger-text);
+}
+.btn.danger-solid:hover:not(:disabled) { filter: brightness(1.08); }
+/* 语义色按钮：解压类动作用橙色，与列表里的「解压」按钮保持一致。 */
+.btn.zip { color: var(--op-unzip); }
+.btn.zip:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--op-unzip); }
 
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-dim); }
 .btn.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
@@ -392,7 +430,8 @@ table.listing {
   flex-wrap: wrap;
   gap: 4px;
   justify-content: flex-end;
-  opacity: .35;
+  /* 常态不压到全透明：语义色要能看出来（0.35 时彩色基本变成灰的）。 */
+  opacity: .72;
   transition: opacity .14s;
 }
 tr:hover .ops, tr.selected .ops { opacity: 1; }
@@ -420,11 +459,29 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
      显式写出来是为了让「宁可折行也不挤压」成为确定行为。 */
   flex: none;
 }
-.op-btn:hover { background: var(--bg-active); color: var(--text); }
+.op-btn:hover { background: var(--bg-active); }
+.op-btn:active { transform: translateY(1px); }
 .op-btn svg { width: 14px; height: 14px; }
-.op-btn.zip:hover { color: var(--zip); background: rgba(180, 83, 9, .12); }
-.op-btn.danger:hover { color: var(--danger); background: var(--danger-soft); }
 .op-btn[disabled] { opacity: .35; cursor: not-allowed; }
+
+/* 每类操作一个语义色：下载青、编辑紫、解压橙、内容灰蓝、重命名青绿、删除红。
+   「更多」保持中性 —— 它本身不是操作，只是入口。
+   文字与图标一起染色（svg 的 stroke 继承自 currentColor）。 */
+.op-btn[data-kind="open"] { color: var(--op-open); }
+.op-btn[data-kind="download"] { color: var(--op-download); }
+.op-btn[data-kind="edit"] { color: var(--op-edit); }
+.op-btn[data-kind="unzip"] { color: var(--op-unzip); }
+.op-btn[data-kind="list"] { color: var(--op-list); }
+.op-btn[data-kind="rename"] { color: var(--op-rename); }
+.op-btn[data-kind="trash"] { color: var(--op-danger); }
+
+/* hover 提亮而不是统一变灰，色相始终可辨。 */
+.op-btn[data-kind]:hover:not([disabled]) { filter: brightness(1.15); }
+.op-btn[data-kind="trash"]:hover:not([disabled]) { background: var(--danger-soft); }
+.op-btn[data-kind="unzip"]:hover:not([disabled]) { background: rgba(180, 83, 9, .12); }
+
+/* 被禁用时（例如文件超过编辑上限）退回中性灰：彩色会让它看起来仍可点。 */
+.ops .op-btn[disabled] { color: var(--text-mute); }
 
 /* 「更多」按钮只在窄屏出现（宽屏时整排按钮都摆得下）。 */
 .ops-more { display: none; }
@@ -463,9 +520,17 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .action-item:hover, .action-item:active { background: var(--bg-active); }
 .action-item svg { width: 19px; height: 19px; color: var(--text-dim); flex: none; }
 .action-item span { flex: 1; }
-.action-item.zip svg { color: var(--zip); }
-.action-item.danger { color: var(--danger); }
-.action-item.danger svg { color: var(--danger); }
+
+/* 菜单项只给图标上色、文字保持中性：整行彩色反而更难扫读。 */
+.action-item[data-kind="open"] svg { color: var(--op-open); }
+.action-item[data-kind="download"] svg { color: var(--op-download); }
+.action-item[data-kind="edit"] svg { color: var(--op-edit); }
+.action-item[data-kind="unzip"] svg { color: var(--op-unzip); }
+.action-item[data-kind="list"] svg { color: var(--op-list); }
+.action-item[data-kind="rename"] svg { color: var(--op-rename); }
+/* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
+.action-item[data-kind="trash"] { color: var(--op-danger); }
+.action-item[data-kind="trash"] svg { color: var(--op-danger); }
 .action-item[disabled] { opacity: .45; cursor: not-allowed; }
 .action-item em {
   font-style: normal;
@@ -483,12 +548,66 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .footer {
   display: flex;
   justify-content: space-between;
+  /* 页脚右侧现在会写「已登录 admin · 可读写 · 可上传 · 可删除 …」，
+     窄屏放不下时要能换行，而不是把左边挤没。 */
+  flex-wrap: wrap;
+  gap: 3px 18px;
   padding: 9px 20px;
   border-top: 1px solid var(--border);
   background: var(--bg-soft);
   color: var(--text-mute);
   font-size: 12px;
 }
+
+/* ------------------------------------------------------- 拖拽投放区（常驻） */
+
+/* 把「支持拖拽上传」写在页面上，并标明落点。
+   只靠拖拽时才出现的浮层是不够的 —— 那等于没提前告诉任何人这个能力。 */
+.drop-zone {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color .14s, background .14s, color .14s;
+}
+.drop-zone:hover,
+.drop-zone.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.drop-zone > svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  color: var(--accent);
+}
+.drop-zone-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.drop-zone-text strong { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.drop-zone .btn { flex: none; }
+.drop-zone-target,
+.drop-zone-text span {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 拖拽浮层里的补充说明（条目数、单文件上限）。 */
+.drop-hint-inner .drop-note { font-size: 12px; color: var(--text-mute); }
 
 /* ---------------------------------------------------------------- 拖拽 */
 
@@ -518,6 +637,37 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .drop-hint-inner svg { width: 34px; height: 34px; color: var(--accent); }
 .drop-hint-inner strong { font-size: 16px; }
 .drop-hint-inner span { font-size: 12.5px; color: var(--text-dim); }
+
+/* ------------------------------------------------------- 服务设置面板 */
+
+.settings-panel .field { margin-bottom: 20px; }
+.settings-panel .field:last-of-type { margin-bottom: 6px; }
+/* 数值输入要能缩，否则一行放不下「输入框 + 单位下拉 + 不限」。 */
+.settings-panel .row input[type=text] { min-width: 0; }
+.settings-panel .checkbox { flex: none; }
+.settings-panel .hint b { color: var(--text); }
+
+.select {
+  flex: none;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+}
+.select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.select:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 错误提示条：与中性的 .hint-box 明显区分，让人一眼看到「保存失败了」。 */
+.hint-box.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
 
 /* ---------------------------------------------------------------- 弹窗 */
 
@@ -569,6 +719,8 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   border-top: 1px solid var(--border);
   background: var(--bg-soft);
 }
+/* 统一的最小宽度：按钮随文字长短伸缩时，「取消 / 确定」会一宽一窄很难看。 */
+.modal-foot .btn { min-width: 92px; justify-content: center; }
 
 .field { margin-bottom: 14px; }
 .field label {
@@ -1358,6 +1510,11 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   .modal-body { padding: 14px; }
   .modal-foot { flex-wrap: wrap; }
   .modal-foot .btn { flex: 1; justify-content: center; min-height: 44px; }
+
+  /* 手机上投放区整块可点，右侧按钮就多余了（还占掉本就不多的宽度）。 */
+  .drop-zone { padding: 11px 13px; gap: 10px; }
+  .drop-zone .btn { display: none; }
+  .drop-zone-text strong { font-size: 13px; }
 }
 
 /* 触摸设备上图标按钮被放大到 40px 宽（见上面的 @media (hover: none)），
