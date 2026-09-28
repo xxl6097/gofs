@@ -2580,3 +2580,376 @@ func TestKeysDisabled(t *testing.T) {
 		t.Errorf("全局未开启上传时，密钥上传状态码 = %d, 期望 403", r.code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 服务端防护：上传上限、跨站校验、认证限速、资源上限、日志转义
+// ---------------------------------------------------------------------------
+
+func TestUploadSizeLimitRejectsAndCleansUp(t *testing.T) {
+	root := makeFixture(t)
+	// 上限设成 1 KiB，便于用小请求触发。
+	s := newTestServer(t, testConfig(t, root, "-A", "--upload-max-size", "1024"))
+
+	big := strings.Repeat("x", 4096)
+	r := do(t, s, http.MethodPut, "/big.bin", strings.NewReader(big), nil)
+	if r.code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("状态码 = %d, 期望 413；%s", r.code, r.body)
+	}
+	// 关键：超限后不能把半截文件留在磁盘上，否则反复超限照样能填满磁盘。
+	if _, err := os.Stat(filepath.Join(root, "big.bin")); err == nil {
+		t.Errorf("超限上传留下了残缺文件，磁盘仍可被逐步填满")
+	}
+
+	// 上限之内的应当正常写入。
+	ok := strings.Repeat("y", 512)
+	if r := do(t, s, http.MethodPut, "/small.bin", strings.NewReader(ok), nil); r.code != http.StatusCreated {
+		t.Fatalf("未超限的上传状态码 = %d, 期望 201；%s", r.code, r.body)
+	}
+	if b, err := os.ReadFile(filepath.Join(root, "small.bin")); err != nil || len(b) != 512 {
+		t.Errorf("写入内容不正确: %v, len=%d", err, len(b))
+	}
+}
+
+func TestUploadAppendKeepsExistingOnLimit(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--upload-max-size", "1024"))
+	writeFile(t, filepath.Join(root, "part.bin"), []byte("base"))
+
+	// append 模式超限：已有内容不能被删掉（断点续传依赖它）。
+	r := do(t, s, http.MethodPut, "/part.bin", strings.NewReader(strings.Repeat("z", 4096)),
+		map[string]string{"X-Update-Range": "append"})
+	if r.code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("状态码 = %d, 期望 413", r.code)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "part.bin"))
+	if err != nil {
+		t.Fatalf("原有文件被删除了: %v", err)
+	}
+	if !strings.HasPrefix(string(b), "base") {
+		t.Errorf("原有内容被破坏: %q", b)
+	}
+}
+
+func TestFormUploadSizeLimit(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--upload-max-size", "2048"))
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "big.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(strings.Repeat("q", 8192))); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := do(t, s, http.MethodPost, "/", &buf,
+		map[string]string{"Content-Type": mw.FormDataContentType()})
+	if r.code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("状态码 = %d, 期望 413；%s", r.code, r.body)
+	}
+}
+
+func TestCSRFBlocksCrossOriginWrite(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	// 浏览器发起的跨站写请求一定带 Origin，且指向攻击者站点。
+	hdr := map[string]string{"Origin": "https://evil.example"}
+	if r := do(t, s, http.MethodPut, "/pwn.txt", strings.NewReader("x"), hdr); r.code != http.StatusForbidden {
+		t.Errorf("跨站 PUT 状态码 = %d, 期望 403", r.code)
+	}
+	if r := do(t, s, http.MethodDelete, "/notes.txt", nil, hdr); r.code != http.StatusForbidden {
+		t.Errorf("跨站 DELETE 状态码 = %d, 期望 403", r.code)
+	}
+	if r := do(t, s, MethodMkcol, "/pwn", nil, hdr); r.code != http.StatusForbidden {
+		t.Errorf("跨站 MKCOL 状态码 = %d, 期望 403", r.code)
+	}
+	// 跨站请求不应产生任何副作用。
+	if _, err := os.Stat(filepath.Join(root, "pwn.txt")); err == nil {
+		t.Errorf("跨站 PUT 竟然写成功了")
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); err != nil {
+		t.Errorf("跨站 DELETE 竟然删掉了文件: %v", err)
+	}
+
+	// Referer 同样能识别跨站来源。
+	if r := do(t, s, http.MethodPut, "/pwn2.txt", strings.NewReader("x"),
+		map[string]string{"Referer": "https://evil.example/attack.html"}); r.code != http.StatusForbidden {
+		t.Errorf("带跨站 Referer 的 PUT 状态码 = %d, 期望 403", r.code)
+	}
+	// Origin: null（沙箱 iframe / file://）也应当拒绝。
+	if r := do(t, s, http.MethodPut, "/pwn3.txt", strings.NewReader("x"),
+		map[string]string{"Origin": "null"}); r.code != http.StatusForbidden {
+		t.Errorf("Origin: null 的 PUT 状态码 = %d, 期望 403", r.code)
+	}
+}
+
+func TestCSRFAllowsSameOriginAndNonBrowser(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	// 同源写请求必须放行，否则页面自己就用不了。
+	if r := do(t, s, http.MethodPut, "/ok.txt", strings.NewReader("x"),
+		map[string]string{"Origin": "http://" + "example.com"}); r.code != http.StatusCreated {
+		t.Errorf("无 Origin 的 PUT 状态码 = %d, 期望 201", r.code)
+	}
+
+	// 非浏览器客户端（curl / 脚本）不带 Origin：不能误伤。
+	if r := do(t, s, http.MethodDelete, "/notes.txt", nil, nil); r.code != http.StatusNoContent {
+		t.Errorf("无 Origin 的 DELETE 状态码 = %d, 期望 204", r.code)
+	}
+
+	// 读方法不做来源校验。
+	if r := do(t, s, http.MethodGet, "/?json",
+		nil, map[string]string{"Origin": "https://evil.example"}); r.code != 200 {
+		t.Errorf("跨站 GET 状态码 = %d, 期望 200（读操作不校验来源）", r.code)
+	}
+}
+
+func TestCSRFCanBeDisabled(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--no-csrf-protect"))
+
+	r := do(t, s, http.MethodPut, "/x.txt", strings.NewReader("x"),
+		map[string]string{"Origin": "https://evil.example"})
+	if r.code != http.StatusCreated {
+		t.Errorf("关闭校验后状态码 = %d, 期望 201", r.code)
+	}
+}
+
+func TestAuthFailLimitBlocksBruteForce(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A",
+		"-a", "alice:secret@/:rw",
+		"--auth-fail-limit", "3",
+		"--auth-fail-window", "5m"))
+
+	bad := map[string]string{"Authorization": basicAuth("alice", "wrong")}
+	for i := 0; i < 3; i++ {
+		if r := do(t, s, http.MethodGet, "/?json", nil, bad); r.code != http.StatusUnauthorized {
+			t.Fatalf("第 %d 次尝试状态码 = %d, 期望 401", i+1, r.code)
+		}
+	}
+	// 达到阈值后再来（哪怕密码是对的）也应被临时封禁。
+	r := do(t, s, http.MethodGet, "/?json", nil, bad)
+	if r.code != http.StatusTooManyRequests {
+		t.Fatalf("超限后状态码 = %d, 期望 429", r.code)
+	}
+	if ra := r.head.Get("Retry-After"); ra == "" {
+		t.Errorf("429 响应缺少 Retry-After")
+	}
+	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusTooManyRequests {
+		t.Errorf("封禁期间正确密码也应为 429，实际 = %d", r.code)
+	}
+}
+
+func TestAuthFailResetsOnSuccess(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A",
+		"-a", "alice:secret@/:rw",
+		"--auth-fail-limit", "3",
+		"--auth-fail-window", "5m"))
+
+	bad := map[string]string{"Authorization": basicAuth("alice", "wrong")}
+	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+
+	// 中间成功登录一次，失败计数应当清零。
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != 200 {
+		t.Fatalf("正确凭据状态码 = %d, 期望 200", r.code)
+	}
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != 200 {
+		t.Errorf("成功登录后计数未清零，状态码 = %d", r.code)
+	}
+}
+
+func TestAuthBlockExpires(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A",
+		"-a", "alice:secret@/:rw",
+		"--auth-fail-limit", "2",
+		"--auth-fail-window", "80ms"))
+
+	bad := map[string]string{"Authorization": basicAuth("alice", "wrong")}
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+	do(t, s, http.MethodGet, "/?json", nil, bad)
+	if r := do(t, s, http.MethodGet, "/?json", nil, bad); r.code != http.StatusTooManyRequests {
+		t.Fatalf("状态码 = %d, 期望 429", r.code)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != 200 {
+		t.Errorf("封禁到期后状态码 = %d, 期望 200", r.code)
+	}
+}
+
+func TestListMaxEntriesTruncates(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 30; i++ {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("f%02d.txt", i)), []byte("x"))
+	}
+	s := newTestServer(t, testConfig(t, root, "-A", "--list-max-entries", "10"))
+
+	r := do(t, s, http.MethodGet, "/?json", nil, nil)
+	if r.code != 200 {
+		t.Fatalf("状态码 = %d", r.code)
+	}
+	var d struct {
+		Total     int  `json:"total"`
+		TotalAll  int  `json:"total_all"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Total != 10 {
+		t.Errorf("返回条目数 = %d, 期望 10", d.Total)
+	}
+	if d.TotalAll != 30 {
+		t.Errorf("total_all = %d, 期望 30", d.TotalAll)
+	}
+	if !d.Truncated {
+		t.Errorf("缺少截断标记，前端无法提示用户")
+	}
+}
+
+func TestArchiveLimits(t *testing.T) {
+	root := makeFixture(t)
+
+	// 条目数上限。
+	s := newTestServer(t, testConfig(t, root, "-A", "--archive-max-items", "1"))
+	if r := do(t, s, http.MethodGet, "/docs?zip", nil, nil); r.code != http.StatusRequestEntityTooLarge {
+		t.Errorf("条目超限状态码 = %d, 期望 413；%s", r.code, r.body)
+	}
+
+	// 字节数上限。
+	s2 := newTestServer(t, testConfig(t, root, "-A", "--archive-max-bytes", "8"))
+	if r := do(t, s2, http.MethodGet, "/docs?zip", nil, nil); r.code != http.StatusRequestEntityTooLarge {
+		t.Errorf("字节超限状态码 = %d, 期望 413", r.code)
+	}
+
+	// 选中模式下超限同样应给出 413，而不是「全部跳过」的 400。
+	s3 := newTestServer(t, testConfig(t, root, "-A", "--archive-max-items", "1"))
+	r := do(t, s3, http.MethodGet, "/?zip&pick=/docs", nil, nil)
+	if r.code != http.StatusRequestEntityTooLarge {
+		t.Errorf("所选超限状态码 = %d, 期望 413；%s", r.code, r.body)
+	}
+}
+
+func TestLongNameRejected(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--max-name-bytes", "32"))
+
+	long := strings.Repeat("a", 200) + ".txt"
+	r := do(t, s, http.MethodPut, "/"+long, strings.NewReader("x"), nil)
+	if r.code != http.StatusBadRequest {
+		t.Errorf("超长文件名状态码 = %d, 期望 400（不应是 500）", r.code)
+	}
+}
+
+func TestInlineContentGuards(t *testing.T) {
+	root := makeFixture(t)
+	writeFile(t, filepath.Join(root, "evil.html"), []byte("<script>alert(1)</script>"))
+	writeFile(t, filepath.Join(root, "pic.png"), []byte("not really a png"))
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	// 上传的网页在同源下执行脚本 = 存储型 XSS，必须沙箱化。
+	r := do(t, s, http.MethodGet, "/evil.html", nil, nil)
+	if csp := r.head.Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox") {
+		t.Errorf("HTML 响应缺少 CSP sandbox，实际 = %q", csp)
+	}
+	if r.head.Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("缺少 nosniff")
+	}
+
+	// 普通文件也要有 nosniff，避免浏览器按内容猜类型。
+	if r := do(t, s, http.MethodGet, "/pic.png", nil, nil); r.head.Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("普通文件缺少 nosniff")
+	}
+
+	// SVG 同样是可执行文档。
+	writeFile(t, filepath.Join(root, "x.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
+	if r := do(t, s, http.MethodGet, "/x.svg", nil, nil); !strings.Contains(r.head.Get("Content-Security-Policy"), "sandbox") {
+		t.Errorf("SVG 响应缺少 CSP sandbox")
+	}
+
+	// 关闭开关后不再注入（保留连脚本一起预览的能力）。
+	s2 := newTestServer(t, testConfig(t, root, "-A", "--no-html-sandbox"))
+	if r := do(t, s2, http.MethodGet, "/evil.html", nil, nil); r.head.Get("Content-Security-Policy") != "" {
+		t.Errorf("关闭后仍注入了 CSP")
+	}
+}
+
+func TestHashSizeLimit(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--hash-max-size", "16"))
+
+	if r := do(t, s, http.MethodGet, "/docs/guide.txt?hash", nil, nil); r.code != http.StatusRequestEntityTooLarge {
+		t.Errorf("大文件取摘要状态码 = %d, 期望 413", r.code)
+	}
+	if r := do(t, s, http.MethodGet, "/notes.txt?hash", nil, nil); r.code != 200 {
+		t.Errorf("小文件取摘要状态码 = %d, 期望 200", r.code)
+	}
+}
+
+func TestConcurrencyLimitReturns503(t *testing.T) {
+	root := makeFixture(t)
+	// 上限设为 1，再用一个占住名额的请求去挤。
+	s := newTestServer(t, testConfig(t, root, "-A", "--max-concurrent", "1"))
+
+	entered := make(chan struct{})
+	leave := make(chan struct{})
+
+	// 直接占用闸门，模拟一个仍在处理中的慢请求。
+	s.guard.slots <- struct{}{}
+	go func() {
+		close(entered)
+		<-leave
+	}()
+
+	r := do(t, s, http.MethodGet, "/?json", nil, nil)
+	<-entered
+	close(leave)
+	if r.code != http.StatusServiceUnavailable {
+		t.Errorf("超出并发上限的状态码 = %d, 期望 503", r.code)
+	}
+	if r.head.Get("Retry-After") == "" {
+		t.Errorf("503 响应缺少 Retry-After")
+	}
+}
+
+func TestLogSanitizesControlChars(t *testing.T) {
+	// 文件名可以含换行，直接写进日志就能伪造出额外的日志行。
+	injected := "a\n127.0.0.1 - - \"GET /admin\" 200\rb\x1b[31m"
+	got := sanitizeLogLine(injected)
+	if strings.ContainsAny(got, "\n\r\x1b") {
+		t.Errorf("日志未清理控制字符: %q", got)
+	}
+	// 正常内容原样保留。
+	if sanitizeLogLine("GET /a.bin 200") != "GET /a.bin 200" {
+		t.Errorf("正常日志被改动")
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/a%0Ab?x=1", nil)
+	r.Header.Set("User-Agent", "ua\x1b[0m\nFAKE")
+	var buf bytes.Buffer
+	lg := &Logger{out: &buf, enabled: true, format: defaultLogFormat}
+	lg.Log(r, 200, "", time.Now())
+	line := buf.String()
+	if strings.Count(line, "\n") != 1 {
+		t.Errorf("日志被注入成多行: %q", line)
+	}
+	if strings.Contains(line, "\x1b") {
+		t.Errorf("日志未清理 ANSI 转义: %q", line)
+	}
+}

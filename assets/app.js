@@ -508,7 +508,8 @@
     rename: '<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>',
     trash: '<path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 12h10l1-12"/>',
     open: '<path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
-    edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5 17.5 10.5"/>'
+    edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5 17.5 10.5"/>',
+    more: '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/>'
   };
 
   function makeOpBtn(kind, label, cls) {
@@ -745,8 +746,11 @@
       tr.dataset.path = e.path;
       if (state.selected.has(e.path)) tr.classList.add('selected');
 
-      // 选择框
+      // 选择框（包一层 label，让可点面积覆盖整个格子）
       var tdCheck = document.createElement('td');
+      tdCheck.className = 'col-check';
+      var hit = document.createElement('label');
+      hit.className = 'check-hit';
       var cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = state.selected.has(e.path);
@@ -757,11 +761,13 @@
         tr.classList.toggle('selected', cb.checked);
         syncSelection();
       };
-      tdCheck.appendChild(cb);
+      hit.appendChild(cb);
+      tdCheck.appendChild(hit);
       tr.appendChild(tdCheck);
 
       // 名称
       var tdName = document.createElement('td');
+      tdName.className = 'col-name';
       var cell = document.createElement('div');
       cell.className = 'name-cell' + (e.is_dir ? ' dir' : '') + (e.archive ? ' archive' : '');
       cell.appendChild(svgIcon(kindOf(e)));
@@ -795,61 +801,70 @@
 
       // 大小
       var tdSize = document.createElement('td');
-      tdSize.className = 'size-cell';
+      tdSize.className = 'size-cell col-size';
       tdSize.textContent = e.is_dir ? '—' : fmtSize(e.size);
       tr.appendChild(tdSize);
 
       // 时间
       var tdTime = document.createElement('td');
-      tdTime.className = 'time-cell';
+      tdTime.className = 'time-cell col-time';
       tdTime.textContent = fmtTime(e.mtime);
       tr.appendChild(tdTime);
 
       // 操作
       var tdOps = document.createElement('td');
+      tdOps.className = 'col-ops';
       var ops = document.createElement('div');
       ops.className = 'ops';
 
+      // 先把「这一行能做哪些操作」列成数组，再决定怎么呈现。
+      // 宽屏铺成一排按钮，窄屏收进「更多」菜单 —— 两处用同一份定义，
+      // 不会出现「桌面点得到、手机点不到」的功能差异。
+      var actions = [];
       if (e.is_dir) {
-        var openBtn = makeOpBtn('open', '打开');
-        openBtn.onclick = function () { navigate(e.path); };
-        ops.appendChild(openBtn);
+        actions.push({ kind: 'open', label: '打开', run: function () { navigate(e.path); } });
       } else {
-        var dlBtn = makeOpBtn('download', '下载');
-        dlBtn.onclick = function () { downloadEntry(e); };
-        ops.appendChild(dlBtn);
+        actions.push({ kind: 'download', label: '下载', run: function () { downloadEntry(e); } });
 
         if (e.editable && can('edit')) {
-          var editBtn = makeOpBtn('edit', '编辑');
-          if (canEdit(e)) {
-            editBtn.onclick = function () { G.openEditor(e); };
-          } else {
-            editBtn.disabled = true;
-            editBtn.title = '文件超过在线编辑上限（' + fmtSize(editMax()) + '），请下载后编辑';
-          }
-          ops.appendChild(editBtn);
+          var tooBig = !canEdit(e);
+          actions.push({
+            kind: 'edit', label: '编辑', disabled: tooBig,
+            hint: tooBig ? '超过 ' + fmtSize(editMax()) : '',
+            run: function () { G.openEditor(e); }
+          });
         }
-
         if (e.archive && can('extract')) {
-          var unzipBtn = makeOpBtn('unzip', '解压', 'zip');
-          unzipBtn.onclick = function () { openExtractDialog(e); };
-          ops.appendChild(unzipBtn);
-
-          var listBtn = makeOpBtn('list', '内容');
-          listBtn.onclick = function () { openArchivePreview(e); };
-          ops.appendChild(listBtn);
+          actions.push({ kind: 'unzip', label: '解压', cls: 'zip', run: function () { openExtractDialog(e); } });
+          actions.push({ kind: 'list', label: '内容', run: function () { openArchivePreview(e); } });
         }
       }
-
       if (can('write')) {
-        var rnBtn = makeOpBtn('rename', '重命名');
-        rnBtn.onclick = function () { openRenameDialog(e); };
-        ops.appendChild(rnBtn);
+        actions.push({ kind: 'rename', label: '重命名', run: function () { openRenameDialog(e); } });
       }
       if (can('delete')) {
-        var delBtn = makeOpBtn('trash', '删除', 'danger');
-        delBtn.onclick = function () { doDelete([e]); };
-        ops.appendChild(delBtn);
+        actions.push({ kind: 'trash', label: '删除', cls: 'danger', run: function () { doDelete([e]); } });
+      }
+
+      actions.forEach(function (a) {
+        var b = makeOpBtn(a.kind, a.label, a.cls);
+        if (a.disabled) {
+          b.disabled = true;
+          b.title = a.label + '：' + a.hint;
+        } else {
+          b.onclick = a.run;
+        }
+        ops.appendChild(b);
+      });
+
+      // 窄屏把上面这些按钮全藏起来，只留这一个「更多」；宽屏反过来。
+      // 显隐交给 CSS，避免 JS 的断点判断跟 CSS 打架。
+      if (actions.length > 1) {
+        var moreBtn = makeOpBtn('more', '更多', 'ops-more');
+        moreBtn.title = '更多操作';
+        moreBtn.setAttribute('aria-label', '更多操作');
+        moreBtn.onclick = function () { openRowActions(e, actions); };
+        ops.appendChild(moreBtn);
       }
 
       tdOps.appendChild(ops);
@@ -859,6 +874,50 @@
 
     syncSelection();
     renderSortHeader();
+  }
+
+  // openRowActions 是窄屏下的操作入口：把整行操作铺成一个列表。
+  //
+  // 手机上行内挤 5 个按钮会把名称列压到只剩 100px 出头，而且每个按钮
+  // 都远小于可点尺寸。收进菜单后，每一项都能做到 48px 高、占满宽度。
+  function openRowActions(entry, actions) {
+    var body = document.createElement('div');
+    body.className = 'action-sheet';
+
+    var head = document.createElement('div');
+    head.className = 'action-path';
+    head.textContent = entry.path;
+    body.appendChild(head);
+
+    var m = openModal({ title: entry.name, body: body });
+
+    actions.forEach(function (a) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'action-item' + (a.cls ? ' ' + a.cls : '');
+
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.innerHTML = OP_ICONS[a.kind] || OP_ICONS.list;
+      b.appendChild(svg);
+
+      var sp = document.createElement('span');
+      sp.textContent = a.label;
+      b.appendChild(sp);
+
+      if (a.disabled) {
+        b.disabled = true;
+        if (a.hint) {
+          var em = document.createElement('em');
+          em.textContent = a.hint;
+          b.appendChild(em);
+        }
+      } else {
+        b.onclick = function () { m.close(); a.run(); };
+      }
+      body.appendChild(b);
+    });
   }
 
   function renderSortHeader() {
@@ -1048,29 +1107,98 @@
   }
 
   // putFile 用 XHR 上传，因为只有 XHR 能提供上传进度。
-  function putFile(url, file, onProgress) {
+  // resumeMinSize 是启用断点续传的门槛：文件比它小的时候，
+  // 重传一遍比「查询断点 + 续传」更快也更简单。
+  var resumeMinSize = 8 * 1024 * 1024;
+  var resumeMaxRetry = 2;
+
+  // putOnce 发一次 PUT。offset 为 0 表示从头传（覆盖写）。
+  function putOnce(url, file, offset, onProgress) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       xhr.open('PUT', url, true);
       var headers = authHeaders();
+      if (offset > 0) headers['X-Update-Range'] = 'append';
       for (var k in headers) {
         if (Object.prototype.hasOwnProperty.call(headers, k)) {
           try { xhr.setRequestHeader(k, headers[k]); } catch (e) { /* 忽略 */ }
         }
       }
+      var body = offset > 0 ? file.slice(offset) : file;
       if (xhr.upload && onProgress) {
         xhr.upload.onprogress = function (e) {
-          if (e.lengthComputable) onProgress(e.loaded, e.total);
+          if (e.lengthComputable) onProgress(offset + e.loaded, file.size);
         };
       }
       xhr.onload = function () {
-        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
-        else reject(new Error('HTTP ' + xhr.status + ' ' + (xhr.responseText || '')));
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // X-Gofs-Offset 是本次写入的字节数，续传后用它校验收到的总量。
+          resolve({
+            text: xhr.responseText,
+            written: parseInt(xhr.getResponseHeader('X-Gofs-Offset') || '0', 10) || 0
+          });
+          return;
+        }
+        // 4xx 是请求本身的问题，重试没有意义；5xx 与网络错误才值得续传。
+        var err = new Error('HTTP ' + xhr.status + ' ' + (xhr.responseText || ''));
+        err.retryable = xhr.status >= 500;
+        reject(err);
       };
-      xhr.onerror = function () { reject(new Error('网络错误')); };
+      xhr.onerror = function () {
+        var err = new Error('网络错误');
+        err.retryable = true;
+        reject(err);
+      };
       xhr.onabort = function () { reject(new Error('已取消')); };
-      xhr.send(file);
+      xhr.send(body);
     });
+  }
+
+  // remoteSize 询问服务端目标文件当前有多少字节。
+  async function remoteSize(url) {
+    try {
+      var res = await apiFetch(url, { method: 'HEAD' });
+      if (!res.ok) return 0;
+      return parseInt(res.headers.get('content-length') || '0', 10) || 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  // putFile 上传单个文件，带断点续传。
+  //
+  // 大文件传到一半断网是常事，从头上传几百 MB 很浪费。这里在中断之后
+  // 先问服务端已经落盘多少字节，再从那个位置接着传：
+  //   - 首传是覆盖写（O_TRUNC），所以失败后残留的那部分**一定是本次的内容**，
+  //     接着往后写不会把别的文件拼进来；
+  //   - 续传用 X-Update-Range: append，服务端追加到末尾，语义正好吻合；
+  //   - 服务端会返回本次写入的字节数，用来确认最终大小一致。
+  async function putFile(url, file, onProgress) {
+    var offset = 0;
+    for (var attempt = 0; ; attempt++) {
+      try {
+        var out = await putOnce(url, file, offset, onProgress);
+        // 续传之后大小不对，说明中间有内容丢失（服务端被别的写法覆盖过、
+        // 或断点算错了）。宁可报错让用户重传，也不要留下一个看起来成功、
+        // 实际残缺的文件。
+        if (offset > 0 && file.size >= resumeMinSize &&
+            offset + out.written !== file.size) {
+          throw new Error('续传后大小不一致（' + (offset + out.written) +
+            ' / ' + file.size + ' 字节），请重新上传');
+        }
+        return out.text;
+      } catch (err) {
+        if (!err.retryable || file.size < resumeMinSize || attempt >= resumeMaxRetry) throw err;
+
+        var got = await remoteSize(url);
+        // 只有「确实写了一部分、但还没写完」才值得续传；
+        // 否则（0 字节或已完整）重传更稳妥。
+        if (!(got > 0 && got < file.size)) throw err;
+        offset = got;
+        if (onProgress) onProgress(offset, file.size);
+        toast('warn', '上传中断，已从 ' + fmtSize(offset) + ' 处继续');
+      }
+    }
   }
 
   async function uploadFiles(files, targetDir) {

@@ -93,11 +93,19 @@ func run(args []string) error {
 	}
 	printBanner(cfg, scheme, ln)
 
+	// 服务器层面的防护：
+	//   - ReadHeaderTimeout 掐断「连上后慢慢发请求头」的慢速攻击（Slowloris）。
+	//     默认 15s 偏宽松，10s 足够正常客户端发完头部；
+	//   - MaxHeaderBytes 收紧到 64KiB（标准库默认 1MiB），
+	//     请求头是每个连接都要缓冲的，上限越小被滥用的空间越小；
+	//   - 不设 ReadTimeout/WriteTimeout：上传大文件与 SSE 进度推送都需要
+	//     长时间连接，全局超时会误杀它们。上传的时限改由 handler 按
+	//     --upload-read-timeout 单独设置；资源占用则由并发闸门兜住。
 	httpSrv := &http.Server{
 		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		ErrorLog:          nil,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    cfg.MaxHeaderBytes,
 	}
 
 	// 捕获退出信号，做优雅关闭。
@@ -172,4 +180,41 @@ func printBanner(cfg *config.Config, scheme string, ln net.Listener) {
 		}
 		fmt.Printf("  上传密钥  : %s\n", keyLoc)
 	}
+	// 把生效中的防护值打出来：这些默认值直接决定了服务被滥用时的表现，
+	// 显式可见比藏在 --help 里更让人放心。
+	fmt.Printf("  防护      : 上传≤%s  打包≤%s/%s  目录≤%s  并发%d  无进展超时%s  跨站校验%s\n",
+		limitSize(cfg.UploadMaxSize),
+		limitCount(cfg.ArchiveMaxItems), limitSize(cfg.ArchiveMaxBytes),
+		limitCount(cfg.ListMaxEntries),
+		cfg.MaxConcurrent,
+		cfg.DownloadTimeout,
+		perm("on", !cfg.DisableCSRFProtect),
+	)
+}
+
+// limitSize 把字节上限格式化成可读文案，0 表示不限制。
+func limitSize(n int64) string {
+	if n <= 0 {
+		return "不限"
+	}
+	const unit = 1024
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	v := float64(n)
+	i := 0
+	for v >= unit && i < len(units)-1 {
+		v /= unit
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%.0f%s", v, units[i])
+	}
+	return fmt.Sprintf("%.0f%s", v, units[i])
+}
+
+// limitCount 把条目数上限格式化成可读文案，0 表示不限制。
+func limitCount(n int) string {
+	if n <= 0 {
+		return "不限"
+	}
+	return fmt.Sprintf("%d条", n)
 }

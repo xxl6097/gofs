@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type Server struct {
 	res    *fsutil.Resolver
 	auth   *auth.Authenticator
 	keys   *uploadkey.Store
+	guard  *guard
 	assets fs.FS
 	ui     *uiTemplate
 	logger *Logger
@@ -83,11 +85,24 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{cfg: cfg, res: res, auth: authn, keys: keys, assets: assetsFS, ui: ui, logger: logger}, nil
+	return &Server{
+		cfg:    cfg,
+		res:    res,
+		auth:   authn,
+		keys:   keys,
+		guard:  newGuard(cfg),
+		assets: assetsFS,
+		ui:     ui,
+		logger: logger,
+	}, nil
 }
 
 // Handler 返回配置好中间件的 http.Handler。
-// 中间件由外到内的顺序：路径前缀 -> 访问日志 -> CORS -> panic 恢复 -> 路由。
+// 中间件由外到内的顺序：
+// 路径前缀 -> 并发闸门 -> 访问日志 -> CORS -> 跨站校验 -> panic 恢复 -> 路由。
+//
+// 并发闸门放在最外层，是为了在真正开始干活之前就把多余请求挡掉；
+// 它拒绝的请求不写访问日志 —— 服务过载时再拼命写日志只会雪上加霜。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/__gofs__/health", s.handleHealth)
@@ -100,8 +115,10 @@ func (s *Server) Handler() http.Handler {
 
 	var h http.Handler = mux
 	h = s.withRecover(h)
+	h = s.withCSRFProtect(h)
 	h = s.withCORS(h)
 	h = s.withLogging(h)
+	h = s.withConcurrency(h)
 	h = s.withPathPrefix(h)
 	return h
 }
@@ -282,10 +299,26 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		return permResult{Perm: auth.PermReadWrite}, true
 	}
 
+	// 认证限速：Basic 认证可以被无限次尝试，不设闸门就等于把口令交给
+	// 字典攻击。这里按来源统计失败次数，超限后临时封禁。
+	ip := clientIP(r)
+	if blocked, remain := s.authBlocked(ip); blocked {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
+		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
+		return permResult{}, false
+	}
+
 	user, pass, hasCred := credentials(r)
 	perm := s.auth.Lookup(urlPath, user, pass, hasCred)
 	if perm != auth.PermNone {
+		s.noteAuthSuccess(ip)
 		return permResult{Perm: perm, User: user, Authenticated: hasCred}, true
+	}
+
+	// 只有「带了凭据但不对」才算一次失败；完全没带凭据只是未登录，
+	// 否则一个不带凭据的爬虫就能把正常用户的来源封掉。
+	if hasCred {
+		s.noteAuthFailure(ip)
 	}
 
 	if s.auth.NeedsAuth(urlPath) {
@@ -474,7 +507,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 		}
 	}
 
-	listing, err := fsutil.ReadDir(s.res, abs, s.cfg.Hidden)
+	listing, err := fsutil.ReadDir(s.res, abs, s.cfg.Hidden, s.cfg.ListMaxEntries)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -535,7 +568,15 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 	}
 
 	// ?hash 返回 sha256。
+	// 只对中等大小的文件开放：摘要要读完整份内容，让一个请求去算
+	// 几十 GB 文件的哈希，等于送出一个免费的 CPU/IO 耗尽入口。
 	if r.URL.Query().Has("hash") {
+		if s.cfg.HashMaxSize > 0 && info.Size() > s.cfg.HashMaxSize {
+			http.Error(w, fmt.Sprintf(
+				"413 Payload Too Large: 文件超过计算摘要的大小上限 %s",
+				humanSize(s.cfg.HashMaxSize)), http.StatusRequestEntityTooLarge)
+			return
+		}
 		sum, err := fileSHA256(abs)
 		if err != nil {
 			s.writeErr(w, err)
@@ -550,7 +591,51 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 	if etag := fmt.Sprintf(`"%x-%x"`, info.ModTime().UnixNano(), info.Size()); etag != "" {
 		w.Header().Set("ETag", etag)
 	}
+	// 给下载也设一个「无进展超时」：没有它，一个「连上就不读数据」的客户端
+	// 会一直占着并发名额（服务端阻塞在写 socket 上），几十个就能拖垮服务。
+	// 用进展而不是总时长，是为了不误杀慢速的大文件传输。
+	w = withWriteProgress(w, s.cfg.DownloadTimeout)
+	s.guardInlineContent(w, r, info.Name())
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// guardInlineContent 抑制「上传的文件在同源下执行脚本」带来的风险。
+//
+// 文件服务器天然会把用户上传的 .html / .svg 原样吐回浏览器，而浏览器
+// 会把它当作**本站页面**渲染。于是一个能上传文件的人只要放一个
+// <script>fetch('/__gofs__/keys',{method:'POST'...})</script> 的页面，
+// 再诱导管理员打开，就能借管理员已登录的会话为所欲为。这是典型的存储型 XSS。
+//
+// 两道处理：
+//   - nosniff：禁止浏览器按内容猜测类型（否则一个无扩展名文件也能被当 HTML 执行）；
+//   - 对 HTML / SVG / XML 加 CSP sandbox：页面仍可正常预览渲染，
+//     但里面的脚本无法读取本站数据、也无法发起同源请求。
+//
+// 需要连脚本一起预览时用 --no-html-sandbox 关掉第二道。
+func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name string) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+
+	if s.cfg.DisableHTMLSandbox {
+		return
+	}
+	if !isScriptableContent(name) {
+		return
+	}
+	// sandbox 不带 allow-same-origin：文档被放进一个不透明源，
+	// 同源请求与本地存储全部失效，而渲染与样式不受影响。
+	h.Set("Content-Security-Policy", "sandbox")
+}
+
+// scriptableExts 是浏览器会当作可执行文档渲染的扩展名。
+var scriptableExts = map[string]bool{
+	".html": true, ".htm": true, ".xhtml": true, ".svg": true,
+	".xml": true, ".xsl": true, ".mhtml": true,
+}
+
+// isScriptableContent 判断该文件名是否属于「浏览器会当文档执行」的类型。
+func isScriptableContent(name string) bool {
+	return scriptableExts[strings.ToLower(filepath.Ext(name))]
 }
 
 // fileSHA256 计算文件摘要。

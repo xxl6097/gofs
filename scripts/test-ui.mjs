@@ -502,6 +502,63 @@ if (wholeCall) {
   check('无选中时发出了打包请求', false);
 }
 
+// ---------------------------------------------------------------- 11. 手机端操作菜单
+
+section('⑪ 手机端：行内操作收进「更多」菜单');
+
+// 手机上行内挤一排按钮会把文件名压到看不清，而且每个按钮都远小于可点尺寸。
+// 所以每行额外渲染一个「更多」，点开是占满宽度的操作列表。
+// 宽屏时这个按钮由 CSS 隐藏 —— DOM 里始终存在，两处共用同一份操作定义。
+const moreBtns = doc.querySelectorAll('#tbody .ops-more');
+check('每行都有「更多」按钮', moreBtns.length === doc.querySelectorAll('#tbody tr').length,
+  moreBtns.length + ' / ' + doc.querySelectorAll('#tbody tr').length);
+
+const targetRow = Array.from(doc.querySelectorAll('#tbody tr')).find((tr) => {
+  const b = tr.querySelector('.ops-more');
+  return b && !b.disabled;
+});
+
+if (targetRow) {
+  const rowLabels = Array.from(targetRow.querySelectorAll('.op-btn:not(.ops-more)'))
+    .map((b) => b.textContent.trim());
+
+  targetRow.querySelector('.ops-more').dispatchEvent(
+    new win.MouseEvent('click', { bubbles: true })
+  );
+  const sheetReady = await waitFor(() => doc.querySelector('.action-sheet'), 3000, '操作菜单');
+  check('点击「更多」弹出操作菜单', sheetReady);
+
+  if (sheetReady) {
+    const items = Array.from(doc.querySelectorAll('#tbody ~ * .action-item, .action-item'));
+    const sheetLabels = items.map((b) => {
+      const sp = b.querySelector('span');
+      return sp ? sp.textContent.trim() : b.textContent.trim();
+    });
+    check('菜单项与行内按钮一一对应（同一份操作定义）',
+      JSON.stringify(sheetLabels) === JSON.stringify(rowLabels),
+      JSON.stringify(sheetLabels) + ' vs ' + JSON.stringify(rowLabels));
+
+    check('菜单里至少有一项可点', items.some((b) => !b.disabled), String(items.length));
+
+    // 菜单项执行前会先关闭菜单，避免"点了没反应"的错觉。
+    const firstEnabled = items.find((b) => !b.disabled);
+    if (firstEnabled) {
+      firstEnabled.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+      const closed = await waitFor(() => !doc.querySelector('.action-sheet'), 3000, '菜单关闭');
+      check('点击菜单项后菜单关闭', closed);
+    }
+  }
+} else {
+  check('目录里至少有一行带可点的「更多」按钮', false, '未找到');
+}
+
+// 关掉可能弹出的编辑器/重命名框，避免影响后续收尾。
+const leftover = doc.querySelector('.modal-mask');
+if (leftover) {
+  const closeBtn = leftover.querySelector('.modal-head button');
+  if (closeBtn) closeBtn.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+}
+
 // ---------------------------------------------------------------- 汇总
 
 console.log('\n' + '─'.repeat(56));

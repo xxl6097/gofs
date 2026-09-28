@@ -48,6 +48,54 @@ const (
 	DefaultUploadDateLayout = "2006/01/02"
 	// DefaultEditMaxSize 为在线编辑允许打开的最大文件尺寸（2 MiB）。
 	DefaultEditMaxSize int64 = 2 << 20
+
+	// ---- 服务端防护默认值 ----
+	//
+	// 下面这些上限的存在意义是「让服务在被恶意使用时退化而不是崩溃」：
+	// 单个请求耗尽磁盘、内存或文件描述符，是文件服务器最容易被击穿的地方。
+
+	// DefaultUploadMaxSize 单次上传允许的最大字节数（10 GiB），0 表示不限制。
+	//
+	// 选 10 GiB 而不是「不限制」：它足够覆盖常见的大文件场景
+	// （镜像、数据库备份、视频素材），同时仍能兜住「一个请求写爆磁盘」。
+	// 需要传更大的东西时显式设成 0 即可 —— 但那等于把磁盘交给调用方处置。
+	DefaultUploadMaxSize int64 = 10 << 30
+	// DefaultUploadReadTimeout 上传连续多久没有进展就断开（默认 2 分钟）。
+	//
+	// 注意是「无进展」而不是「总时长」：只要数据还在传，连接就会被不断续期，
+	// 所以 10 GB 的文件在慢速链路上传三个小时也不会被打断；
+	// 真正会被断开的是「连上之后几乎不发数据」的连接 ——
+	// 那种连接会长期占着并发名额，几十个就能让服务拒绝正常用户。
+	DefaultUploadReadTimeout = 2 * time.Minute
+	// DefaultDownloadTimeout 下载连续多久没有进展就断开（默认 2 分钟）。
+	//
+	// 同样按进展计算，防的是「连上之后不读数据」的客户端：
+	// 服务端会一直阻塞在写 socket 上，却始终占着并发名额。
+	DefaultDownloadTimeout = 2 * time.Minute
+	// DefaultListMaxEntries 单次目录列举最多返回的条目数。
+	// 十万级文件的目录一次性序列化会给内存和响应体都带来很大压力。
+	DefaultListMaxEntries = 20000
+	// DefaultArchiveMaxItems 单次打包允许的最大条目数。
+	DefaultArchiveMaxItems = 200000
+	// DefaultArchiveMaxBytes 单次打包允许的最大原始字节数（50 GiB）。
+	DefaultArchiveMaxBytes int64 = 50 << 30
+	// DefaultMaxConcurrent 同时在处理的请求数上限。
+	// 目的是兜住文件描述符与内存，而不是限流业务。
+	DefaultMaxConcurrent = 512
+	// DefaultMaxConcurrentJobs 同时进行的重任务（上传 / 解压）数上限。
+	DefaultMaxConcurrentJobs = 64
+	// DefaultAuthFailLimit 同一来源在窗口内允许的认证失败次数，0 表示不限制。
+	DefaultAuthFailLimit = 10
+	// DefaultAuthFailWindow 认证失败的统计窗口，同时也是封禁时长。
+	DefaultAuthFailWindow = 5 * time.Minute
+	// DefaultMaxHeaderBytes 请求行 + 请求头允许的最大字节数（默认 64 KiB）。
+	DefaultMaxHeaderBytes = 64 << 10
+	// DefaultMaxNameBytes 允许的单个文件名最大字节数。
+	// 多数文件系统的上限是 255 字节，提前拒绝比让底层报错更友好。
+	DefaultMaxNameBytes = 255
+	// DefaultHashMaxSize 允许计算摘要（?hash）的最大文件尺寸。
+	// 算摘要要读完整个文件，对超大文件开放等于送出一个 CPU/IO 耗尽入口。
+	DefaultHashMaxSize int64 = 512 << 20
 )
 
 // Config 保存完整的服务配置。
@@ -118,6 +166,57 @@ type Config struct {
 	ExtractMaxFiles int
 	ExtractMaxRatio int
 
+	// ---- 服务端防护 ----
+
+	// UploadMaxSize 为单次上传允许的最大字节数，0 表示不限制。
+	UploadMaxSize int64
+	// UploadReadTimeout 为单次上传允许的最长读取时间。
+	UploadReadTimeout time.Duration
+	// DownloadTimeout 为单次下载允许的最长写出时间。
+	DownloadTimeout time.Duration
+	// ListMaxEntries 为单次目录列举返回的最大条目数。
+	ListMaxEntries int
+	// ArchiveMaxItems / ArchiveMaxBytes 为单次打包的条目数与字节数上限。
+	ArchiveMaxItems int
+	ArchiveMaxBytes int64
+	// MaxConcurrent 为同时处理的请求数上限（0 表示不限制）。
+	MaxConcurrent int
+	// MaxConcurrentJobs 为同时进行的重任务（上传 / 解压）数上限。
+	MaxConcurrentJobs int
+	// AuthFailLimit 为同一来源在窗口内允许的认证失败次数（0 表示不限制）。
+	AuthFailLimit int
+	// AuthFailWindow 为认证失败的统计窗口与封禁时长。
+	AuthFailWindow time.Duration
+	// MaxHeaderBytes 为请求行 + 请求头允许的最大字节数。
+	MaxHeaderBytes int
+	// MaxNameBytes 为允许的单个文件名最大字节数。
+	MaxNameBytes int
+	// DisableCSRFProtect 关闭写操作的来源校验（默认开启）。
+	//
+	// 开着它时，带 Origin/Referer 且与请求 Host 不同源的写请求会被拒绝。
+	// 非浏览器客户端（curl、脚本）通常不带这两个头，不受影响。
+	DisableCSRFProtect bool
+
+	// HashMaxSize 为允许计算 ?hash 摘要的最大文件尺寸（0 表示不限制）。
+	HashMaxSize int64
+
+	// DisableHTMLSandbox 关闭对 HTML/SVG/XML 的 CSP sandbox。
+	//
+	// 默认开启：上传的网页会在不透明源里渲染，脚本读不到本站数据，
+	// 从而堵死「上传恶意页面 → 诱导管理员打开 → 借其登录态操作」这条路径。
+	DisableHTMLSandbox bool
+
+	// ---- 运行期可修改的设置 ----
+	//
+	// AllowRootSwitch 允许登录后在页面上切换服务根目录（默认开启）。
+	//
+	// 只对服务根拥有读写权限的账号可以操作；可切换的范围默认限制在
+	// 「启动根目录的父目录」之内（能换到兄弟目录，但换不到系统的别处），
+	// 需要放开时用 --root-allow 追加允许的前缀。
+	AllowRootSwitch bool
+	// RootAllow 为允许切换到的额外路径前缀。
+	RootAllow []string
+
 	// ShowVersion 为 true 时打印版本并退出。
 	ShowVersion bool
 }
@@ -166,6 +265,16 @@ func envInt64(key string, def int64) int64 {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+// envDuration 读取时长型环境变量（如 30m、1h），非法值回落到默认值。
+func envDuration(key string, def time.Duration) time.Duration {
+	if v, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil {
+			return d
 		}
 	}
 	return def
@@ -237,6 +346,24 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		ExtractMaxTotal:  envInt64("GOFS_EXTRACT_MAX_TOTAL", DefaultExtractMaxTotal),
 		ExtractMaxFiles:  envInt("GOFS_EXTRACT_MAX_FILES", DefaultExtractMaxFiles),
 		ExtractMaxRatio:  envInt("GOFS_EXTRACT_MAX_RATIO", DefaultExtractMaxRatio),
+
+		UploadMaxSize:      envInt64("GOFS_UPLOAD_MAX_SIZE", DefaultUploadMaxSize),
+		UploadReadTimeout:  envDuration("GOFS_UPLOAD_READ_TIMEOUT", DefaultUploadReadTimeout),
+		DownloadTimeout:    envDuration("GOFS_DOWNLOAD_TIMEOUT", DefaultDownloadTimeout),
+		ListMaxEntries:     envInt("GOFS_LIST_MAX_ENTRIES", DefaultListMaxEntries),
+		ArchiveMaxItems:    envInt("GOFS_ARCHIVE_MAX_ITEMS", DefaultArchiveMaxItems),
+		ArchiveMaxBytes:    envInt64("GOFS_ARCHIVE_MAX_BYTES", DefaultArchiveMaxBytes),
+		MaxConcurrent:      envInt("GOFS_MAX_CONCURRENT", DefaultMaxConcurrent),
+		MaxConcurrentJobs:  envInt("GOFS_MAX_CONCURRENT_JOBS", DefaultMaxConcurrentJobs),
+		AuthFailLimit:      envInt("GOFS_AUTH_FAIL_LIMIT", DefaultAuthFailLimit),
+		AuthFailWindow:     envDuration("GOFS_AUTH_FAIL_WINDOW", DefaultAuthFailWindow),
+		MaxHeaderBytes:     envInt("GOFS_MAX_HEADER_BYTES", DefaultMaxHeaderBytes),
+		MaxNameBytes:       envInt("GOFS_MAX_NAME_BYTES", DefaultMaxNameBytes),
+		DisableCSRFProtect: envBool("GOFS_DISABLE_CSRF_PROTECT", false),
+		HashMaxSize:        envInt64("GOFS_HASH_MAX_SIZE", DefaultHashMaxSize),
+		DisableHTMLSandbox: envBool("GOFS_DISABLE_HTML_SANDBOX", false),
+		AllowRootSwitch:    envBool("GOFS_ALLOW_ROOT_SWITCH", true),
+		RootAllow:          splitList(envStr("GOFS_ROOT_ALLOW", "")),
 	}
 
 	fs := flag.NewFlagSet("gofs", flag.ContinueOnError)
@@ -245,6 +372,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 
 	// 该开关以「否定形式」存在，便于在不改动 layout 默认值的前提下关闭归档。
 	var noUploadDated bool
+	// 同理：换根默认开启，用否定形式关闭。
+	var noRootSwitch bool
 
 	fs.StringVar(&cfg.Bind, "b", cfg.Bind, "指定监听地址或 unix socket")
 	fs.StringVar(&cfg.Bind, "bind", cfg.Bind, "指定监听地址或 unix socket")
@@ -291,6 +420,64 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.Int64Var(&cfg.ExtractMaxTotal, "extract-max-total", cfg.ExtractMaxTotal, "单次解压写出字节上限")
 	fs.IntVar(&cfg.ExtractMaxFiles, "extract-max-files", cfg.ExtractMaxFiles, "单次解压文件数上限")
 	fs.IntVar(&cfg.ExtractMaxRatio, "extract-max-ratio", cfg.ExtractMaxRatio, "单文件压缩比上限（防解压炸弹）")
+	fs.Int64Var(&cfg.UploadMaxSize, "upload-max-size", cfg.UploadMaxSize,
+		"单次上传的最大字节数，0 表示不限制")
+	fs.BoolVar(&noRootSwitch, "no-root-switch", false,
+		"禁止登录后在页面上切换服务根目录")
+	fs.Func("root-allow", "允许把服务根目录切换到的路径前缀（可重复指定）", func(v string) error {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil
+		}
+		cfg.RootAllow = append(cfg.RootAllow, v)
+		return nil
+	})
+	fs.Func("upload-read-timeout", "单次上传的最长读取时间，如 30m、1h", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.UploadReadTimeout = d
+		return nil
+	})
+	fs.Func("download-timeout", "单次下载的最长写出时间，如 30m、2h；0 表示不限制", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.DownloadTimeout = d
+		return nil
+	})
+	fs.IntVar(&cfg.ListMaxEntries, "list-max-entries", cfg.ListMaxEntries,
+		"单次目录列举最多返回多少条，0 表示不限制")
+	fs.IntVar(&cfg.ArchiveMaxItems, "archive-max-items", cfg.ArchiveMaxItems,
+		"单次打包的条目数上限，0 表示不限制")
+	fs.Int64Var(&cfg.ArchiveMaxBytes, "archive-max-bytes", cfg.ArchiveMaxBytes,
+		"单次打包的原始字节上限，0 表示不限制")
+	fs.IntVar(&cfg.MaxConcurrent, "max-concurrent", cfg.MaxConcurrent,
+		"同时处理的请求数上限，0 表示不限制")
+	fs.IntVar(&cfg.MaxConcurrentJobs, "max-concurrent-jobs", cfg.MaxConcurrentJobs,
+		"同时进行的上传/解压任务数上限，0 表示不限制")
+	fs.IntVar(&cfg.AuthFailLimit, "auth-fail-limit", cfg.AuthFailLimit,
+		"同一来源认证失败多少次后临时封禁，0 表示不限制")
+	fs.Func("auth-fail-window", "认证失败的统计窗口与封禁时长，如 5m、1h", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.AuthFailWindow = d
+		return nil
+	})
+	fs.IntVar(&cfg.MaxHeaderBytes, "max-header-bytes", cfg.MaxHeaderBytes,
+		"请求行+请求头允许的最大字节数")
+	fs.IntVar(&cfg.MaxNameBytes, "max-name-bytes", cfg.MaxNameBytes,
+		"允许的单个文件名最大字节数")
+	fs.BoolVar(&cfg.DisableCSRFProtect, "no-csrf-protect", cfg.DisableCSRFProtect,
+		"关闭写操作的跨站来源校验（默认开启，仅影响浏览器发起的请求）")
+	fs.Int64Var(&cfg.HashMaxSize, "hash-max-size", cfg.HashMaxSize,
+		"允许计算 ?hash 摘要的最大文件字节数，0 表示不限制")
+	fs.BoolVar(&cfg.DisableHTMLSandbox, "no-html-sandbox", cfg.DisableHTMLSandbox,
+		"关闭 HTML/SVG/XML 的 CSP sandbox（关闭后这些文件内的脚本可读取本站数据）")
 	fs.BoolVar(&cfg.ShowVersion, "V", false, "打印版本")
 	fs.BoolVar(&cfg.ShowVersion, "version", false, "打印版本")
 
@@ -314,8 +501,7 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		if specified["upload-date-layout"] {
 			return nil, errors.New("--no-upload-dated 与 --upload-date-layout 不能同时使用")
 		}
-		cfg.UploadDateLayout = ""
-	}
+		cfg.UploadDateLayout = ""	}
 
 	// -A 是各项权限的并集。
 	if cfg.AllowAll {
@@ -401,6 +587,46 @@ func (c *Config) normalize() error {
 	if c.EditMaxSize <= 0 {
 		return errors.New("--edit-max-size 必须为正整数")
 	}
+
+	// ---- 服务端防护 ----
+	// 这几个允许为 0（表示不限制），负数才是配置错误。
+	if c.UploadMaxSize < 0 {
+		return errors.New("--upload-max-size 不能为负数（0 表示不限制）")
+	}
+	if c.ListMaxEntries < 0 {
+		return errors.New("--list-max-entries 不能为负数（0 表示不限制）")
+	}
+	if c.ArchiveMaxItems < 0 {
+		return errors.New("--archive-max-items 不能为负数（0 表示不限制）")
+	}
+	if c.ArchiveMaxBytes < 0 {
+		return errors.New("--archive-max-bytes 不能为负数（0 表示不限制）")
+	}
+	if c.MaxConcurrent < 0 {
+		return errors.New("--max-concurrent 不能为负数（0 表示不限制）")
+	}
+	if c.MaxConcurrentJobs <= 0 {
+		return errors.New("--max-concurrent-jobs 必须为正整数（0 表示不限制，请用负数以外的值）")
+	}
+	if c.AuthFailLimit < 0 {
+		return errors.New("--auth-fail-limit 不能为负数（0 表示不限制）")
+	}
+	if c.AuthFailLimit > 0 && c.AuthFailWindow <= 0 {
+		return errors.New("--auth-fail-window 必须为正时长")
+	}
+	if c.MaxHeaderBytes < 4096 {
+		// 4 KiB 已经放不下正常的 Cookie 与长 URL，再小只会伤到自己。
+		return errors.New("--max-header-bytes 至少为 4096")
+	}
+	if c.MaxNameBytes < 16 {
+		return errors.New("--max-name-bytes 至少为 16")
+	}
+	if c.UploadReadTimeout <= 0 {
+		return errors.New("--upload-read-timeout 必须为正时长")
+	}
+	if c.DownloadTimeout < 0 {
+		return errors.New("--download-timeout 不能为负（0 表示不限制）")
+	}
 	return nil
 }
 
@@ -481,6 +707,30 @@ func usageText() string {
       --extract-max-ratio <n> 单文件压缩比上限，默认 200
   -V, --version              打印版本
   -h, --help                 打印帮助
+
+防护选项（默认即为较安全的取值，一般无需调整）:
+      --upload-max-size <n>  单次上传的最大字节数，默认 10GiB；0 表示不限制
+      --upload-read-timeout <d>
+                             单次上传的最长读取时间，默认 30m
+      --download-timeout <d> 单次下载的最长写出时间，默认 30m；0 表示不限制
+                             （防的是「连上后不读数据」的客户端长期占住名额）
+      --list-max-entries <n> 单次目录列举最多返回多少条，默认 20000；0 表示不限制
+      --archive-max-items <n> 单次打包的条目数上限，默认 200000
+      --archive-max-bytes <n> 单次打包的原始字节上限，默认 50GiB
+      --max-concurrent <n>   同时处理的请求数上限，默认 512；0 表示不限制
+      --max-concurrent-jobs <n>
+                             同时进行的上传/解压任务数上限，默认 64
+      --auth-fail-limit <n>  同一来源认证失败多少次后临时封禁，默认 10；0 表示关闭
+      --auth-fail-window <d> 认证失败的统计窗口与封禁时长，默认 5m
+      --max-header-bytes <n> 请求行+请求头允许的最大字节数，默认 64KiB
+      --max-name-bytes <n>   允许的单个文件名最大字节数，默认 255
+      --hash-max-size <n>    允许计算 ?hash 摘要的最大文件字节数，默认 512MiB
+      --no-csrf-protect      关闭写操作的跨站来源校验
+                             （默认开启；只影响浏览器发起的跨站请求，
+                              curl 等不带 Origin 的客户端不受影响）
+      --no-html-sandbox      关闭 HTML/SVG/XML 的 CSP sandbox
+                             （默认开启：上传的网页在不透明源里渲染，
+                              脚本读不到本站数据，堵住存储型 XSS）
 
 示例:
   gofs                                 以只读模式服务当前目录

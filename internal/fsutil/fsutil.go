@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uuxia/gofs/internal/textfile"
@@ -17,8 +18,13 @@ import (
 // ErrEscaped 表示解析出的路径逃逸出了服务根目录。
 var ErrEscaped = errors.New("路径超出了服务根目录")
 
-// Resolver 在固定根目录内做安全的路径解析。
+// Resolver 在根目录内做安全的路径解析。
+//
+// 根目录可以在运行期切换（登录后的「服务设置」），因此所有读写都要过
+// mu：解析路径时持读锁，切换根时持写锁。锁的粒度是「一次 Resolve」而不是
+// 「整个请求」——不然一次大文件传输就会把切换操作挡住。
 type Resolver struct {
+	mu            sync.RWMutex
 	root          string // 已求绝对路径的根目录
 	allowSymlink  bool   // 是否允许符号链接逃逸
 	singleFile    bool   // 根节点是单个文件而非目录
@@ -27,35 +33,70 @@ type Resolver struct {
 
 // NewResolver 创建解析器。root 会被展开为绝对路径。
 func NewResolver(root string, allowSymlink bool) (*Resolver, error) {
-	abs, err := filepath.Abs(root)
+	abs, single, name, err := normalizeRoot(root)
 	if err != nil {
 		return nil, err
+	}
+	return &Resolver{
+		root:          abs,
+		allowSymlink:  allowSymlink,
+		singleFile:    single,
+		serveRootName: name,
+	}, nil
+}
+
+// normalizeRoot 把用户给的路径规范化成「已解析软链的绝对目录」。
+//
+// 根目录自身可能位于符号链接之下（macOS 上 /tmp 指向 /private/tmp），
+// 必须先解析为真实路径，否则每次 EvalSymlinks 后的前缀比对都会失败，
+// 导致所有请求被误判为「逃逸出根目录」。
+//
+// 传入单个文件时返回它所在的目录，并由 single 标记。
+func normalizeRoot(root string) (abs string, single bool, name string, err error) {
+	abs, err = filepath.Abs(root)
+	if err != nil {
+		return "", false, "", err
 	}
 	abs = filepath.Clean(abs)
-	// 根目录自身可能位于符号链接之下（macOS 上 /tmp 指向 /private/tmp），
-	// 必须先解析为真实路径，否则每次 EvalSymlinks 后的前缀比对都会失败，
-	// 导致所有请求被误判为「逃逸出根目录」。
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
+	if real, rerr := filepath.EvalSymlinks(abs); rerr == nil {
 		abs = real
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return nil, err
+	info, statErr := os.Stat(abs)
+	if statErr != nil {
+		return "", false, "", statErr
 	}
-	r := &Resolver{root: abs, allowSymlink: allowSymlink}
-	if !info.IsDir() {
-		r.singleFile = true
-		r.serveRootName = filepath.Base(abs)
-		r.root = filepath.Dir(abs)
+	if info.IsDir() {
+		return abs, false, "", nil
 	}
-	return r, nil
+	return filepath.Dir(abs), true, filepath.Base(abs), nil
 }
 
 // Root 返回服务根目录的绝对路径。
-func (r *Resolver) Root() string { return r.root }
+func (r *Resolver) Root() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.root
+}
+
+// SetRoot 在运行期切换服务根目录。
+//
+// 新根必须是存在的目录（或单个文件，此时进入单文件模式）。
+// 路径校验（是否在允许范围内）由调用方负责 —— 这里只保证路径本身可用。
+func (r *Resolver) SetRoot(root string) error {
+	abs, single, name, err := normalizeRoot(root)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.root, r.singleFile, r.serveRootName = abs, single, name
+	return nil
+}
 
 // SingleFile 返回单文件模式下被服务的文件名，非单文件模式返回空串。
 func (r *Resolver) SingleFile() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if r.singleFile {
 		return r.serveRootName
 	}
@@ -65,6 +106,12 @@ func (r *Resolver) SingleFile() string {
 // Resolve 把 URL 路径映射为磁盘绝对路径。
 // 返回的路径一定位于根目录之内（除非开启 allowSymlink）。
 func (r *Resolver) Resolve(urlPath string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.resolveLocked(urlPath)
+}
+
+func (r *Resolver) resolveLocked(urlPath string) (string, error) {
 	clean := CleanURLPath(urlPath)
 	if r.singleFile {
 		// 单文件模式只暴露一个文件。
@@ -76,14 +123,14 @@ func (r *Resolver) Resolve(urlPath string) (string, error) {
 	rel := strings.TrimPrefix(clean, "/")
 	full := filepath.Join(r.root, filepath.FromSlash(rel))
 
-	if !r.within(full) {
+	if !within(r.root, full) {
 		return "", ErrEscaped
 	}
 	// 处理符号链接逃逸：仅当目标存在且开启软链逃逸时放行。
 	if !r.allowSymlink {
 		real, err := filepath.EvalSymlinks(full)
 		if err == nil {
-			if !r.within(real) {
+			if !within(r.root, real) {
 				return "", ErrEscaped
 			}
 		}
@@ -91,16 +138,53 @@ func (r *Resolver) Resolve(urlPath string) (string, error) {
 	return full, nil
 }
 
-// within 判断 p 是否位于根目录之内。
-func (r *Resolver) within(p string) bool {
-	if p == r.root {
+// within 判断 p 是否位于 root 之内。
+func within(root, p string) bool {
+	if p == root {
 		return true
 	}
-	return strings.HasPrefix(p, r.root+string(filepath.Separator))
+	return strings.HasPrefix(p, root+string(filepath.Separator))
+}
+
+// IsWithin 判断 p 是否位于 base 之内（含 base 本身）。
+//
+// 只做纯字符串比较，不访问文件系统：白名单里的路径可能尚不存在，
+// 调用方需要自己先把两边都规范化（Abs + EvalSymlinks）再传进来。
+func IsWithin(base, p string) bool {
+	if base == "" || p == "" {
+		return false
+	}
+	return within(filepath.Clean(base), filepath.Clean(p))
+}
+
+// NormalizePath 把用户输入的路径规范化成绝对路径，供白名单校验使用。
+//
+// 与 normalizeRoot 的区别是**不要求路径存在**：管理员可能想先把根切到
+// 一个尚未创建的目录（会失败并给出明确提示），也可能只是校验一下范围。
+// evalSymlinks 为 true 时会对已存在的部分解析软链，避免用软链绕过白名单。
+func NormalizePath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if real, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		return real, nil
+	}
+	// 路径不存在时，只解析它的父目录，其余部分拼回去。
+	// 这样 /tmp/link-not-yet 里的 link 仍会被展开，绕不过白名单。
+	if dir, base := filepath.Dir(abs), filepath.Base(abs); dir != abs {
+		if realDir, rerr := filepath.EvalSymlinks(dir); rerr == nil {
+			return filepath.Join(realDir, base), nil
+		}
+	}
+	return abs, nil
 }
 
 // Rel 把磁盘路径转回相对根目录的 URL 路径（以 / 开头）。
 func (r *Resolver) Rel(abs string) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	rel, err := filepath.Rel(r.root, abs)
 	if err != nil {
 		return "", err
@@ -163,11 +247,19 @@ type Listing struct {
 	Total    int     `json:"total"`
 	DirCount int     `json:"dir_count"`
 	FileSize int64   `json:"file_size"`
+	// TotalAll 是目录里的实际条目总数（未截断时等于 Total）。
+	TotalAll int `json:"total_all,omitempty"`
+	// Truncated 表示因为超过条目上限而被截断。
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // ReadDir 列举目录内容。hidden 为文件名 glob 列表，匹配到的条目会被隐藏。
 // 目录在前、同类按名称排序（与常见文件管理器一致）。
-func ReadDir(res *Resolver, dir string, hidden []string) (*Listing, error) {
+//
+// maxEntries 限制返回的条目数（<=0 表示不限制）。十万级文件的目录如果
+// 一次性全部返回，光是序列化就会吃掉大量内存，响应体也会大到无法渲染；
+// 截断后由 Truncated 标记告知调用方。
+func ReadDir(res *Resolver, dir string, hidden []string, maxEntries int) (*Listing, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -181,10 +273,19 @@ func ReadDir(res *Resolver, dir string, hidden []string) (*Listing, error) {
 		return nil, err
 	}
 
+	// os.ReadDir 已经把整个目录读进内存了，这一步省不掉；
+	// 但可以避免再把它放大成一份同样大的 Entry 切片 + JSON。
+	total := len(items)
+	if maxEntries > 0 && total > maxEntries {
+		items = items[:maxEntries]
+	}
+
 	list := &Listing{
-		Name:    info.Name(),
-		IsDir:   true,
-		Entries: make([]Entry, 0, len(items)),
+		Name:      info.Name(),
+		IsDir:     true,
+		Entries:   make([]Entry, 0, len(items)),
+		TotalAll:  total,
+		Truncated: total > len(items),
 	}
 	if rel, err := res.Rel(dir); err == nil {
 		list.Path = rel

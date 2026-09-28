@@ -29,6 +29,44 @@ type zipItem struct {
 	info fs.FileInfo
 }
 
+// zipLimits 是打包过程中的资源累计器。
+//
+// 打包是「先扫描再写出」两阶段，扫描阶段就会把条目都收进内存，
+// 所以必须在扫描时就开始累计并检查，不能等收完再判断。
+// 用指针在多个选中项之间共享累计值。
+type zipLimits struct {
+	maxItems int
+	maxBytes int64
+	items    int
+	bytes    int64
+}
+
+// add 记入一个条目，超限时返回 errZipTooLarge。
+func (l *zipLimits) add(info fs.FileInfo) error {
+	l.items++
+	if !info.IsDir() {
+		l.bytes += info.Size()
+	}
+	if l.maxItems > 0 && l.items > l.maxItems {
+		return errZipTooLarge
+	}
+	if l.maxBytes > 0 && l.bytes > l.maxBytes {
+		return errZipTooLarge
+	}
+	return nil
+}
+
+// errZipTooLarge 表示待打包的内容超过配置上限。
+var errZipTooLarge = errors.New("待打包内容超过上限")
+
+// newZipLimits 依据配置构造累计器。
+func (s *Server) newZipLimits() *zipLimits {
+	if s.cfg.ArchiveMaxItems <= 0 && s.cfg.ArchiveMaxBytes <= 0 {
+		return nil
+	}
+	return &zipLimits{maxItems: s.cfg.ArchiveMaxItems, maxBytes: s.cfg.ArchiveMaxBytes}
+}
+
 // flateLevel 把配置的压缩级别映射为 flate 级别。
 func (s *Server) flateLevel() int {
 	switch strings.ToLower(s.cfg.Compress) {
@@ -124,17 +162,23 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 		skipped []string
 		err     error
 	)
+	lim := s.newZipLimits()
 	if picked {
-		items, skipped = s.resolvePicks(r, urlPath, picks)
+		var tooLarge bool
+		items, skipped, tooLarge = s.resolvePicks(r, urlPath, picks, lim)
+		if tooLarge {
+			s.writeZipErr(w, errZipTooLarge)
+			return
+		}
 		if len(items) == 0 {
 			http.Error(w, "400 Bad Request: 选中的条目都无法打包（不存在、越界或没有读取权限）",
 				http.StatusBadRequest)
 			return
 		}
 	} else {
-		items, err = collectTree(dir)
+		items, err = collectTree(dir, lim)
 		if err != nil {
-			s.writeErr(w, err)
+			s.writeZipErr(w, err)
 			return
 		}
 	}
@@ -227,7 +271,7 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 
 // collectTree 递归收集 dir 下的全部条目，rel 相对于 dir。
 // 单个条目不可读时跳过，不阻塞整个打包。
-func collectTree(dir string) ([]zipItem, error) {
+func collectTree(dir string, lim *zipLimits) ([]zipItem, error) {
 	var items []zipItem
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -250,6 +294,12 @@ func collectTree(dir string) ([]zipItem, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil // 不打包软链，避免导出根目录之外的内容
 		}
+		// 边扫边检查上限：为了报错而先把整个目录扫完毫无意义。
+		if lim != nil {
+			if lerr := lim.add(info); lerr != nil {
+				return lerr
+			}
+		}
 		items = append(items, zipItem{abs: p, rel: filepath.ToSlash(rel), info: info})
 		return nil
 	})
@@ -257,7 +307,7 @@ func collectTree(dir string) ([]zipItem, error) {
 }
 
 // collectOne 收集单个选中条目：文件直接返回，目录则连同其内容一起展开。
-func collectOne(abs, rel string) ([]zipItem, error) {
+func collectOne(abs, rel string, lim *zipLimits) ([]zipItem, error) {
 	// 用 Lstat：软链本身不是要打包的对象。
 	info, err := os.Lstat(abs)
 	if err != nil {
@@ -267,10 +317,21 @@ func collectOne(abs, rel string) ([]zipItem, error) {
 		return nil, nil
 	}
 	if !info.IsDir() {
+		if lim != nil {
+			if lerr := lim.add(info); lerr != nil {
+				return nil, lerr
+			}
+		}
 		return []zipItem{{abs: abs, rel: rel, info: info}}, nil
 	}
 
-	children, err := collectTree(abs)
+	// 目录本身也占一个条目名额。
+	if lim != nil {
+		if lerr := lim.add(info); lerr != nil {
+			return nil, lerr
+		}
+	}
+	children, err := collectTree(abs, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -294,14 +355,12 @@ func collectOne(abs, rel string) ([]zipItem, error) {
 // 依赖这条约束——权限由逐项的 checkPerm 复核（路径级 ACL 照样生效），
 // 根外访问由 Resolve 拦掉。包内路径优先取「相对当前目录」，
 // 不在当前目录下的（搜索命中）则退回「相对服务根」，避免同名互相覆盖。
-func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string) ([]zipItem, []string) {
+func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string, lim *zipLimits) (items []zipItem, skipped []string, tooLarge bool) {
 	base := strings.TrimSuffix(fsutil.CleanURLPath(urlPath), "/")
 	if base == "" {
 		base = "/"
 	}
 
-	var items []zipItem
-	var skipped []string
 	seen := make(map[string]bool)
 
 	for _, raw := range picks {
@@ -343,7 +402,12 @@ func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string) (
 		if seen[rel] {
 			continue
 		}
-		got, err := collectOne(abs, rel)
+		got, err := collectOne(abs, rel, lim)
+		if errors.Is(err, errZipTooLarge) {
+			// 累计值已经超限，后面的选中项也必然失败，直接停下。
+			// 报 413 比「全部跳过 → 400」准确得多。
+			return items, skipped, true
+		}
 		if err != nil || len(got) == 0 {
 			skipped = append(skipped, raw)
 			continue
@@ -351,7 +415,22 @@ func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string) (
 		seen[rel] = true
 		items = append(items, got...)
 	}
-	return items, skipped
+	return items, skipped, false
+}
+
+// writeZipErr 输出打包失败的原因。
+// 超出上限属于「请求太大」，用 413 而不是 500。
+func (s *Server) writeZipErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errZipTooLarge) {
+		s.logger.Errorf("打包中止：内容超过上限（条目上限 %d，原始大小上限 %s）",
+			s.cfg.ArchiveMaxItems, humanSize(s.cfg.ArchiveMaxBytes))
+		http.Error(w, fmt.Sprintf(
+			"413 Payload Too Large: 待打包内容超过上限（最多 %d 个条目 / %s）",
+			s.cfg.ArchiveMaxItems, humanSize(s.cfg.ArchiveMaxBytes)),
+			http.StatusRequestEntityTooLarge)
+		return
+	}
+	s.writeErr(w, err)
 }
 
 // zipDownloadName 决定下载时呈现的 zip 文件名。

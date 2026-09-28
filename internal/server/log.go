@@ -80,7 +80,43 @@ func (l *Logger) render(r *http.Request, status int, user string, start time.Tim
 	)
 	out := repl.Replace(l.format)
 	out = replaceHTTPHeaders(out, r)
-	return out
+	return sanitizeLogLine(out)
+}
+
+// sanitizeLogLine 清理日志行里的控制字符。
+//
+// 日志内容有一部分来自客户端：URL、User-Agent，以及**文件名**。
+// 文件名这一点容易被忽略 —— 在 Linux 上文件名可以包含换行，
+// 于是 `rm -rf "a\n127.0.0.1 - - \"GET /admin\" 200"` 这样一个名字
+// 就能在日志里伪造出额外的一行，把排查方向带偏。
+// ANSI 转义序列（ESC）也该去掉，否则日志在终端里显示会串色。
+func sanitizeLogLine(s string) string {
+	// 绝大多数情况都是干净的，先做一次快速判断避免额外分配。
+	clean := true
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\r' || c == '\n' || c == '\t':
+			b.WriteByte(' ')
+		case c < 0x20 || c == 0x7f:
+			// 其余控制字符（含 ESC）直接丢弃。
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // replaceHTTPHeaders 展开 $http_xxx 变量。
@@ -137,13 +173,15 @@ func clientIP(r *http.Request) string {
 }
 
 // Infof 输出内部信息日志。
+// 同样要清理控制字符：格式化参数里经常带文件路径，而路径来自客户端。
 func (l *Logger) Infof(format string, args ...any) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, "%s INFO  - %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	fmt.Fprintf(l.out, "%s INFO  - %s\n", time.Now().Format(time.RFC3339),
+		sanitizeLogLine(fmt.Sprintf(format, args...)))
 }
 
 // Errorf 输出内部错误日志。
@@ -153,5 +191,6 @@ func (l *Logger) Errorf(format string, args ...any) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Fprintf(l.out, "%s ERROR - %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	fmt.Fprintf(l.out, "%s ERROR - %s\n", time.Now().Format(time.RFC3339),
+		sanitizeLogLine(fmt.Sprintf(format, args...)))
 }

@@ -282,6 +282,16 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rd.Close()
 
+	// 解压是最重的操作：长时间占 CPU、磁盘 IO 和一条连接。
+	// 取不到名额时直接拒绝，让客户端稍后重试，而不是排队把服务拖垮。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "3")
+		http.Error(w, "503 Service Unavailable: 解压任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	entries, err := rd.List(r.Context())
 	if err != nil {
 		s.writeErr(w, err)

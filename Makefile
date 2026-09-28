@@ -1,4 +1,4 @@
-.PHONY: all build test vet fmt run clean cross testdata
+.PHONY: all build test vet fmt run clean cross testdata uitest layout layout-sweep touch-sweep touch-modals cdp
 
 BINARY := gofs
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
@@ -7,7 +7,10 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 NODE_MODULES ?= $(HOME)/.workbuddy/binaries/node/workspace/node_modules
 NODE_BIN     ?= $(shell ls $(HOME)/.workbuddy/binaries/node/versions/*/bin/node 2>/dev/null | tail -1 || echo node)
 GOFS_URL     ?= http://127.0.0.1:5000
-export NODE_MODULES NODE_BIN GOFS_URL
+CHROME       ?= /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+CDP_PORT     ?= 9333
+MEASURE_URL  ?= http://127.0.0.1:5001
+export NODE_MODULES NODE_BIN GOFS_URL CDP_PORT
 
 all: fmt vet test build
 
@@ -32,6 +35,55 @@ uitest:
 ## run-auth: 以鉴权模式启动，供 uitest 使用
 run-auth: build
 	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' ./data
+
+## cdp: 启动带调试端口的 headless Chrome，供 layout / layout-sweep 使用
+##   （前台运行，另开终端跑 make layout）
+cdp:
+	$(CHROME) --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+	  --no-proxy-server --user-data-dir=/tmp/chrome-cdp \
+	  --remote-debugging-port=$(CDP_PORT) --window-size=1440,900 about:blank
+
+## layout: 量一个视口宽度下的表格布局（需先 make cdp + 起一个无鉴权实例）
+##   用法：make layout W=1280；目标开了鉴权时加 MEASURE_AUTH=user:pass
+layout:
+	$(NODE_BIN) scripts/measure-layout.mjs $(MEASURE_URL) $(or $(W),1440) 900
+
+## layout-sweep: 扫一遍所有响应式断点，每个宽度都要「列数一致 + 不溢出」
+layout-sweep:
+	@for w in 1600 1440 1281 1280 1024 900 820 760 560 500 414 375; do \
+	  printf '  %-6spx  ' $$w; \
+	  if $(NODE_BIN) scripts/measure-layout.mjs $(MEASURE_URL) $$w 900 >/tmp/gofs-layout.log 2>&1; then \
+	    grep -oE '列数一致（[0-9]+ 列）' /tmp/gofs-layout.log | tr -d '\n'; \
+	    printf '  \033[32mOK\033[0m\n'; \
+	  else \
+	    printf '\033[31mFAIL\033[0m\n'; sed -n '2p;14,20p' /tmp/gofs-layout.log; \
+	  fi; \
+	done
+
+## touch-sweep: 同样是断点扫描，但模拟触摸设备
+##   额外校验「无横向溢出 / 可点目标 ≥ 40px / 可点元素不能是半透明」
+touch-sweep:
+	@for w in 320 375 414 480 560 561 700 768 900 1024 1280 1440; do \
+	  printf '  %-6spx  ' $$w; \
+	  if TOUCH=1 $(NODE_BIN) scripts/measure-layout.mjs $(MEASURE_URL) $$w 812 >/tmp/gofs-touch.log 2>&1; then \
+	    printf '\033[32mOK\033[0m  '; \
+	    grep -oE '最小边 < 40px 的有 [0-9]+ 个' /tmp/gofs-touch.log; \
+	  else \
+	    printf '\033[31mFAIL\033[0m\n'; sed -n '2p;/横向溢出/p;/触摸目标过小/,$p' /tmp/gofs-touch.log | head -8; \
+	  fi; \
+	done
+
+## touch-modals: 单独校验弹窗类界面（编辑器 / 行操作菜单）的触摸可用性
+touch-modals:
+	@for o in sheet editor; do \
+	  printf '  %-6s  ' $$o; \
+	  if TOUCH=1 MEASURE_OPEN=$$o $(NODE_BIN) scripts/measure-layout.mjs $(MEASURE_URL) 375 812 >/tmp/gofs-modal.log 2>&1; then \
+	    printf '\033[32mOK\033[0m  '; \
+	    grep -oE '最小边 < 40px 的有 [0-9]+ 个' /tmp/gofs-modal.log; \
+	  else \
+	    printf '\033[31mFAIL\033[0m\n'; sed -n '/触摸目标过小/,$p' /tmp/gofs-modal.log | head -8; \
+	  fi; \
+	done
 
 ## vet: 静态检查
 vet:

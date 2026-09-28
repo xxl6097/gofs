@@ -53,6 +53,29 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 		http.Error(w, "400 Bad Request: 上传目标必须是文件路径", http.StatusBadRequest)
 		return
 	}
+	// 文件名长度检查放在最前面：底层文件系统的报错是 ENAMETOOLONG，
+	// 直接透出去会变成 500，看起来像服务端故障，实际是请求不合法。
+	if !s.checkNameLength(w, urlPath) {
+		return
+	}
+
+	// 上传会长时间占住连接并吃磁盘 IO，先取一个重任务名额。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 上传任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
+	// 放宽本次请求的读取时限：大文件上传需要时间。
+	// 用的是「无进展超时」——只要还在往里传就不会被打断，
+	// 只有连接真正停滞（比如每秒发几个字节占着名额）才会被断开。
+	withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	// 单文件大小上限：没有它，一个请求就能把磁盘写满。
+	if !requestBody(w, r, s.cfg.UploadMaxSize, "上传内容") {
+		return
+	}
 
 	// 按配置归档到 年/月/日 三级目录，再基于最终路径复核一次。
 	destPath := s.applyUploadLayout(r, urlPath)
@@ -101,7 +124,23 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 
 	n, err := io.Copy(f, r.Body)
 	if err != nil {
-		// 已写入部分保留，便于客户端续传。
+		// 超限时 MaxBytesReader 会以这个错误中断读取。
+		if isBodyTooLarge(err) {
+			// 非追加模式下磁盘上留着半截文件，必须删掉 —— 否则攻击者可以
+			// 反复发超限请求，每次都留下一个文件，磁盘照样会被撑爆。
+			// 追加模式则要保留原内容：那是断点续传的续接点。
+			if !appendMode {
+				_ = f.Close()
+				if rmErr := os.Remove(abs); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+					s.logger.Errorf("清理超限的半截文件 %s 失败: %v", abs, rmErr)
+				}
+			}
+			s.logger.Errorf("上传 %s 超过单文件上限 %d 字节，已中止", destPath, s.cfg.UploadMaxSize)
+			http.Error(w, fmt.Sprintf("413 Payload Too Large: 超过单文件上限 %s（%d 字节）",
+				humanSize(s.cfg.UploadMaxSize), s.cfg.UploadMaxSize), http.StatusRequestEntityTooLarge)
+			return
+		}
+		// 其它中断（网络断开等）：已写入部分保留，便于客户端续传。
 		s.logger.Errorf("写入 %s 中断: %v", abs, err)
 		http.Error(w, "500 写入失败: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -134,7 +173,27 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		http.Error(w, "400 Bad Request: 仅支持 multipart/form-data", http.StatusBadRequest)
 		return
 	}
+
+	// 与 PUT 同样的三道闸门：重任务名额、读取时限、请求体上限。
+	// 表单尤其需要限总量 —— 一个请求可以带任意多个文件。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 上传任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+	withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	if !requestBody(w, r, s.cfg.UploadMaxSize, "表单内容") {
+		return
+	}
+
 	if err := r.ParseMultipartForm(maxFormMemory); err != nil {
+		if isBodyTooLarge(err) {
+			http.Error(w, fmt.Sprintf("413 Payload Too Large: 表单总量超过上限 %s",
+				humanSize(s.cfg.UploadMaxSize)), http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}
@@ -191,9 +250,16 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 	}
 
 	saved := make([]string, 0, len(files))
+	skipped := make([]string, 0)
 	for _, fh := range files {
 		name := filepath.Base(strings.ReplaceAll(fh.Filename, "\\", "/"))
 		if name == "" || name == "." || name == ".." {
+			continue
+		}
+		// 单个名字超长只跳过这一个，不让整批上传失败 —— 多文件表单里
+		// 一个坏名字不该拖垮其它合法文件。
+		if s.cfg.MaxNameBytes > 0 && len(name) > s.cfg.MaxNameBytes {
+			skipped = append(skipped, name)
 			continue
 		}
 		dst := filepath.Join(base, name)
@@ -212,7 +278,13 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		saved = append(saved, rel)
 	}
 
-	s.writeJSON(w, map[string]any{"saved": saved, "count": len(saved), "dest": destDir})
+	out := map[string]any{"saved": saved, "count": len(saved), "dest": destDir}
+	if len(skipped) > 0 {
+		out["skipped"] = skipped
+		out["message"] = fmt.Sprintf("有 %d 个文件名超过 %d 字节，已跳过",
+			len(skipped), s.cfg.MaxNameBytes)
+	}
+	s.writeJSON(w, out)
 }
 
 // writeAll 把 src 全量写入 dst。
