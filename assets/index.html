@@ -1,5 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<!-- class="booting" 是「启动遮挡」：页面外壳在服务端就渲染好了，但
+     「要不要登录」得等 app.js 跑起来才知道。不挡住的话，未登录刷新时
+     会先看到一眼完整的文件界面，再被登录框盖掉 —— 就是那个一闪而过的背景。
+     撤除由 app.js 的 endBoot() 负责，样式见 style.css 的「启动遮挡」一节。 -->
+<html lang="zh-CN" class="booting">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -7,6 +11,26 @@
 <title>gofs</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h6l2 2h8v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1z' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="__GOFS_ASSETS__style.css">
+<script>
+  // 兜底：万一 app.js 加载失败或中途抛异常，就没人来撤遮挡了。
+  // 这里强制在 4 秒后放行 —— 宁可露出外壳，也好过给用户一张永远空着的页面。
+  // 放在 head 里最早执行，保证它先于任何可能出错的代码注册。
+  setTimeout(function () {
+    var el = document.documentElement;
+    el.classList.remove('booting');
+    // login-open 挂着、登录框却没建起来，说明 showLogin 中途出错了，一并放行。
+    // 登录框真的在，就别动 —— 那时候藏住外壳是对的。
+    if (!document.getElementById('login-mask')) el.classList.remove('login-open');
+  }, 4000);
+</script>
+<noscript><style>
+  /* 没有 JS 就没人撤遮挡，也不会有登录框，直接让遮挡失效。 */
+  html.booting body > header,
+  html.booting body > main,
+  html.booting body > footer { visibility: visible; }
+  html.booting body::before,
+  html.booting body::after { display: none; }
+</style></noscript>
 </head>
 <body>
 

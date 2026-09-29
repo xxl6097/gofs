@@ -19,35 +19,31 @@ import (
 // dateLayoutProbe 是校验日期布局字面量时使用的参照时刻。
 var dateLayoutProbe = time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC)
 
+func DefaultKeyDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".config", "gofs")
+	}
+	return dir
+}
+
 // DefaultKeyFile 的返回值是上传密钥的默认持久化路径。
 //
 // 放在用户配置目录而不是服务目录，理由有两个：
 // 一是不会污染被服务的文件树（否则密钥文件会出现在目录列表里），
 // 二是不会因为换一个服务目录就丢掉已有密钥。
 func DefaultKeyFile() string {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return ""
-		}
-		dir = filepath.Join(home, ".config")
-	}
-	return filepath.Join(dir, "gofs", "keys.json")
+	return filepath.Join(DefaultKeyDir(), "keys.json")
 }
 
 // DefaultUserFile 的返回值是用户表的默认持久化路径。
 // 与密钥文件同理放在用户配置目录：不污染被服务的文件树，也不会因为换服务目录而丢。
 func DefaultUserFile() string {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return ""
-		}
-		dir = filepath.Join(home, ".config")
-	}
-	return filepath.Join(dir, "gofs", "users.json")
+	return filepath.Join(DefaultKeyDir(), "users.json")
 }
 
 // 解压相关的硬性安全上限，可由命令行覆盖。

@@ -209,9 +209,33 @@
 
   // ================================================================ 登录界面
 
+  // endBoot 撤掉启动遮挡（index.html 里 <html class="booting">）。
+  //
+  // 遮挡的意义是「在确定登录状态之前，别让用户看见应用外壳」——
+  // 所以只能在两种时刻撤：登录框已经开着了，或者会话已经确认有效。
+  // 幂等，重复调用无副作用。
+  function endBoot() {
+    document.documentElement.classList.remove('booting');
+  }
+
+  // 登录期遮挡：只要登录框开着，应用外壳就一直藏着。
+  //
+  // ⚠️ 不能只靠「遮罩已挂上 DOM」来判断。.login-mask 带 .16s 淡入、
+  // opacity 从 0 起步 —— 在那 160ms 里遮罩是透明的，外壳会整个透出来，
+  // 登录卡片上甚至能看到目录列表的空状态文案。所以要盯的是
+  // 「登录框开着」这个状态，而不是「登录框这个元素存在」。
+  function setLoginGate(open) {
+    document.documentElement.classList.toggle('login-open', !!open);
+  }
+
   var loginResolve = null;
 
   function showLogin(message) {
+    // 先立遮挡再撤 booting：两个 class 的隐藏规则完全一致，
+    // 中间不会有哪怕一帧的空档把外壳露出去。
+    setLoginGate(true);
+    endBoot();
+
     if ($('login-mask')) {
       if (message) $('login-error').textContent = message;
       return;
@@ -237,7 +261,7 @@
 
     var sub = document.createElement('p');
     sub.className = 'login-sub';
-    sub.textContent = '使用 HTTP Basic 认证，凭据仅保存在本机浏览器中';
+    sub.textContent = '一个实用文件管理服务器';
     card.appendChild(sub);
 
     function field(labelText, type, name, autocomplete) {
@@ -284,7 +308,7 @@
 
     var hint = document.createElement('div');
     hint.className = 'login-hint';
-    hint.textContent = '账号由启动参数 --auth 配置，例如 --auth admin:123@/:rw';
+    hint.textContent = '';//账号由启动参数 --auth 配置，例如 --auth admin:123@/:rw
     card.appendChild(hint);
 
     mask.appendChild(card);
@@ -334,10 +358,20 @@
       // 否则按钮显隐会停留在未登录时的状态。
       applySession(data);
       DATA.auth_required = false;
-      mask.remove();
       updateAuthChip();
+      // 把权限和第一页列表都就位之后，再撤掉登录框放行界面。
+      //
+      // 中途放行会让用户看到一帧「按钮全没有 + 这个目录是空的」的假界面 ——
+      // 那时候目录其实还没读过。登录按钮在这期间保持「验证中…」，
+      // 等待有反馈，比先给一个错的界面好。
+      // 用 finally：列表拉取失败也必须把登录框收掉，否则页面永远卡在登录态。
+      try {
+        await onAuthenticated();
+      } finally {
+        mask.remove();
+        setLoginGate(false);
+      }
       toast('ok', '欢迎回来，' + (DATA.user || u));
-      await onAuthenticated();
     }
 
     loginResolve = submit;
@@ -346,6 +380,8 @@
   function hideLogin() {
     var m = $('login-mask');
     if (m) m.remove();
+    // 遮罩没了就必须一并撤掉登录期遮挡，否则整个界面会一直藏着。
+    setLoginGate(false);
   }
 
   // onAuthenticated 在登录成功后补齐页面数据。
@@ -896,7 +932,11 @@
   //     以前选中之后数字完全不变，很容易把「整个目录有多大」误读成
   //     「我选中的有多大」；
   //   - 被 --list-max-entries 截断时明确标注，避免看起来像是「目录里就这么多」。
+  //   - 还没取到任何列表时返回空串：「0 个目录 · 0 个文件」是一个**结论**，
+  //     得有数据才能下。未登录外壳里 state.listing 是 null，这时候报 0
+  //     等于对着一个还没读过的目录下判断，刷新时就会闪一下假数字。
   function statText() {
+    if (!state.listing) return '';
     var l = state.listing || {};
     var listed = state.entries.length;
     var dirs = typeof l.dir_count === 'number' ? l.dir_count : countOf(state.entries).dirs;
@@ -944,8 +984,11 @@
     tbody.textContent = '';
     var list = sortedEntries();
 
-    $('empty').hidden = list.length > 0;
-    if (list.length === 0) {
+    // 「这个目录是空的」同样是个结论 —— 没取到列表之前不能下。
+    // state.listing 为 null 表示「还没读过这个目录」（未登录外壳就是这样），
+    // 此时保持空白：一个还在加载的目录不该被说成是空的。
+    $('empty').hidden = list.length > 0 || !state.listing;
+    if (list.length === 0 && state.listing) {
       $('empty').textContent = state.query
         ? '没有匹配「' + state.query + '」的文件'
         : '这个目录是空的';
@@ -2634,22 +2677,40 @@
 
   if (DATA.auth_required) {
     // 服务端只返回了空壳：先渲染骨架，再决定是恢复会话还是弹登录框。
+    //
+    // 整个分支都在启动遮挡之下进行 —— 骨架此刻是画了但看不见的，
+    // 等下面某条路径调到 endBoot() 才露出来。这正是要的效果：
+    // 未登录的人不该先瞥见一眼文件界面。
     render();
     if (creds) {
       resumeSession().then(function (ok) {
         if (!ok) {
-          if (!$('login-mask')) showLogin('保存的登录已失效，请重新登录');
+          // 凭据过期：showLogin() 内部会撤遮挡。
+          showLogin('保存的登录已失效，请重新登录');
           return;
         }
-        // 补上用户名、登出按钮与各功能入口的显隐。
+        // 会话有效。先把用户名、登出按钮与各功能入口的显隐补齐……
         renderPerms();
-        navigate(state.path || '/', false);
+        // ……再等第一页列表真正到位才撤遮挡。
+        //
+        // 不能在这里就 endBoot()：那一刻目录还没读过，界面上是
+        // 「0 个目录 · 0 个文件」加一句「这个目录是空的」，
+        // 等列表回来又整个换掉 —— 就是刷新时闪过的那一下。
+        // navigate 内部吞掉了失败（只弹 toast），所以两个回调都要放行，
+        // 否则拉取失败时页面会一直藏着等 4 秒兜底。
+        navigate(state.path || '/', false).then(endBoot, endBoot);
+      }, function () {
+        // resumeSession 自己吞掉了网络错误，这里只兜住意料之外的异常，
+        // 免得遮挡卡死在那儿等 4 秒兜底。
+        showLogin('无法确认登录状态，请重新登录');
       });
     } else {
       showLogin('');
     }
   } else {
+    // 无需鉴权：没什么要等的，画完直接放行。
     render();
+    endBoot();
   }
 
   // 页脚与权限相关的显隐由 render() -> renderPerms() -> renderFooter() 负责，

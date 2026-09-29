@@ -48,6 +48,8 @@ var ErrHelp = config.ErrHelp
 // 监听 0.0.0.0:5000，服务当前目录。
 func Default() *Config { return config.Defaults() }
 
+func DefaultKeyDir() string { return config.DefaultKeyDir() }
+
 // ParseArgs 按命令行语义解析参数与 GOFS_ 前缀的环境变量。
 // args 不含程序名本身（即传入 os.Args[1:]）。
 // 用户请求帮助时返回 ErrHelp，帮助文本已写入 stdout。

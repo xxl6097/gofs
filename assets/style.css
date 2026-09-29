@@ -908,6 +908,77 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 }
 .toast-action:hover { background: var(--accent-soft); border-color: var(--accent); }
 
+/* ============================================== 启动遮挡 / 登录期遮挡 */
+
+/* 服务端对「未登录的浏览器导航」返回的是完整外壳（200），登录框由前端弹。
+   两件事都会让用户看见本不该看见的界面：
+
+   1. booting —— 外壳在 app.js 跑起来之前就被浏览器画出来了，
+      未登录刷新时会先闪一下文件界面。class 写死在 index.html 上，
+      首屏绘制之前就生效，由 app.js 的 endBoot() 撤除。
+
+   2. login-open —— 登录遮罩带 .16s 的淡入，opacity 从 0 开始。
+      只在「遮罩已挂上 DOM」时放行外壳是不够的：那 160ms 里遮罩还是透明的，
+      外壳会从它背后透出来（登录卡片上甚至能看到目录列表的空状态文案）。
+      所以只要登录框还开着，外壳就一直藏着 —— 由 showLogin / hideLogin 管。
+
+   用 visibility 而不是 display：布局照常算，撤除时不会有重排跳动。 */
+
+html.booting body > header,
+html.booting body > main,
+html.booting body > footer,
+html.booting .drop-hint,
+html.booting .toasts,
+html.login-open body > header,
+html.login-open body > main,
+html.login-open body > footer,
+html.login-open .drop-hint,
+html.login-open .toasts { visibility: hidden; }
+
+/* 遮挡层用和 .login-mask 同一个 --bg，登录框出现时观感是连续的，
+   不会先白一下再变色。z-index 低于 .login-mask(500)，高于其余一切。
+
+   只给 booting 用：login-open 阶段遮罩自己就是这个底色，
+   而 body 背景同样是 --bg，淡入过程中背后是一片干净的同色，
+   视觉上只有卡片在浮现。 */
+html.booting body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 400;
+}
+
+/* 转圈延迟 .25s 才淡入：没有本地凭据时登录框几乎是立刻出现的，
+   那条快路径上不该先闪一个 spinner。只有真的在等
+   resumeSession() 的网络往返时，用户才会看到它。 */
+html.booting body::after {
+  content: '';
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  z-index: 401;
+  opacity: 0;
+  animation: boot-spin .7s linear infinite, boot-in .2s ease-out .25s forwards;
+}
+
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+@keyframes boot-in { to { opacity: 1; } }
+
+/* 无限循环的转圈是「减少动态效果」最该照顾的场景：
+   保留静态圆环作为等待提示，但不转。 */
+@media (prefers-reduced-motion: reduce) {
+  html.booting body::after {
+    animation: boot-in .2s ease-out .25s forwards;
+  }
+}
+
 /* ================================================================ 登录界面 */
 
 .login-mask {
