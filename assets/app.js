@@ -644,6 +644,7 @@
 
   var OP_ICONS = {
     download: '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/><path d="M4 20h16"/>',
+    preview: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',
     unzip: '<path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="m9 13 3 3 3-3"/>',
     list: '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>',
     rename: '<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>',
@@ -1034,6 +1035,11 @@
         // 可编辑的文本文件，点名字直接进编辑器——这是最常用的动作。
         label.onclick = function () { G.openEditor(e); };
         label.title = e.path + '　（点击在线编辑）';
+      } else if (canPreview(e)) {
+        // 图片 / 视频 / 音频 / PDF 点名字直接看，而不是下载到本地再打开。
+        // 想存下来仍有「下载」按钮，预览弹窗里也有一个。
+        label.onclick = function () { openPreview(e); };
+        label.title = e.path + '　（点击预览）';
       } else {
         label.onclick = function () { downloadEntry(e); };
       }
@@ -1077,6 +1083,15 @@
       if (e.is_dir) {
         actions.push({ kind: 'open', label: '打开', run: function () { navigate(e.path); } });
       } else {
+        // 预览排在下载前面：能看的东西，「看一眼」通常比「存下来」更常用。
+        if (canPreview(e)) {
+          var big = previewTooBig(e);
+          actions.push({
+            kind: 'preview', label: '预览', disabled: big,
+            hint: big ? '超过 ' + fmtSize(PREVIEW_MAX_BLOB) : '',
+            run: function () { openPreview(e); }
+          });
+        }
         actions.push({ kind: 'download', label: '下载', run: function () { downloadEntry(e); } });
 
         if (e.editable && can('edit')) {
@@ -2089,6 +2104,144 @@
 
   // ---------------------------------------------------------------- 压缩包预览
 
+  // ---------------------------------------------------------------- 文件预览
+
+  // canPreview 判断能不能在页面里直接看。
+  //
+  // 只认「浏览器自己就能渲染」的四类：图片、视频、音频、PDF。
+  // 文本类不在这里 —— 它们走编辑器（canEdit），那本来就是一种预览。
+  function canPreview(e) {
+    if (!e || e.is_dir) return false;
+    var k = kindOf(e);
+    return k === 'image' || k === 'video' || k === 'audio' || k === 'pdf';
+  }
+
+  // PREVIEW_MAX_BLOB 是「开启鉴权时」允许预览的文件大小上限。
+  //
+  // 为什么要有这条线：开了鉴权之后没法让 <img>/<video> 直接去拉文件 ——
+  // 浏览器发这些请求时不会带 Authorization 头（凭据在 JS 手里，
+  // 浏览器并不知情），只能先 fetch 成 blob 再喂给标签。
+  // 而 blob 意味着**整个文件都进内存**，对一部几 GB 的电影是灾难。
+  // 超过这条线就老实说「太大了，下载吧」，而不是把标签页拖死。
+  //
+  // 服务端本来支持 ?user=&pass= 传凭据，但那会把密码写进 URL ——
+  // 访问日志、浏览器历史、Referer 全都会留下，不能用。
+  var PREVIEW_MAX_BLOB = 256 * 1024 * 1024;
+
+  // previewTooBig 判断这个文件是否超过了 blob 预览的上限。
+  // 没开鉴权时不受限：那种情况下直接用原始地址，浏览器流式播放。
+  function previewTooBig(e) {
+    return DATA.auth_on && e.size > PREVIEW_MAX_BLOB;
+  }
+
+  // openPreview 在弹窗里预览单个文件。
+  async function openPreview(entry) {
+    var kind = kindOf(entry);
+
+    var body = document.createElement('div');
+    body.className = 'preview-body';
+    var tip = document.createElement('div');
+    tip.className = 'preview-tip';
+    tip.textContent = '正在载入…';
+    body.appendChild(tip);
+
+    // 预览期间创建的 blob 地址，关窗时要撤掉，否则整个文件会一直占着内存。
+    var objectURL = '';
+
+    var m = openModal({
+      title: entry.name,
+      body: body,
+      full: true,
+      footer: modalFoot([
+        { label: '关闭', onClick: function () { m.close(); } },
+        {
+          label: '下载',
+          cls: 'primary',
+          onClick: function () { downloadEntry(entry); }
+        }
+      ]),
+      onClose: function () {
+        // 先把媒体停掉再撤地址：正在播放的 <video> 抓着已撤销的 blob
+        // 会在控制台刷一串报错。
+        var media = body.querySelector('video, audio');
+        if (media) { try { media.pause(); media.removeAttribute('src'); media.load(); } catch (e) {} }
+        if (objectURL) URL.revokeObjectURL(objectURL);
+      }
+    });
+
+    if (previewTooBig(entry)) {
+      tip.textContent = '文件有 ' + fmtSize(entry.size) + '，超过了预览上限 '
+        + fmtSize(PREVIEW_MAX_BLOB) + '（开启鉴权时预览需要先把文件整份读进内存）。'
+        + '请直接下载后用本地程序打开。';
+      return;
+    }
+
+    try {
+      var src;
+      if (DATA.auth_on) {
+        // 有鉴权：只能先取成 blob。
+        var res = await apiFetch(fileURL(entry.path));
+        if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+        var blob = await res.blob();
+        objectURL = URL.createObjectURL(blob);
+        src = objectURL;
+      } else {
+        // 无鉴权：直接用原始地址。视频音频能走 Range 流式播放、可以拖进度条，
+        // 也不会把整个文件搬进内存 —— 比 blob 好得多。
+        src = fileURL(entry.path);
+      }
+
+      body.textContent = '';
+      body.appendChild(previewNode(kind, src, entry));
+    } catch (err) {
+      tip.textContent = '预览失败：' + err.message;
+    }
+  }
+
+  // previewNode 按类型造出承载预览的元素。
+  //
+  // ⚠️ 只有 PDF 走 <iframe>。HTML / SVG / XML 绝不能这么放 ——
+  // blob 地址与页面**同源**，用 iframe 加载等于绕开服务端给这几类文件加的
+  // CSP sandbox，把「上传一个带脚本的页面 → 诱导管理员打开」这条路重新打开。
+  // SVG 走 <img>：图片上下文里脚本不会执行，是安全的。
+  function previewNode(kind, src, entry) {
+    if (kind === 'image') {
+      var img = document.createElement('img');
+      img.className = 'preview-media';
+      img.alt = entry.name;
+      img.src = src;
+      return img;
+    }
+    if (kind === 'video') {
+      var v = document.createElement('video');
+      v.className = 'preview-media';
+      v.src = src;
+      v.controls = true;
+      v.preload = 'metadata';
+      return v;
+    }
+    if (kind === 'audio') {
+      // 音频没有画面，给个居中的播放条加文件名，免得弹窗里空荡荡的。
+      var wrap = document.createElement('div');
+      wrap.className = 'preview-audio';
+      var name = document.createElement('div');
+      name.className = 'preview-audio-name';
+      name.textContent = entry.name;
+      var a = document.createElement('audio');
+      a.src = src;
+      a.controls = true;
+      a.preload = 'metadata';
+      wrap.appendChild(name);
+      wrap.appendChild(a);
+      return wrap;
+    }
+    // pdf
+    var f = document.createElement('iframe');
+    f.className = 'preview-frame';
+    f.src = src;
+    return f;
+  }
+
   async function openArchivePreview(entry) {
     var body = document.createElement('div');
     body.textContent = '正在读取压缩包…';
@@ -2745,6 +2898,8 @@
   G.allowUsers = allowUsers;
   G.isNarrow = isNarrow;
   G.canEdit = canEdit;
+  G.canPreview = canPreview;
+  G.openPreview = openPreview;
   G.editMax = editMax;
   G.applySession = applySession;
 })();

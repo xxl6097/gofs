@@ -22,6 +22,7 @@
   /* 操作按钮的语义色：一眼分辨「这排按钮各自干什么」。
      常态就带色，而不是只有 hover 才出现 —— 「哪个是删除」应该一眼可见。 */
   --op-open: #2563eb;
+  --op-preview: #4f46e5;
   --op-download: #0e7490;
   --op-edit: #7c3aed;
   --op-unzip: #b45309;
@@ -57,6 +58,7 @@
     --warn: #fbbf24;
     --zip: #fbbf24;
   --op-open: #60a5fa;
+  --op-preview: #a5b4fc;
   --op-download: #22d3ee;
   --op-edit: #a78bfa;
   --op-unzip: #fbbf24;
@@ -88,6 +90,7 @@
   --warn: #fbbf24;
   --zip: #fbbf24;
   --op-open: #60a5fa;
+  --op-preview: #a5b4fc;
   --op-download: #22d3ee;
   --op-edit: #a78bfa;
   --op-unzip: #fbbf24;
@@ -492,6 +495,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
    「更多」保持中性 —— 它本身不是操作，只是入口。
    文字与图标一起染色（svg 的 stroke 继承自 currentColor）。 */
 .op-btn[data-kind="open"] { color: var(--op-open); }
+.op-btn[data-kind="preview"] { color: var(--op-preview); }
 .op-btn[data-kind="download"] { color: var(--op-download); }
 .op-btn[data-kind="edit"] { color: var(--op-edit); }
 .op-btn[data-kind="unzip"] { color: var(--op-unzip); }
@@ -1116,6 +1120,66 @@ html.booting body::after {
   padding: 13px 15px;
   min-height: 0;
   overflow: hidden;
+}
+
+/* ================================================================ 文件预览 */
+
+/* 预览区用深色底：图片和视频在纯色底上才看得准，
+   透明 PNG 也不会和弹窗背景混成一片。两个主题都用同一个底色 ——
+   看图的参照系不该随主题变。 */
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0d0f13;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* 等比缩放到容器内，不裁剪也不拉伸。 */
+.preview-media {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* PDF 交给浏览器自带的阅读器，铺满整块区域。 */
+.preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* 音频没有画面，居中放文件名加播放条，免得弹窗空荡荡的。 */
+.preview-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+  width: 100%;
+  max-width: 520px;
+}
+.preview-audio-name {
+  color: #e7e9ec;
+  font-size: 14px;
+  text-align: center;
+  word-break: break-all;
+}
+.preview-audio audio { width: 100%; }
+
+/* 载入中与失败的提示文案。 */
+.preview-tip {
+  color: #9ba3ae;
+  font-size: 13.5px;
+  text-align: center;
+  padding: 24px;
+  max-width: 560px;
+  line-height: 1.7;
 }
 
 .btn.btn-sm {
