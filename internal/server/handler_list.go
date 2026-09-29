@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/config"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/config"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // uiTemplate 保存内嵌前端资源的原始内容。

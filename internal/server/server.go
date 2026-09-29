@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/config"
-	"github.com/uuxia/gofs/internal/fsutil"
-	"github.com/uuxia/gofs/internal/uploadkey"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/config"
+	"github.com/xxl6097/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/uploadkey"
 )
 
 // Server 持有全部运行时依赖。
@@ -131,6 +131,12 @@ func (s *Server) Handler() http.Handler {
 
 // Root 返回被服务的根目录绝对路径。
 func (s *Server) Root() string { return s.res.Root() }
+
+// AuthEnabled 表示当前是否存在任何鉴权规则。
+//
+// 账号可以来自启动参数，也可以来自用户表，所以不能只看 cfg.AuthRules 的条数 ——
+// 一个有 users.json、没写 -a 的实例其实是要登录的。
+func (s *Server) AuthEnabled() bool { return s.auth.Enabled() }
 
 // Close 关闭日志等资源。
 func (s *Server) Close() error {

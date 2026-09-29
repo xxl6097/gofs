@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/uuxia/gofs/internal/config"
+	"github.com/xxl6097/gofs/internal/config"
 )
 
 // ---------------------------------------------------------------------------

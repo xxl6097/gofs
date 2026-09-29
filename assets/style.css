@@ -1610,9 +1610,9 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   .col-ops { width: 64px; }
   /* 手机再让出「大小」列。 */
   .col-size { display: none; }
-  /* 勾选列也收窄；整格是 label，可点区域不缩，仍然满足 40px 底线。 */
-  .col-check { width: 38px; }
-  .check-hit { padding: 0 6px; }
+  /* 勾选列故意**不**收窄：它的可点区域是整格（label），
+     一收窄就掉到 40px 触摸底线之下（实测 38×42 被判为「按不准」）。
+     4px 的表格宽度不值得用「点不中」去换。 */
 
   /* 顶栏重排见下面的 820px 断点：那是「按钮放不下」的问题，
      不是手机专属，所以不放在这里。 */

@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
-	"github.com/uuxia/gofs/internal/uploadkey"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/uploadkey"
 )
 
 // keyView 是返回给前端的密钥视图。

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/uuxia/gofs/internal/config"
+	"github.com/xxl6097/gofs/internal/config"
 )
 
 // guard 汇总服务端的自我防护能力。

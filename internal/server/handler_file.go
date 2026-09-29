@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // maxFormMemory 表单上传时内存中保留的上限，超出部分落临时文件。

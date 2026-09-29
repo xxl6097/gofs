@@ -16,7 +16,7 @@ all: fmt vet test build
 
 ## build: 构建当前平台的二进制
 build:
-	go build -trimpath -ldflags "-s -w" -o $(BINARY) .
+	go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/gofs
 	@ls -lh $(BINARY)
 
 ## test: 运行全部测试
@@ -124,11 +124,11 @@ testdata:
 
 ## cross: 交叉编译常用平台
 cross:
-	GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-linux-amd64 .
-	GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/gofs-linux-arm64 .
-	GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/gofs-darwin-arm64 .
-	GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-darwin-amd64 .
-	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-windows-amd64.exe .
+	GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-linux-amd64 ./cmd/gofs
+	GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/gofs-linux-arm64 ./cmd/gofs
+	GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o dist/gofs-darwin-arm64 ./cmd/gofs
+	GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-darwin-amd64 ./cmd/gofs
+	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/gofs-windows-amd64.exe ./cmd/gofs
 	@ls -lh dist/
 
 ## clean: 清理构建产物

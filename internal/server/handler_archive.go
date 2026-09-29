@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // maxPicks 限制单次打包可选中的条目数，避免超长请求拖垮服务。

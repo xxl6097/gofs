@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/auth"
 )
 
 // userRuleJSON 是路径规则在接口上的表示。

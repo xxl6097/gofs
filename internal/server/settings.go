@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/uuxia/gofs/internal/config"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/config"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // runtimeSettings 保存「运行期可以修改、且会被并发读取」的设置。

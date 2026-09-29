@@ -329,62 +329,146 @@ func splitAuth(s string) []string {
 	return out
 }
 
+// envList 读取逗号分隔的列表型环境变量；变量未设置时保留默认值。
+func envList(key string, def []string) []string {
+	if v, ok := os.LookupEnv(key); ok {
+		return splitList(v)
+	}
+	return def
+}
+
+// envAuthList 读取 | 分隔的鉴权规则环境变量；变量未设置时保留默认值。
+func envAuthList(key string, def []string) []string {
+	if v, ok := os.LookupEnv(key); ok {
+		return splitAuth(v)
+	}
+	return def
+}
+
+// DefaultPort 为未指定 --port 时的监听端口。
+const DefaultPort = 5000
+
+// Defaults 返回一份只含内置默认值的配置，不读取任何环境变量。
+//
+// 供以库方式嵌入时作为起点：调用方在其上改字段，再调 Normalize 校验。
+// 命令行入口走 Parse —— 它在本函数之上叠加环境变量与命令行参数。
+func Defaults() *Config {
+	return &Config{
+		ServePath:        ".",
+		Bind:             "",
+		Port:             DefaultPort,
+		PathPrefix:       "",
+		Hidden:           nil,
+		AuthRules:        nil,
+		AllowAll:         false,
+		AllowEdit:        false,
+		EditMaxSize:      DefaultEditMaxSize,
+		AllowKeys:        false,
+		KeyFile:          DefaultKeyFile(),
+		AllowUserManage:  true,
+		UserFile:         DefaultUserFile(),
+		AllowUpload:      false,
+		AllowDelete:      false,
+		AllowSearch:      false,
+		AllowArchive:     false,
+		AllowExtract:     false,
+		AllowSymlink:     false,
+		EnableCORS:       false,
+		RenderIndex:      false,
+		RenderTryIndex:   false,
+		RenderSPA:        false,
+		AssetsDir:        "",
+		LogFormat:        "",
+		LogFile:          "",
+		Compress:         "low",
+		UploadDateLayout: DefaultUploadDateLayout,
+		TLSCert:          "",
+		TLSKey:           "",
+		ExtractMaxTotal:  DefaultExtractMaxTotal,
+		ExtractMaxFiles:  DefaultExtractMaxFiles,
+		ExtractMaxRatio:  DefaultExtractMaxRatio,
+
+		UploadMaxSize:      DefaultUploadMaxSize,
+		UploadReadTimeout:  DefaultUploadReadTimeout,
+		DownloadTimeout:    DefaultDownloadTimeout,
+		ListMaxEntries:     DefaultListMaxEntries,
+		ArchiveMaxItems:    DefaultArchiveMaxItems,
+		ArchiveMaxBytes:    DefaultArchiveMaxBytes,
+		MaxConcurrent:      DefaultMaxConcurrent,
+		MaxConcurrentJobs:  DefaultMaxConcurrentJobs,
+		AuthFailLimit:      DefaultAuthFailLimit,
+		AuthFailWindow:     DefaultAuthFailWindow,
+		MaxHeaderBytes:     DefaultMaxHeaderBytes,
+		MaxNameBytes:       DefaultMaxNameBytes,
+		DisableCSRFProtect: false,
+		HashMaxSize:        DefaultHashMaxSize,
+		DisableHTMLSandbox: false,
+		AllowRootSwitch:    true,
+		RootAllow:          nil,
+	}
+}
+
+// ApplyEnv 用 GOFS_ 前缀的环境变量覆盖配置。
+// 只有真正设置了的变量才会生效，未设置的字段保持原值。
+func (c *Config) ApplyEnv() {
+	c.ServePath = envStr("GOFS_SERVE_PATH", c.ServePath)
+	c.Bind = envStr("GOFS_BIND", c.Bind)
+	c.Port = envInt("GOFS_PORT", c.Port)
+	c.PathPrefix = envStr("GOFS_PATH_PREFIX", c.PathPrefix)
+	c.Hidden = envList("GOFS_HIDDEN", c.Hidden)
+	c.AuthRules = envAuthList("GOFS_AUTH", c.AuthRules)
+	c.AllowAll = envBool("GOFS_ALLOW_ALL", c.AllowAll)
+	c.AllowEdit = envBool("GOFS_ALLOW_EDIT", c.AllowEdit)
+	c.EditMaxSize = envInt64("GOFS_EDIT_MAX_SIZE", c.EditMaxSize)
+	c.AllowKeys = envBool("GOFS_ALLOW_KEYS", c.AllowKeys)
+	c.KeyFile = envStr("GOFS_KEY_FILE", c.KeyFile)
+	c.AllowUserManage = envBool("GOFS_ALLOW_USER_MANAGE", c.AllowUserManage)
+	c.UserFile = envStr("GOFS_USER_FILE", c.UserFile)
+	c.AllowUpload = envBool("GOFS_ALLOW_UPLOAD", c.AllowUpload)
+	c.AllowDelete = envBool("GOFS_ALLOW_DELETE", c.AllowDelete)
+	c.AllowSearch = envBool("GOFS_ALLOW_SEARCH", c.AllowSearch)
+	c.AllowArchive = envBool("GOFS_ALLOW_ARCHIVE", c.AllowArchive)
+	c.AllowExtract = envBool("GOFS_ALLOW_EXTRACT", c.AllowExtract)
+	c.AllowSymlink = envBool("GOFS_ALLOW_SYMLINK", c.AllowSymlink)
+	c.EnableCORS = envBool("GOFS_ENABLE_CORS", c.EnableCORS)
+	c.RenderIndex = envBool("GOFS_RENDER_INDEX", c.RenderIndex)
+	c.RenderTryIndex = envBool("GOFS_RENDER_TRY_INDEX", c.RenderTryIndex)
+	c.RenderSPA = envBool("GOFS_RENDER_SPA", c.RenderSPA)
+	c.AssetsDir = envStr("GOFS_ASSETS", c.AssetsDir)
+	c.LogFormat = envStr("GOFS_LOG_FORMAT", c.LogFormat)
+	c.LogFile = envStr("GOFS_LOG_FILE", c.LogFile)
+	c.Compress = envStr("GOFS_COMPRESS", c.Compress)
+	c.UploadDateLayout = envStr("GOFS_UPLOAD_DATE_LAYOUT", c.UploadDateLayout)
+	c.TLSCert = envStr("GOFS_TLS_CERT", c.TLSCert)
+	c.TLSKey = envStr("GOFS_TLS_KEY", c.TLSKey)
+	c.ExtractMaxTotal = envInt64("GOFS_EXTRACT_MAX_TOTAL", c.ExtractMaxTotal)
+	c.ExtractMaxFiles = envInt("GOFS_EXTRACT_MAX_FILES", c.ExtractMaxFiles)
+	c.ExtractMaxRatio = envInt("GOFS_EXTRACT_MAX_RATIO", c.ExtractMaxRatio)
+
+	c.UploadMaxSize = envInt64("GOFS_UPLOAD_MAX_SIZE", c.UploadMaxSize)
+	c.UploadReadTimeout = envDuration("GOFS_UPLOAD_READ_TIMEOUT", c.UploadReadTimeout)
+	c.DownloadTimeout = envDuration("GOFS_DOWNLOAD_TIMEOUT", c.DownloadTimeout)
+	c.ListMaxEntries = envInt("GOFS_LIST_MAX_ENTRIES", c.ListMaxEntries)
+	c.ArchiveMaxItems = envInt("GOFS_ARCHIVE_MAX_ITEMS", c.ArchiveMaxItems)
+	c.ArchiveMaxBytes = envInt64("GOFS_ARCHIVE_MAX_BYTES", c.ArchiveMaxBytes)
+	c.MaxConcurrent = envInt("GOFS_MAX_CONCURRENT", c.MaxConcurrent)
+	c.MaxConcurrentJobs = envInt("GOFS_MAX_CONCURRENT_JOBS", c.MaxConcurrentJobs)
+	c.AuthFailLimit = envInt("GOFS_AUTH_FAIL_LIMIT", c.AuthFailLimit)
+	c.AuthFailWindow = envDuration("GOFS_AUTH_FAIL_WINDOW", c.AuthFailWindow)
+	c.MaxHeaderBytes = envInt("GOFS_MAX_HEADER_BYTES", c.MaxHeaderBytes)
+	c.MaxNameBytes = envInt("GOFS_MAX_NAME_BYTES", c.MaxNameBytes)
+	c.DisableCSRFProtect = envBool("GOFS_DISABLE_CSRF_PROTECT", c.DisableCSRFProtect)
+	c.HashMaxSize = envInt64("GOFS_HASH_MAX_SIZE", c.HashMaxSize)
+	c.DisableHTMLSandbox = envBool("GOFS_DISABLE_HTML_SANDBOX", c.DisableHTMLSandbox)
+	c.AllowRootSwitch = envBool("GOFS_ALLOW_ROOT_SWITCH", c.AllowRootSwitch)
+	c.RootAllow = envList("GOFS_ROOT_ALLOW", c.RootAllow)
+}
+
 // Parse 解析命令行参数与环境变量，返回最终配置。
 // args 不含程序名本身（即传入 os.Args[1:]）。
 func Parse(args []string, stdout io.Writer) (*Config, error) {
-	cfg := &Config{
-		ServePath:        envStr("GOFS_SERVE_PATH", "."),
-		Bind:             envStr("GOFS_BIND", ""),
-		Port:             envInt("GOFS_PORT", 5000),
-		PathPrefix:       envStr("GOFS_PATH_PREFIX", ""),
-		Hidden:           splitList(envStr("GOFS_HIDDEN", "")),
-		AuthRules:        splitAuth(envStr("GOFS_AUTH", "")),
-		AllowAll:         envBool("GOFS_ALLOW_ALL", false),
-		AllowEdit:        envBool("GOFS_ALLOW_EDIT", false),
-		EditMaxSize:      envInt64("GOFS_EDIT_MAX_SIZE", DefaultEditMaxSize),
-		AllowKeys:        envBool("GOFS_ALLOW_KEYS", false),
-		KeyFile:          envStr("GOFS_KEY_FILE", DefaultKeyFile()),
-		AllowUserManage:  envBool("GOFS_ALLOW_USER_MANAGE", true),
-		UserFile:         envStr("GOFS_USER_FILE", DefaultUserFile()),
-		AllowUpload:      envBool("GOFS_ALLOW_UPLOAD", false),
-		AllowDelete:      envBool("GOFS_ALLOW_DELETE", false),
-		AllowSearch:      envBool("GOFS_ALLOW_SEARCH", false),
-		AllowArchive:     envBool("GOFS_ALLOW_ARCHIVE", false),
-		AllowExtract:     envBool("GOFS_ALLOW_EXTRACT", false),
-		AllowSymlink:     envBool("GOFS_ALLOW_SYMLINK", false),
-		EnableCORS:       envBool("GOFS_ENABLE_CORS", false),
-		RenderIndex:      envBool("GOFS_RENDER_INDEX", false),
-		RenderTryIndex:   envBool("GOFS_RENDER_TRY_INDEX", false),
-		RenderSPA:        envBool("GOFS_RENDER_SPA", false),
-		AssetsDir:        envStr("GOFS_ASSETS", ""),
-		LogFormat:        envStr("GOFS_LOG_FORMAT", ""),
-		LogFile:          envStr("GOFS_LOG_FILE", ""),
-		Compress:         envStr("GOFS_COMPRESS", "low"),
-		UploadDateLayout: envStr("GOFS_UPLOAD_DATE_LAYOUT", DefaultUploadDateLayout),
-		TLSCert:          envStr("GOFS_TLS_CERT", ""),
-		TLSKey:           envStr("GOFS_TLS_KEY", ""),
-		ExtractMaxTotal:  envInt64("GOFS_EXTRACT_MAX_TOTAL", DefaultExtractMaxTotal),
-		ExtractMaxFiles:  envInt("GOFS_EXTRACT_MAX_FILES", DefaultExtractMaxFiles),
-		ExtractMaxRatio:  envInt("GOFS_EXTRACT_MAX_RATIO", DefaultExtractMaxRatio),
-
-		UploadMaxSize:      envInt64("GOFS_UPLOAD_MAX_SIZE", DefaultUploadMaxSize),
-		UploadReadTimeout:  envDuration("GOFS_UPLOAD_READ_TIMEOUT", DefaultUploadReadTimeout),
-		DownloadTimeout:    envDuration("GOFS_DOWNLOAD_TIMEOUT", DefaultDownloadTimeout),
-		ListMaxEntries:     envInt("GOFS_LIST_MAX_ENTRIES", DefaultListMaxEntries),
-		ArchiveMaxItems:    envInt("GOFS_ARCHIVE_MAX_ITEMS", DefaultArchiveMaxItems),
-		ArchiveMaxBytes:    envInt64("GOFS_ARCHIVE_MAX_BYTES", DefaultArchiveMaxBytes),
-		MaxConcurrent:      envInt("GOFS_MAX_CONCURRENT", DefaultMaxConcurrent),
-		MaxConcurrentJobs:  envInt("GOFS_MAX_CONCURRENT_JOBS", DefaultMaxConcurrentJobs),
-		AuthFailLimit:      envInt("GOFS_AUTH_FAIL_LIMIT", DefaultAuthFailLimit),
-		AuthFailWindow:     envDuration("GOFS_AUTH_FAIL_WINDOW", DefaultAuthFailWindow),
-		MaxHeaderBytes:     envInt("GOFS_MAX_HEADER_BYTES", DefaultMaxHeaderBytes),
-		MaxNameBytes:       envInt("GOFS_MAX_NAME_BYTES", DefaultMaxNameBytes),
-		DisableCSRFProtect: envBool("GOFS_DISABLE_CSRF_PROTECT", false),
-		HashMaxSize:        envInt64("GOFS_HASH_MAX_SIZE", DefaultHashMaxSize),
-		DisableHTMLSandbox: envBool("GOFS_DISABLE_HTML_SANDBOX", false),
-		AllowRootSwitch:    envBool("GOFS_ALLOW_ROOT_SWITCH", true),
-		RootAllow:          splitList(envStr("GOFS_ROOT_ALLOW", "")),
-	}
+	cfg := Defaults()
+	cfg.ApplyEnv()
 
 	fs := flag.NewFlagSet("gofs", flag.ContinueOnError)
 	fs.SetOutput(stdout)
@@ -536,18 +620,14 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		cfg.AllowUserManage = false
 	}
 
-	// -A 是各项权限的并集。
-	if cfg.AllowAll {
-		cfg.AllowUpload = true
-		cfg.AllowDelete = true
-		cfg.AllowSearch = true
-		cfg.AllowArchive = true
-		cfg.AllowExtract = true
-		cfg.AllowEdit = true
-		cfg.AllowKeys = true
-	} else {
+	// -A 是各项权限的并集，真正的展开放在 Normalize 里，
+	// 这样以库方式直接设 AllowAll 的调用方也能享受同样的语义。
+	if !cfg.AllowAll {
 		// 未显式指定 --allow-edit / --allow-keys 时跟随上传权限：
 		// 能上传文件却没能力改文件、发密钥会很别扭。
+		//
+		// 这一段依赖「flag 是否被显式设置」，是命令行独有的推断，
+		// 所以留在 Parse 里而不是下沉到 Normalize。
 		if !specified["allow-edit"] {
 			cfg.AllowEdit = cfg.AllowUpload
 		}
@@ -556,14 +636,26 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		}
 	}
 
-	if err := cfg.normalize(); err != nil {
+	if err := cfg.Normalize(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-// normalize 做参数合法化与归一化。
-func (c *Config) normalize() error {
+// Normalize 做参数合法化、归一化与校验。
+// 以库方式手工构造 Config 后必须调用一次，否则 Compress 等字段可能非法。
+func (c *Config) Normalize() error {
+	// -A 展开成各项权限的并集。
+	if c.AllowAll {
+		c.AllowUpload = true
+		c.AllowDelete = true
+		c.AllowSearch = true
+		c.AllowArchive = true
+		c.AllowExtract = true
+		c.AllowEdit = true
+		c.AllowKeys = true
+	}
+
 	// 路径前缀统一为 "/xxx" 或空。
 	p := strings.TrimSpace(c.PathPrefix)
 	if p != "" && p != "/" {

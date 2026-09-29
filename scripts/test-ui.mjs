@@ -372,7 +372,7 @@ const REQUIRED_G = [
   'fmtSize', 'fmtTime', 'fmtDuration', 'fileURL', 'raw', 'encPath', 'baseName', 'joinPath',
   'navigate', 'refresh', 'downloadFile', 'downloadEntry', 'state', 'data',
   'can', 'allowKeys', 'canEdit', 'editMax', 'applySession', 'openEditor', 'openKeys',
-  'openSettings', 'openUsers', 'allowUsers', 'modalFoot',
+  'openSettings', 'openUsers', 'allowUsers', 'modalFoot', 'isNarrow',
 ];
 
 const G0 = win.GOFS || {};
@@ -1396,6 +1396,106 @@ section('⑳ 用户与权限：入口、表单、提交格式');
     if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 80));
   }
+}
+
+// ------------------------------------------------- ㉑ 顶栏折叠菜单与窄屏文案
+
+section('㉑ 顶栏「更多」折叠菜单（窄屏入口没丢）');
+
+{
+  check('存在「更多」按钮', !!$('btn-more'));
+  check('更多按钮默认没有展开（aria-expanded=false）',
+    $('btn-more').getAttribute('aria-expanded') === 'false',
+    $('btn-more').getAttribute('aria-expanded'));
+
+  // 折叠**只改布局**：被收进菜单的按钮仍然是「可见」（hidden=false），
+  // 权限控制的隐藏与布局折叠是两件独立的事。
+  const collapsed = ['btn-theme', 'btn-upload-dir', 'btn-mkdir', 'btn-keys', 'btn-users', 'btn-settings'];
+  check('被折叠的按钮在 DOM 里都还在，且没有被 hidden 掉',
+    collapsed.every((id) => $(id) && !$(id).hidden),
+    collapsed.map((id) => id + '=' + (($(id) && $(id).hidden) ? 'hidden' : 'ok')).join(' '));
+  check('菜单容器与面板都在', $('more-panel') && $('more-wrap'));
+  check('6 个低频操作都在面板里（点开就能用，不是删掉）',
+    collapsed.every((id) => $('more-panel').contains($(id))),
+    Array.from($('more-panel').querySelectorAll('.btn')).map((b) => b.textContent.trim()).join(', '));
+
+  const click = (el) => el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+  click($('btn-more'));
+  check('点「更多」展开菜单', $('more-panel').classList.contains('open'));
+  check('展开后 aria-expanded 变成 true',
+    $('btn-more').getAttribute('aria-expanded') === 'true');
+
+  click($('btn-more'));
+  check('再点一次收起', !$('more-panel').classList.contains('open'));
+
+  click($('btn-more'));
+  click($('drop-zone'));
+  check('点面板外的任意位置会收起', !$('more-panel').classList.contains('open'),
+    '面板仍开着');
+
+  click($('btn-more'));
+  doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('按 Esc 会收起', !$('more-panel').classList.contains('open'));
+
+  // 点菜单项本身也要收起：否则改完设置回到页面，菜单还挂在那儿。
+  click($('btn-more'));
+  check('再次展开以备后续断言', $('more-panel').classList.contains('open'));
+  click($('btn-keys'));
+  await new Promise((r) => setTimeout(r, 120));
+  check('点了菜单项之后菜单自动收起（不会跨页面挂着）',
+    !$('more-panel').classList.contains('open'));
+  // 收尾：把可能被打开的密钥弹窗关掉
+  for (let i = 0; i < 4; i++) {
+    const masks = doc.querySelectorAll('.modal-mask');
+    if (!masks.length) break;
+    const x = masks[masks.length - 1].querySelector('.modal-head button');
+    if (x) x.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  check('展开菜单不会顺带打开别的弹窗（收尾后无残留）',
+    doc.querySelectorAll('.modal-mask').length === 0);
+}
+
+section('㉒ 窄屏文案：统计 / 页脚 / 投放区都换短句，而不是靠截断');
+
+{
+  check('isNarrow 已暴露（供真机逻辑判断）', typeof win.GOFS.isNarrow === 'function');
+  // jsdom 没实现 matchMedia，这里临时补一个「命中窄屏」的桩。
+  const realMM = win.matchMedia;
+  win.matchMedia = (q) => ({
+    matches: /max-width:\s*560px/.test(q),
+    media: q,
+    addEventListener() {}, removeEventListener() {},
+    addListener() {}, removeListener() {},
+  });
+
+  check('窄屏判定生效', win.GOFS.isNarrow() === true);
+
+  await win.GOFS.refresh();
+  await waitFor(() => win.GOFS.state && win.GOFS.state.busy === false, 8000, '窄屏重绘完成');
+
+  const stat = $('stat').textContent;
+  check('窄屏统计用「N 目录 · N 文件」短口径', /\d+ 目录 · \d+ 文件/.test(stat), stat);
+  check('窄屏统计不再出现「个目录 / 个文件 / 文件合计」这类长词',
+    !/个目录|个文件|文件合计/.test(stat), stat);
+
+  const foot = $('footer-right').textContent;
+  check('窄屏页脚不再重复「已登录」', !/已登录/.test(foot), foot);
+  check('窄屏页脚仍写清账号与权限', /admin/.test(foot) && /可读写/.test(foot), foot);
+  check('窄屏页脚的能力是短词（上传·删除…）', /上传·删除/.test(foot), foot);
+
+  const zone = $('drop-zone-target').textContent;
+  check('窄屏投放区仍有明确落点', /存入\s+\//.test(zone), zone);
+  check('窄屏投放区一行说得完（不出现「单文件上限」长词）',
+    !/单文件上限/.test(zone), zone);
+
+  // 还原，避免影响（将来）后续断言
+  if (realMM) win.matchMedia = realMM; else delete win.matchMedia;
+  await win.GOFS.refresh();
+  await waitFor(() => win.GOFS.state && win.GOFS.state.busy === false, 8000, '恢复宽屏重绘');
+  check('恢复宽屏后统计又变回长口径（说明两套文案都活着）',
+    /个目录/.test($('stat').textContent), $('stat').textContent);
 }
 
 // ---------------------------------------------------------------- 汇总

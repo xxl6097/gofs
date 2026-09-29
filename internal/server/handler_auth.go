@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // handleAuth 校验 Basic 凭据，供前端登录框使用。

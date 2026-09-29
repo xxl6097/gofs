@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
-	"github.com/uuxia/gofs/internal/textfile"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/textfile"
 )
 
 // textDoc 是读取文本文件接口的响应。

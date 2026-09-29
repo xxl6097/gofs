@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/uuxia/gofs/internal/textfile"
+	"github.com/xxl6097/gofs/internal/textfile"
 )
 
 // ErrEscaped 表示解析出的路径逃逸出了服务根目录。

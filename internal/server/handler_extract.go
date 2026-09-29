@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uuxia/gofs/internal/archive"
-	"github.com/uuxia/gofs/internal/auth"
-	"github.com/uuxia/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/archive"
+	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // extractRequest 为解压请求体。

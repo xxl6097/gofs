@@ -4,7 +4,9 @@
 .idea
 .pnpm-store
 logs
-gofs
+# 只忽略根目录下构建出来的二进制。
+# 不能写成裸 `gofs` —— 那会连 cmd/gofs/ 这个源码目录一起忽略掉。
+/gofs
 .DS_Store
 /build
 /dist
