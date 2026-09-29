@@ -88,6 +88,10 @@ type Authenticator struct {
 
 	userFile string   // 用户表落盘路径，空串表示仅内存
 	pwCache  *pwCache // 「账号+密码」校验结果的缓存，见 pwCache 的注释
+
+	// sessions 是服务端会话表（token -> 会话），供 cookie 鉴权使用。
+	// 见 session.go 里为什么不用自包含 token。
+	sessions map[string]*Session
 }
 
 // Parse 解析全部鉴权规则串。
@@ -100,7 +104,11 @@ func Parse(rules []string) (*Authenticator, error) {
 // userFile 为空时用户表只存在于内存中（重启即失效），
 // 与上传密钥的 --key-file 语义保持一致。
 func Open(rules []string, userFile string) (*Authenticator, error) {
-	a := &Authenticator{userFile: userFile, pwCache: newPWCache()}
+	a := &Authenticator{
+		userFile: userFile,
+		pwCache:  newPWCache(),
+		sessions: make(map[string]*Session),
+	}
 	for _, raw := range rules {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {

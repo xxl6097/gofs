@@ -218,6 +218,13 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 			if user == "" {
 				user = r.URL.Query().Get("user")
 			}
+			// 会话身份也要记上，否则登录之后的媒体请求在日志里全是空用户 ——
+			// 而「谁在读这个大文件」正是访问日志最该回答的问题。
+			if user == "" {
+				if u, ok := s.auth.ResolveSession(sessionToken(r)); ok {
+					user = u
+				}
+			}
 			if !rec.wrote {
 				rec.status = http.StatusOK
 			}
@@ -297,11 +304,121 @@ func credentials(r *http.Request) (user, pass string, ok bool) {
 	return "", "", false
 }
 
+// ---------------------------------------------------------------------------
+// 会话 cookie
+//
+// 为什么需要它：页面用 HTTP Basic，凭据握在 JS 手里，由 apiFetch 逐请求加
+// Authorization 头。但**浏览器自己**发起的请求不会带这个头 ——
+// <video>/<img> 的加载、<a download> 的下载都不经过 JS。
+// 结果是：开了鉴权就放不了大视频（拿不到数据，只能整份 fetch 成 blob 进内存），
+// 下载也只能绕道 blob。
+//
+// 登录时下发一个 HttpOnly 的会话 cookie 就能解决：浏览器会自动把它附加到
+// 同源的这些请求上，于是 Range 流式播放、拖动进度条、原生下载全部可用，
+// 与文件大小无关。
+//
+// 安全取舍见 session.go 与 handleAuth 的注释。
+
+// sessionCookieName 是会话 cookie 的名字。
+const sessionCookieName = "gofs_sid"
+
+// sessionCookiePath 返回 cookie 的作用路径。
+//
+// 必须带上访问前缀：部署在 /files 下时，cookie 若只写 Path=/，
+// 浏览器确实会发，但反过来若配了前缀却不写进去，前缀下的请求就收不到它。
+// 带前缀是两种部署都成立的那个写法。
+func (s *Server) sessionCookiePath() string {
+	p := s.cfg.PathPrefix
+	if p == "" {
+		return "/"
+	}
+	return p + "/"
+}
+
+// setSessionCookie 下发会话 cookie。
+//
+// HttpOnly：JS 读不到 token，XSS 偷不走。
+// SameSite=Lax：跨站的子资源请求（<img>/<video>/<iframe>）不会带上它 ——
+//
+//	挡住「诱导已登录用户访问恶意页面 → 借其身份读私有文件」这类环境授权攻击。
+//	跨站表单 POST 同理。代价是跨站顶层导航会带（Lax 的语义），可接受。
+//	（同站子域不算跨站，所以有子域的部署仍有 CSRF 面 —— 那由 withCSRFProtect
+//	对写方法的同源校验兜住，与本次改动无关。）
+//
+// Secure：仅在 HTTPS 下加，否则纯 HTTP 部署会收不到 cookie。
+func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     s.sessionCookiePath(),
+		MaxAge:   int(auth.SessionTTL().Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.TLSCert != "",
+	})
+}
+
+// clearSessionCookie 让浏览器丢掉会话 cookie（值留空 + MaxAge<0）。
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     s.sessionCookiePath(),
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.TLSCert != "",
+	})
+}
+
+// sessionToken 取出请求里的会话 token（没有则空串）。
+func sessionToken(r *http.Request) string {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// credsOf 解析请求身份，返回权限判定需要的三样东西。
+//
+// 优先级：Basic / 查询串 > 会话 cookie。带显式凭据时以凭据为准 ——
+// 那是最新表达出来的意图（比如换个账号登录），cookie 只是「上次登录过」。
+// 注意两者可能属于**不同**的用户，所以 cookieUser 单独返回，
+// 绝不与 user 混用。
+func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cookieUser string) {
+	user, pass, hasCred = credentials(r)
+	if hasCred {
+		return user, pass, true, ""
+	}
+	if token := sessionToken(r); token != "" {
+		if u, ok := s.auth.ResolveSession(token); ok {
+			return "", "", false, u
+		}
+	}
+	return "", "", false, ""
+}
+
+// permOf 按请求身份计算对 urlPath 的权限。
+func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
+	user, pass, hasCred, cookieUser := s.credsOf(r)
+	switch {
+	case hasCred:
+		// 显式凭据：走原来的路径，密码要现验。
+		return s.auth.Lookup(urlPath, user, pass, true), user, true
+	case cookieUser != "":
+		// 会话身份：密码在登录那一刻已经验过，这里只按身份取权限。
+		return s.auth.PermFor(cookieUser, urlPath), cookieUser, true
+	}
+	// 匿名。
+	return s.auth.Lookup(urlPath, "", "", false), "", false
+}
+
 // checkPerm 计算对 urlPath 的权限，不写任何响应。
 // 需要在不产生副作用的前提下预判权限时使用（例如上传路径被重写之后）。
 func (s *Server) checkPerm(r *http.Request, urlPath string) auth.Permission {
-	user, pass, ok := credentials(r)
-	return s.auth.Lookup(urlPath, user, pass, ok)
+	perm, _, _ := s.permOf(r, urlPath)
+	return perm
 }
 
 // authorize 解析请求凭据并计算对 urlPath 的权限。
@@ -320,20 +437,43 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		return permResult{}, false
 	}
 
-	user, pass, hasCred := credentials(r)
-	perm := s.auth.Lookup(urlPath, user, pass, hasCred)
+	// hadCookie 单独记一下：credsOf 解析失败时 cookieUser 是空的，
+	// 分不清「没带 cookie」和「带了但无效」—— 而后者要按失败计数。
+	hadCookie := sessionToken(r) != ""
+
+	user, pass, hasCred, cookieUser := s.credsOf(r)
+	var perm auth.Permission
+	switch {
+	case hasCred:
+		perm = s.auth.Lookup(urlPath, user, pass, true)
+	case cookieUser != "":
+		// 会话身份：cookie 在登录时已经验过密码，这里只按身份取权限。
+		user = cookieUser
+		perm = s.auth.PermFor(cookieUser, urlPath)
+	default:
+		perm = s.auth.Lookup(urlPath, "", "", false)
+	}
 	if perm != auth.PermNone {
 		s.noteAuthSuccess(ip)
-		return permResult{Perm: perm, User: user, Authenticated: hasCred}, true
+		// 会话身份也算「已认证」—— 否则登录后每个请求都会被当成匿名。
+		return permResult{Perm: perm, User: user, Authenticated: hasCred || cookieUser != ""}, true
 	}
 
 	// 只有「带了凭据但不对」才算一次失败；完全没带凭据只是未登录，
 	// 否则一个不带凭据的爬虫就能把正常用户的来源封掉。
-	if hasCred {
+	//
+	// 无效 cookie（过期/已撤销/伪造）同样算失败：cookie 值完全由客户端提供，
+	// 伪造一个来试探是可行的，所以它和错密码一样该计数。
+	if hasCred || hadCookie {
 		s.noteAuthFailure(ip)
 	}
 
 	if s.auth.NeedsAuth(urlPath) {
+		// cookie 无效就顺手清掉，免得浏览器每个后续请求都带着一张废票
+		// 反复撞限速闸门。
+		if hadCookie && cookieUser == "" {
+			s.clearSessionCookie(w)
+		}
 		// 前端的 fetch 会带 X-Gofs-Ajax 标记，此时只回 401 不带挑战，
 		// 让应用自己的登录框处理，而不是弹出浏览器原生对话框。
 		if shouldChallenge(r) {

@@ -369,6 +369,10 @@ func (a *Authenticator) UpdateUser(name, password string, rules []Rule) error {
 		return err
 	}
 	a.pwCache.clear()
+	// 改了密码就把这个账号已发的会话全部作废。
+	// 光清 pwCache 只能让旧密码不再通过校验，已经发出去的 cookie 还能读到东西 ——
+	// 那正是「我都改密码了，怎么还被登着」。
+	a.dropUserSessions(name)
 	return nil
 }
 
@@ -409,6 +413,9 @@ func (a *Authenticator) DeleteUser(name string) error {
 	}
 	a.refreshEnabled()
 	a.pwCache.clear()
+	// 账号没了，它的会话也必须一起断（ResolveSession 里也有一道兜底，
+	// 但这里断掉更及时，省得留着一张等着被拒绝的 cookie）。
+	a.dropUserSessions(removed.Username)
 	return nil
 }
 

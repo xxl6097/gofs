@@ -178,6 +178,23 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  // dropServerSession 让服务端撤销当前会话。
+  //
+  // 光清 localStorage 是不够的：登录时服务端下发了一个 HttpOnly 的 cookie，
+  // 那才是真正的通行证。它由浏览器自动携带、JS 读不到也删不掉，
+  // 不通知服务端的话「退出登录」只是把界面上的名字抹掉，
+  // 刷新一下又自动登回去了。
+  //
+  // 失败不提示：cookie 可能本来就过期了（服务端那边已经没了），
+  // 而且登出这个动作对用户来说应该永远成功。浏览器下个请求会带上
+  // 服务端回的过期 cookie，自然就清干净了。
+  function dropServerSession() {
+    return fetch(BASE + '/__gofs__/auth', {
+      method: 'DELETE',
+      headers: { 'X-Gofs-Ajax': '1' }
+    }).catch(function () { /* 网络问题就算了，本地凭据已经清了 */ });
+  }
+
   // authHeaders 生成带凭据的请求头。
   // X-Gofs-Ajax 告诉服务端「这是应用内部请求，401 时不要发挑战头」，
   // 否则浏览器会弹出脱离应用上下文的原生登录框。
@@ -446,7 +463,9 @@
         DATA.user = '';
         DATA.auth_required = true;
         toast('info', '已退出登录');
-        location.reload();
+        // 等会话真的在服务端被撤销再刷新 —— 否则刷新时那张 cookie 还在，
+        // 页面会直接以已登录状态回来，「退出」看着像没生效。
+        dropServerSession().then(function () { location.reload(); });
       };
       chip.appendChild(out);
     }
@@ -635,8 +654,8 @@
     if (entry.archive) return 'zip';
     var ext = entry.ext || '';
     if (/^(png|jpe?g|gif|webp|svg|bmp|ico|avif|heic)$/.test(ext)) return 'image';
-    if (/^(mp4|mov|mkv|avi|webm|flv|m4v)$/.test(ext)) return 'video';
-    if (/^(mp3|wav|flac|aac|ogg|m4a)$/.test(ext)) return 'audio';
+    if (/^(mp4|mov|mkv|avi|webm|flv|m4v|ogv)$/.test(ext)) return 'video';
+    if (/^(mp3|wav|flac|aac|ogg|opus|m4a)$/.test(ext)) return 'audio';
     if (/^(pdf)$/.test(ext)) return 'pdf';
     if (/^(go|js|ts|jsx|tsx|java|py|rb|rs|c|h|cpp|cs|php|sh|sql|json|ya?ml|xml|html|css|toml|ini|conf|md)$/.test(ext)) return 'code';
     return 'file';
@@ -1085,12 +1104,7 @@
       } else {
         // 预览排在下载前面：能看的东西，「看一眼」通常比「存下来」更常用。
         if (canPreview(e)) {
-          var big = previewTooBig(e);
-          actions.push({
-            kind: 'preview', label: '预览', disabled: big,
-            hint: big ? '超过 ' + fmtSize(PREVIEW_MAX_BLOB) : '',
-            run: function () { openPreview(e); }
-          });
+          actions.push({ kind: 'preview', label: '预览', run: function () { openPreview(e); } });
         }
         actions.push({ kind: 'download', label: '下载', run: function () { downloadEntry(e); } });
 
@@ -2106,36 +2120,78 @@
 
   // ---------------------------------------------------------------- 文件预览
 
+  // MIME 表：预览前拿它问浏览器「这个容器你到底播不播得了」。
+  var VIDEO_MIME = {
+    mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime',
+    webm: 'video/webm', ogv: 'video/ogg', mkv: 'video/x-matroska'
+  };
+  var AUDIO_MIME = {
+    mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac', aac: 'audio/aac',
+    ogg: 'audio/ogg', opus: 'audio/ogg', m4a: 'audio/mp4'
+  };
+
+  // VIDEO_WIDELY 是「主流浏览器都能播」的容器。
+  //
+  // 为什么不能只靠 canPlayType：它对 QuickTime 会误报不支持 ——
+  // 实测 Chrome 里 canPlayType('video/quicktime') 返回空串，
+  // 但同一个 .mov 文件（H.264）实际播得好好的。只信它会把能播的判成不能播。
+  //
+  // 又为什么不能只用白名单：avi / flv 这类容器浏览器**真的**解不开
+  // （实测 <video> 直接报 "The element has no supported sources"），
+  // 放进来只会给用户一个沉默的黑框。
+  //
+  // 所以两者结合：已知能播的直接放行，其余交给浏览器裁决。
+  var VIDEO_WIDELY = { mp4: 1, m4v: 1, webm: 1, ogv: 1, mov: 1 };
+
+  // mediaPlayable 问浏览器能不能播这个容器。结果缓存 ——
+  // canPlayType 要造元素，而目录列表里每个文件都会问一次。
+  var mimeProbe = {};
+  function mediaPlayable(ext, isVideo) {
+    var table = isVideo ? VIDEO_MIME : AUDIO_MIME;
+    var mime = table[ext];
+    if (!mime) return false;
+    if (isVideo && VIDEO_WIDELY[ext]) return true;
+    if (ext in mimeProbe) return mimeProbe[ext];
+    var el = document.createElement(isVideo ? 'video' : 'audio');
+    var ok = typeof el.canPlayType === 'function' && el.canPlayType(mime) !== '';
+    mimeProbe[ext] = ok;
+    return ok;
+  }
+
   // canPreview 判断能不能在页面里直接看。
   //
   // 只认「浏览器自己就能渲染」的四类：图片、视频、音频、PDF。
   // 文本类不在这里 —— 它们走编辑器（canEdit），那本来就是一种预览。
+  //
+  // 视频音频还要多过一道「浏览器播不播得了」：容器格式本身不被支持时，
+  // 弹预览只会给一个永不播放的黑框，不如按原来的方式下载。
   function canPreview(e) {
     if (!e || e.is_dir) return false;
-    var k = kindOf(e);
-    return k === 'image' || k === 'video' || k === 'audio' || k === 'pdf';
-  }
-
-  // PREVIEW_MAX_BLOB 是「开启鉴权时」允许预览的文件大小上限。
-  //
-  // 为什么要有这条线：开了鉴权之后没法让 <img>/<video> 直接去拉文件 ——
-  // 浏览器发这些请求时不会带 Authorization 头（凭据在 JS 手里，
-  // 浏览器并不知情），只能先 fetch 成 blob 再喂给标签。
-  // 而 blob 意味着**整个文件都进内存**，对一部几 GB 的电影是灾难。
-  // 超过这条线就老实说「太大了，下载吧」，而不是把标签页拖死。
-  //
-  // 服务端本来支持 ?user=&pass= 传凭据，但那会把密码写进 URL ——
-  // 访问日志、浏览器历史、Referer 全都会留下，不能用。
-  var PREVIEW_MAX_BLOB = 256 * 1024 * 1024;
-
-  // previewTooBig 判断这个文件是否超过了 blob 预览的上限。
-  // 没开鉴权时不受限：那种情况下直接用原始地址，浏览器流式播放。
-  function previewTooBig(e) {
-    return DATA.auth_on && e.size > PREVIEW_MAX_BLOB;
+    var ext = (e.ext || '').toLowerCase();
+    switch (kindOf(e)) {
+      case 'image':
+      case 'pdf':
+        return true;
+      case 'video':
+        return mediaPlayable(ext, true);
+      case 'audio':
+        return mediaPlayable(ext, false);
+    }
+    return false;
   }
 
   // openPreview 在弹窗里预览单个文件。
-  async function openPreview(entry) {
+  //
+  // 这里**直接用文件的原始地址**，不再走 fetch→blob 那套。
+  //
+  // 以前必须先取成 blob，是因为鉴权靠 Authorization 头，而浏览器替
+  // <video>/<img> 发请求时不会带它。代价是整个文件要进内存 ——
+  // 4.6 GiB 的视频根本没法预览。
+  //
+  // 现在登录时会下发一个 HttpOnly 会话 cookie，浏览器自动附加到这些请求上，
+  // 于是可以直接把地址交给标签：视频音频走 Range 流式播放，能拖进度条，
+  // 内存占用与文件大小无关。
+  function openPreview(entry) {
     var kind = kindOf(entry);
 
     var body = document.createElement('div');
@@ -2144,9 +2200,6 @@
     tip.className = 'preview-tip';
     tip.textContent = '正在载入…';
     body.appendChild(tip);
-
-    // 预览期间创建的 blob 地址，关窗时要撤掉，否则整个文件会一直占着内存。
-    var objectURL = '';
 
     var m = openModal({
       title: entry.name,
@@ -2161,41 +2214,17 @@
         }
       ]),
       onClose: function () {
-        // 先把媒体停掉再撤地址：正在播放的 <video> 抓着已撤销的 blob
-        // 会在控制台刷一串报错。
+        // 把媒体停掉：一个还在播的 <video> 会在弹窗没了之后继续拉数据
+        // （尤其是流式播放，它不会自己停）。
         var media = body.querySelector('video, audio');
-        if (media) { try { media.pause(); media.removeAttribute('src'); media.load(); } catch (e) {} }
-        if (objectURL) URL.revokeObjectURL(objectURL);
+        if (media) {
+          try { media.pause(); media.removeAttribute('src'); media.load(); } catch (e) {}
+        }
       }
     });
 
-    if (previewTooBig(entry)) {
-      tip.textContent = '文件有 ' + fmtSize(entry.size) + '，超过了预览上限 '
-        + fmtSize(PREVIEW_MAX_BLOB) + '（开启鉴权时预览需要先把文件整份读进内存）。'
-        + '请直接下载后用本地程序打开。';
-      return;
-    }
-
-    try {
-      var src;
-      if (DATA.auth_on) {
-        // 有鉴权：只能先取成 blob。
-        var res = await apiFetch(fileURL(entry.path));
-        if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
-        var blob = await res.blob();
-        objectURL = URL.createObjectURL(blob);
-        src = objectURL;
-      } else {
-        // 无鉴权：直接用原始地址。视频音频能走 Range 流式播放、可以拖进度条，
-        // 也不会把整个文件搬进内存 —— 比 blob 好得多。
-        src = fileURL(entry.path);
-      }
-
-      body.textContent = '';
-      body.appendChild(previewNode(kind, src, entry));
-    } catch (err) {
-      tip.textContent = '预览失败：' + err.message;
-    }
+    body.textContent = '';
+    body.appendChild(previewNode(kind, fileURL(entry.path), entry));
   }
 
   // previewNode 按类型造出承载预览的元素。
@@ -2209,15 +2238,22 @@
       var img = document.createElement('img');
       img.className = 'preview-media';
       img.alt = entry.name;
+      // 解码失败（文件损坏、其实不是图片）时给一句能读的话。
+      img.onerror = function () {
+        showPreviewFailure(img, entry, '这张图片无法解码，可能文件已损坏。');
+      };
       img.src = src;
       return img;
     }
     if (kind === 'video') {
       var v = document.createElement('video');
       v.className = 'preview-media';
-      v.src = src;
       v.controls = true;
       v.preload = 'metadata';
+      v.onerror = function () {
+        showPreviewFailure(v, entry, mediaErrorText(v, '视频'));
+      };
+      v.src = src;
       return v;
     }
     if (kind === 'audio') {
@@ -2228,9 +2264,12 @@
       name.className = 'preview-audio-name';
       name.textContent = entry.name;
       var a = document.createElement('audio');
-      a.src = src;
       a.controls = true;
       a.preload = 'metadata';
+      a.onerror = function () {
+        showPreviewFailure(wrap, entry, mediaErrorText(a, '音频'));
+      };
+      a.src = src;
       wrap.appendChild(name);
       wrap.appendChild(a);
       return wrap;
@@ -2240,6 +2279,51 @@
     f.className = 'preview-frame';
     f.src = src;
     return f;
+  }
+
+  // mediaErrorText 把 MediaError 的数字码翻成人话。
+  //
+  // 没有这段的话，播不了的视频就是一个**沉默的黑框** ——
+  // 用户唯一能得出的结论是「不能播放」，却看不出是格式不支持、
+  // 文件损坏，还是网络断了。四种原因给四句不同的话。
+  function mediaErrorText(el, what) {
+    var err = el.error;
+    if (!err) return what + '无法播放。';
+    switch (err.code) {
+      case 1: // MEDIA_ERR_ABORTED
+        return '播放已中止（可能是文件被改动或连接被断开）。';
+      case 2: // MEDIA_ERR_NETWORK
+        return '读取' + what + '时网络中断，请重试。';
+      case 3: // MEDIA_ERR_DECODE
+        return what + '文件已损坏，或用了浏览器不支持的编码（如 H.265 / ProRes）。';
+      case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+        return '浏览器不支持这个' + what + '格式（常见于 MKV / AVI / FLV，'
+          + '它们只是被放进了播放器，并没有被解码）。请下载后用本地播放器打开。';
+      default:
+        return what + '无法播放：' + (err.message || '未知原因');
+    }
+  }
+
+  // showPreviewFailure 把失败的播放器换成一句说明 + 一个下载入口。
+  //
+  // 这里**必须**给下载按钮：失败信息只有配上「那我现在怎么办」才有用，
+  // 否则用户还是得关掉弹窗、回到列表里再找一次「下载」。
+  function showPreviewFailure(node, entry, why) {
+    var box = document.createElement('div');
+    box.className = 'preview-fail';
+    var t = document.createElement('div');
+    t.className = 'preview-fail-msg';
+    t.textContent = why;
+    box.appendChild(t);
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn primary';
+    b.textContent = '下载文件';
+    b.onclick = function () { downloadEntry(entry); };
+    box.appendChild(b);
+    // 用 replaceWith 而不是清空父节点：音频的失败提示是替换整块
+    // .preview-audio，图片/视频则是替换元素本身。两种都成立。
+    if (node.parentNode) node.parentNode.replaceChild(box, node);
   }
 
   async function openArchivePreview(entry) {

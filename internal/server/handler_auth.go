@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -17,8 +18,14 @@ import (
 //     否则一个只被授予 /docs 权限的账号会因为对根目录无权限而登录失败；
 //   - 失败信息以 JSON 返回，方便前端直接展示。
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
+	// DELETE 是登出：撤销服务端会话并让浏览器丢掉 cookie。
+	// 必须由服务端做 —— cookie 是 HttpOnly 的，JS 删不掉它。
+	if r.Method == http.MethodDelete {
+		s.handleLogout(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		w.Header().Set("Allow", "GET, POST")
+		w.Header().Set("Allow", "GET, POST, DELETE")
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -34,6 +41,18 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 与 authorize 用同一套限速：这个接口现在会下发会话 cookie，
+	// 不设闸门等于把口令交给字典攻击 —— 而且登录成功一次就能拿到
+	// 一张长期有效的 cookie，比逐个请求试密码划算得多。
+	ip := clientIP(r)
+	if blocked, remain := s.authBlocked(ip); blocked {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
+		s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+			"message": "认证失败次数过多，请稍后再试",
+		})
+		return
+	}
+
 	user, pass, ok := credentials(r)
 	if !ok || user == "" {
 		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
@@ -42,12 +61,28 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.auth.Verify(user, pass) {
+		s.noteAuthFailure(ip)
 		s.logger.Errorf("登录失败：账号 %q 凭据不正确", user)
 		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
 			"message": "用户名或密码不正确",
 		})
 		return
 	}
+	s.noteAuthSuccess(ip)
+
+	// 下发会话 cookie。之后浏览器**自己**发起的请求（<video>/<img> 的加载、
+	// <a download> 的下载）会带上它，于是 Range 流式播放与原生下载都可用，
+	// 不再需要把整个文件读成 blob —— 那是大文件播不了的根本原因。
+	//
+	// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
+	token, ok := s.auth.NewSession(user)
+	if !ok {
+		s.writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
+			"message": "会话数已达上限，请稍后再试",
+		})
+		return
+	}
+	s.setSessionCookie(w, token)
 
 	// 该账号的权限用于决定页面按钮显隐。
 	// 默认按根目录计算，但对根目录无权限时退化为只读，避免整页按钮全灭。
@@ -87,4 +122,20 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())
 	}
 	s.writeJSON(w, reply)
+}
+
+// handleLogout 撤销会话并清掉 cookie。
+//
+// 为什么要服务端参与：cookie 是 HttpOnly 的，JS 读不到也就删不掉。
+// 只清 localStorage 的话，服务端那张会话还活着 —— 谁拿到 cookie 谁就还能读，
+// 「登出」会变成一句假话。
+//
+// 无论会话是否存在都返回 204：登出是个应该永远成功的动作，
+// 为一个已经过期的会话报错只会让前端多写一段没意义的处理。
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if token := sessionToken(r); token != "" {
+		s.auth.DropSession(token)
+	}
+	s.clearSessionCookie(w)
+	w.WriteHeader(http.StatusNoContent)
 }

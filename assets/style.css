@@ -1182,6 +1182,24 @@ html.booting body::after {
   line-height: 1.7;
 }
 
+/* 播放失败：说明 + 下载入口。
+   播放器本身在深色底上是一片黑，失败时把整块换成这个，
+   免得用户对着一个不会动的黑框猜原因。 */
+.preview-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 32px 24px;
+  max-width: 560px;
+  text-align: center;
+}
+.preview-fail-msg {
+  color: #c9ced6;
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+
 .btn.btn-sm {
   padding: 5px 10px;
   font-size: 12.5px;
