@@ -112,6 +112,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/__gofs__/health", s.handleHealth)
 	mux.HandleFunc("/__gofs__/auth", s.handleAuth)
 	mux.HandleFunc("/__gofs__/keys", s.handleKeys)
+	// 一键上传脚本：用上传密钥换一段可执行的脚本（见 up_script.go）。
+	// 走密钥而非账号密码，所以放在 keys 之外单独注册。
+	mux.HandleFunc(upScriptName, s.handleUpScript)
 	mux.HandleFunc("/__gofs__/settings", s.handleSettings)
 	mux.HandleFunc("/__gofs__/users", s.handleUsers)
 	mux.HandleFunc("/__gofs__/extract", s.handleExtract)

@@ -358,6 +358,52 @@ curl -u admin:123 -X PUT http://127.0.0.1:5000/__gofs__/text \
 最后一条尤其重要：**密钥不能用来管理密钥**，否则一把只能传文件的凭证
 就能给自己签发新凭证，等于权限提升。
 
+### 一键脚本上传
+
+创建密钥后，页面上会给一段**直接能跑**的命令 —— 密钥和服务地址都已填好，
+不用存文件、不用改任何地方：
+
+```bash
+bash <(curl -sS "https://<服务地址>/up?key=<密钥>") 文件或目录... [目标子目录]
+```
+
+传一个目录时**连子目录层级一起传**（顶层目录名也保留）：
+
+```bash
+# 本地 src/apps/web/index.html  →  服务端 <目标>/src/apps/web/index.html
+bash <(curl -sS "…/up?key=…") src
+bash <(curl -sS "…/up?key=…") src docs      # 放进 docs/ 子目录
+bash <(curl -sS "…/up?key=…") a.txt b/ c/   # 一次传多个
+```
+
+也可以先存成文件用：
+
+```bash
+curl -sSLo gofs-up.sh "https://<服务地址>/up?key=<密钥>"
+chmod +x gofs-up.sh
+./gofs-up.sh 文件或目录...
+```
+
+脚本只用 `bash` 和 `curl`，拿到就能跑。它做的事就是逐个文件发
+`multipart/form-data` 请求：
+
+- 目录层级靠 `path` 表单字段保留 —— 单靠文件名不行，
+  服务端会把多部分文件名压平到它的基本名，所以别指望 `-F "file=@a/b/c.txt"`
+  能自己带上 `a/b/`；
+- 最后一个参数若不是已存在的路径，就当作目标子目录；
+- 结束打印成功/失败计数，有失败时退出码非 0，方便放进 CI。
+
+⚠️ **一个容易意外的点**：单个文件直接传到服务根目录时会走**日期归档**
+（默认 `--upload-date-layout=2006/01/02`），也就是落到 `/2026/09/30/` 下；
+而传目录、或指定了目标子目录时不会（归档只对「直接传到根目录」生效，
+与 `PUT` 上传的规则一致）。想关掉就加一个 `--upload-date-layout=""` 启动，
+或者让脚本带上目标子目录。
+
+脚本端点 `GET /up?key=<密钥>` 用**密钥本身**鉴权，不要账号密码 ——
+它的意义就是让拿到密钥的脚本、CI、第三方自助取用。密钥无效、被撤销，
+或者服务没开 `--allow-upload` 时一律不下发。响应带 `Cache-Control: no-store`：
+脚本里含密钥，不能被中间层缓存。
+
 ### 有效期
 
 创建时可选 1 小时 / 6 小时 / 1 天 / 7 天 / 30 天 / 永不过期。
@@ -387,6 +433,84 @@ curl -T backup.tar.gz 'http://127.0.0.1:5000/incoming/backup.tar.gz?key=gofs_xxx
 ```
 
 失败时：密钥无效或过期返回 `401`，超出允许目录返回 `403`。
+
+### 批量上传（目录连层级一起传）
+
+`-T` 一次只传一个文件。要成批传、还要保留目录结构，用 `-F` 走 multipart 表单 ——
+一次请求可以带多个文件，`path` 字段指定它们落到哪个子目录：
+
+```bash
+KEY='gofs_xxxxxxxx'
+find 目录 -type f | while read -r f; do
+  curl -sS -H "X-Gofs-Upload-Key: $KEY" \
+    -F "path=${f%/*}" -F "file=@$f" "http://127.0.0.1:5000/"
+done
+```
+
+用 `find | while read` 而不是 `for f in $(find …)`：后者遇到带空格的文件名会被拆散。
+
+**目录层级为什么要靠 `path` 字段**：multipart 的文件名会被服务端压平到基本名
+（`apps/web/index.html` → `index.html`），光靠文件名保不住层级。`path` 是
+相对当前 URL 的子目录，`path=apps/web` 就会把文件放进 `apps/web/`。
+`path` 里不允许出现 `..`。
+
+**不想按日期自动归档**就再加一个 `-F "dated=0"`。默认行为是：传到服务根目录
+的文件会进 `年/月/日/`，传到子目录（含 `path` 指定的）原地放。
+
+写成脚本的话，顺手把「最后一个参数当作目标子目录」也加上：
+
+```bash
+#!/bin/bash
+# 用法：./gofs-up.sh 文件或目录... [目标子目录]
+set -u
+KEY='gofs_xxxxxxxx'
+BASE='http://127.0.0.1:5000'
+DEST=''
+
+args=("$@")
+if [ "${#args[@]}" -gt 1 ] && [ ! -e "${args[${#args[@]}-1]}" ]; then
+  DEST="${args[${#args[@]}-1]}"
+  args=("${args[@]:0:${#args[@]}-1}")
+fi
+
+# post <本地文件> <想放到的相对路径>
+post() {
+  local dir target
+  dir=$(dirname "$2"); [ "$dir" = "." ] && dir=""
+  target="${DEST:+$DEST/}$dir"; target="${target%/}"
+  if curl -sS -f -H "X-Gofs-Upload-Key: $KEY" \
+       ${target:+-F "path=$target"} -F "file=@$1" "$BASE/" >/dev/null; then
+    echo "  ↑ ${target:+$target/}$(basename "$2")"
+  else
+    echo "  ✗ $2" >&2
+  fi
+}
+
+for a in "${args[@]}"; do
+  if [ -d "$a" ]; then
+    root=$(basename "$a")
+    while IFS= read -r f; do post "$f" "$root/${f#"$a"/}"; done < <(find "$a" -type f)
+  elif [ -f "$a" ]; then
+    post "$a" "$(basename "$a")"
+  else
+    echo "  跳过（不存在）：$a" >&2
+  fi
+done
+```
+
+```bash
+$ ./gofs-up.sh src lone.txt batch
+  ↑ batch/src/docs/readme.md
+  ↑ batch/src/top.txt
+  ↑ batch/src/apps/web/index.html
+  ↑ batch/src/apps/web/style.css
+  ↑ batch/lone.txt
+```
+
+（每组内部的先后取决于 `find` 的遍历顺序，不必一致。）
+
+密钥的作用范围对 `path` 同样生效：一把只允许写 `/docs` 的密钥，
+`path=../other` 会被 `400` 挡下，POST 到 `/other/` 则返回 `403`。
 
 ### API
 

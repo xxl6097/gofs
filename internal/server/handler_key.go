@@ -155,6 +155,13 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 		"token": token,
 		"warn":  "密钥明文只显示这一次，请立即复制保存；服务端只保存摘要，无法再次查看。",
 		"usage": map[string]string{
+			// 一键脚本：服务端把密钥与地址填好后下发一段可直接执行的脚本，
+			// 适合批量传目录（保留层级），不用手改任何地方。
+			//
+			// 末尾那行注释是必要的：这条命令本身看不出文件会落到哪，
+			// 而落点由密钥范围决定 —— 不写出来用户只能靠猜。
+			"script": "bash <(curl -sS \"<服务地址>/up?key=" + token + "\") 文件或目录... [目标子目录]\n" +
+				"# 目录连层级一起传；不带目标子目录就落到 " + k.Scope,
 			"header": "curl -T local.txt -H 'X-Gofs-Upload-Key: " + token + "' \"<服务地址>/<目标路径>\"",
 			"query":  "curl -T local.txt \"<服务地址>/<目标路径>?key=" + token + "\"",
 			"scp":    "X-Gofs-Upload-Key 头可用于任何 HTTP 客户端；权限仅限上传，且局限在 " + k.Scope,

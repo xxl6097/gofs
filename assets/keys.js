@@ -213,11 +213,19 @@
 
       var base = serviceBase();
       var target = (data.key.scope === '/' ? '/' : data.key.scope + '/') + '文件名.txt';
+      // 一键上传：服务端把密钥和地址都填好，直接下发一段可执行脚本。
+      // 用法就是下面这一行，不用存文件、不用改任何地方。
+      var scriptURL = base + '/up?key=' + encodeURIComponent(token);
       var samples = [
-        ['请求头（推荐）',
+        ['一键脚本上传（推荐）',
+          'bash <(curl -sS "' + scriptURL + '") 文件或目录... [目标子目录]\n' +
+          '# 目录会连层级一起上传；不带目标子目录就传到 ' + data.key.scope],
+        ['请求头',
           "curl -T local.txt -H 'X-Gofs-Upload-Key: " + token + "' \"" + base + target + "\""],
         ['查询参数',
-          'curl -T local.txt "' + base + target + '?key=' + token + '"']
+          'curl -T local.txt "' + base + target + '?key=' + token + '"'],
+        ['保存脚本备用',
+          'curl -sSLo gofs-up.sh "' + scriptURL + '" && chmod +x gofs-up.sh']
       ];
       samples.forEach(function (s) {
         var lb = document.createElement('div');
