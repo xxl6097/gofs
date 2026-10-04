@@ -428,11 +428,27 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 	}
 	dst, err := s.res.Resolve(destPath)
 	if err != nil {
+		// 越界（含 .. 穿越、软链逃逸）单独说清楚 ——
+		// 和「路径写错了」不是一回事，用户需要知道是被范围挡住了。
+		if errors.Is(err, fsutil.ErrEscaped) {
+			http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "403 Forbidden: 目标路径非法", http.StatusForbidden)
 		return
 	}
 	if _, err := os.Stat(src); err != nil {
 		s.writeErr(w, err)
+		return
+	}
+	// 目标落在源里面（含「就是它自己」）必须挡掉。
+	//
+	// 不挡的话，os.Rename 会返回 EINVAL，用户看到的是一句裸内核错误
+	// （"rename ...: invalid argument"）；而那个跨设备兜底分支一旦被触发，
+	// 就是「复制到自己的子目录里、再把源删掉」—— 数据直接没了。
+	// 这里用路径关系判断，比事后分辨 errno 可靠得多。
+	if insideOrSame(src, dst) {
+		http.Error(w, "400 Bad Request: 不能把目录移动到它自己里面", http.StatusBadRequest)
 		return
 	}
 
@@ -519,4 +535,23 @@ func isDirEmpty(dir string) (bool, error) {
 func isRootPath(urlPath string) bool {
 	c := fsutil.CleanURLPath(urlPath)
 	return c == "/" || c == ""
+}
+
+// insideOrSame 判断 dst 是否就是 src，或落在 src 的子树里。
+//
+// 两个参数都已经是**绝对的真实路径**（由 Resolver.Resolve 给出，
+// 已经做过 Clean、越界检查与软链解析），所以这里可以直接比路径关系。
+//
+// 为什么不用 os.Rename 的返回值判断：EINVAL 在不同平台/文件系统上
+// 语义并不一致，靠错误码反推「是不是移进了自己」太脆。
+func insideOrSame(src, dst string) bool {
+	rel, err := filepath.Rel(src, dst)
+	if err != nil {
+		// 无法比较（例如跨卷、不同前缀）时保守放行：
+		// 真正的越界已由 Resolve 挡在更前面。
+		return false
+	}
+	// rel == "." 表示同一个路径；
+	// 不以 ".." 开头表示 dst 在 src 之下。
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }

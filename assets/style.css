@@ -101,6 +101,17 @@
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
 
+/* ---------------------------------------------------------------- 基础 */
+
+/* hidden 属性必须真的隐藏。
+   作者样式里的 display:inline-flex / flex 会盖掉 UA 样式表的
+   `[hidden] { display: none }` —— 于是给一个 .btn 设 hidden = true 之后
+   它照样显示：只读用户会看到「上传 / 新建 / 密钥 / 用户 / 设置」，
+   一个都没选时工具栏也挂着「移动所选 / 删除所选」。
+   用 !important 是必要的：这里的语义是「不渲染」，
+   不该被任何布局规则悄悄推翻。 */
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -496,6 +507,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
    文字与图标一起染色（svg 的 stroke 继承自 currentColor）。 */
 .op-btn[data-kind="open"] { color: var(--op-open); }
 .op-btn[data-kind="preview"] { color: var(--op-preview); }
+.op-btn[data-kind="move"] { color: var(--op-rename); }
 .op-btn[data-kind="download"] { color: var(--op-download); }
 .op-btn[data-kind="edit"] { color: var(--op-edit); }
 .op-btn[data-kind="unzip"] { color: var(--op-unzip); }
@@ -556,6 +568,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .action-item[data-kind="unzip"] svg { color: var(--op-unzip); }
 .action-item[data-kind="list"] svg { color: var(--op-list); }
 .action-item[data-kind="rename"] svg { color: var(--op-rename); }
+.action-item[data-kind="move"] svg { color: var(--op-rename); }
 /* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
 .action-item[data-kind="trash"] { color: var(--op-danger); }
 .action-item[data-kind="trash"] svg { color: var(--op-danger); }
@@ -1304,7 +1317,6 @@ html.booting body::after {
   font-size: 13.5px;
   line-height: 1.75;
 }
-.ed-preview[hidden] { display: none; }
 
 .ed-foot {
   font-size: 11.5px;
@@ -1749,10 +1761,9 @@ html.booting body::after {
   .more-panel .btn:hover:not(:disabled) { background: var(--bg-active); }
   .more-panel .btn svg { width: 18px; height: 18px; color: var(--text-dim); }
   .more-panel .btn span { display: inline; }
-  /* ⚠️ 必须显式恢复 [hidden]：上面给 .more-panel .btn 定的 display: flex
-     会盖掉 UA 样式表里的 `[hidden] { display: none }`，
-     没有这一条，没权限的菜单项会照样显示出来（点下去才 403）。 */
-  .more-panel .btn[hidden] { display: none; }
+  /* 这里原本要显式恢复 [hidden]（上面的 display: flex 会盖掉 UA 规则）。
+     现在顶部有一条全局的 `[hidden] { display: none !important }`，
+     这一条就不需要了。 */
 }
 
 @media (max-width: 560px) {

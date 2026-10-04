@@ -664,6 +664,9 @@
   var OP_ICONS = {
     download: '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/><path d="M4 20h16"/>',
     preview: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',
+    move: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 13h7"/><path d="m13.5 10.5 2.5 2.5-2.5 2.5"/>',
+    folder: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
+    up: '<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',
     unzip: '<path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="m9 13 3 3 3-3"/>',
     list: '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>',
     rename: '<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>',
@@ -1122,6 +1125,9 @@
         }
       }
       if (can('write')) {
+        // 移动排在重命名前面：改个名字用它自己的输入框就够，
+        // 挪窝才是需要挑目标的那件事。
+        actions.push({ kind: 'move', label: '移动', run: function () { openMoveDialog([e]); } });
         actions.push({ kind: 'rename', label: '重命名', run: function () { openRenameDialog(e); } });
       }
       if (can('delete')) {
@@ -1239,6 +1245,11 @@
     var btnDel = $('btn-delete-sel');
     btnDel.hidden = !(can('delete') && n > 0);
     if (n > 0) btnDel.querySelector('span').textContent = '删除所选 (' + n + ')';
+
+    // 移动按钮跟着选中数变脸，与删除所选同一条件（只是权限门不同）。
+    var btnMove = $('btn-move-sel');
+    btnMove.hidden = !(can('write') && n > 0);
+    if (n > 0) btnMove.querySelector('span').textContent = '移动所选 (' + n + ')';
 
     // 打包按钮跟着选中数变脸：0 项时是「打包下载」（整个目录），
     // 有选中时是「打包所选 (n)」，点击前就能看出会打包什么。
@@ -2053,6 +2064,204 @@
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
   }
 
+  // ---------------------------------------------------------------- 移动
+
+  // dirName 取路径的父目录。
+  function dirName(p) {
+    var s = String(p).replace(/\/+$/, '');
+    var i = s.lastIndexOf('/');
+    if (i < 0) return '/';
+    return i === 0 ? '/' : s.slice(0, i);
+  }
+
+  // openDirPicker 在弹窗里浏览目录树，选一个目标目录。
+  //
+  //   openDirPicker({ title, startPath, excludePaths, onPick })
+  //
+  // 为什么要有 excludePaths：正在被移动的那些目录不能被选成目标 ——
+  // 把 /a 移进 /a/b 会把整棵树搬进它自己里面。服务端也会挡（400），
+  // 但在界面上就禁掉更直接：用户根本不会走进那条死路。
+  //
+  // 样式复用 .action-sheet / .action-item —— 那本来就是「一列可点行」，
+  // 48px 高、触摸达标，手机端不用另做一套。
+  function openDirPicker(opts) {
+    var cur = opts.startPath || '/';
+    var exclude = opts.excludePaths || [];
+    var closed = false;
+    // 每次 render 递增。响应回来时对不上就丢弃 ——
+    // 用户点得快时会有多个请求在飞，不设这个的话先发的后到，
+    // 列表会被渲染成上一个目录的内容，和顶部的路径对不上。
+    var seq = 0;
+
+    var body = document.createElement('div');
+    body.className = 'action-sheet';
+
+    var head = document.createElement('div');
+    head.className = 'action-path';
+    body.appendChild(head);
+
+    var listBox = document.createElement('div');
+    body.appendChild(listBox);
+
+    var m = openModal({
+      title: opts.title || '选择目标目录',
+      body: body,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        {
+          label: '移到这里', cls: 'primary',
+          onClick: function () { var dest = cur; m.close(); opts.onPick(dest); }
+        }
+      ]),
+      onClose: function () { closed = true; }
+    });
+
+    function makeRow(label, kind, enabled, hint, run) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'action-item';
+      b.dataset.kind = kind;
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.innerHTML = OP_ICONS[kind] || OP_ICONS.list;
+      b.appendChild(svg);
+      var sp = document.createElement('span');
+      sp.textContent = label;
+      b.appendChild(sp);
+      if (!enabled) {
+        b.disabled = true;
+        if (hint) {
+          var em = document.createElement('em');
+          em.textContent = hint;
+          b.appendChild(em);
+        }
+      } else {
+        b.onclick = run;
+      }
+      return b;
+    }
+
+    function note(text) {
+      var d = document.createElement('div');
+      d.className = 'hint';
+      d.style.padding = '12px 4px';
+      d.textContent = text;
+      return d;
+    }
+
+    function render() {
+      var mySeq = ++seq;
+      head.textContent = cur;
+      listBox.textContent = '';
+
+      // 上级目录。到服务根就停 —— 上面没有可去的地方了。
+      var atRoot = cur === '/';
+      var parent = atRoot ? '/' : dirName(cur);
+      listBox.appendChild(makeRow('上级目录', 'up', !atRoot, '', function () {
+        cur = parent;
+        render();
+      }));
+
+      var loading = note('正在读取…');
+      listBox.appendChild(loading);
+
+      fetchListing(cur).then(function (data) {
+        // 弹窗可能在请求途中被关掉，或者用户已经翻到别的目录了。
+        if (closed || mySeq !== seq) return;
+        loading.remove();
+
+        var dirs = (data.entries || []).filter(function (e) { return e.is_dir; });
+        if (!dirs.length) {
+          listBox.appendChild(note('这个目录下没有子目录'));
+          return;
+        }
+        dirs.forEach(function (e) {
+          var blocked = exclude.indexOf(e.path) >= 0;
+          listBox.appendChild(makeRow(
+            e.name, 'folder', !blocked,
+            blocked ? '正在移动这个目录' : '',
+            function () { cur = e.path; render(); }
+          ));
+        });
+      }).catch(function (err) {
+        if (closed || mySeq !== seq) return;
+        loading.textContent = '读取失败：' + err.message;
+      });
+    }
+
+    render();
+  }
+
+  // openMoveDialog 把若干条目移动到用户选定的目录。
+  //
+  // entries 是数组：单行操作传 [e]，批量传选中项。
+  async function openMoveDialog(entries) {
+    entries = entries || [];
+    if (!entries.length) return;
+    if (!can('write')) { toast('warn', '没有移动权限'); return; }
+
+    var multi = entries.length > 1;
+    var excludePaths = entries.map(function (e) { return e.path; });
+
+    openDirPicker({
+      title: multi ? '移动 ' + entries.length + ' 项到…' : '移动「' + entries[0].name + '」到…',
+      startPath: state.path || '/',
+      excludePaths: excludePaths,
+      onPick: function (dest) { doMove(entries, dest); }
+    });
+  }
+
+  // doMove 逐个发 MOVE。目标目录已存在同名时不覆盖（Overwrite: F）——
+  // 静默覆盖用户数据比失败更糟。
+  async function doMove(entries, dest) {
+    var ok = 0, skipped = 0, conflict = 0, failed = [];
+
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      // 本来就在这个目录里，不必发一次注定 412 的请求。
+      if (dirName(e.path) === dest) { skipped++; continue; }
+
+      var target = joinPath(dest, baseName(e.path));
+      try {
+        var res = await apiFetch(fileURL(e.path), {
+          method: 'MOVE',
+          headers: {
+            'Destination': location.origin + fileURL(target),
+            'Overwrite': 'F'
+          }
+        });
+        if (res.status === 201 || res.status === 204) {
+          ok++;
+        } else if (res.status === 412) {
+          conflict++;
+        } else {
+          failed.push(e.name + '：' + (await res.text()).trim());
+        }
+      } catch (err) {
+        failed.push(e.name + '：' + err.message);
+      }
+    }
+
+    var parts = [];
+    if (ok) parts.push('成功 ' + ok + ' 项');
+    if (skipped) parts.push(skipped + ' 项已在该目录');
+    if (conflict) parts.push(conflict + ' 项目标同名已存在（未覆盖）');
+    var msg = parts.join('，') || '没有需要移动的项';
+
+    if (failed.length) {
+      // 失败时把第一条原因带出来，否则用户只知道「失败了」不知道为啥。
+      toast('err', msg + '；失败 ' + failed.length + ' 项：' + failed[0], 6000);
+    } else if (conflict) {
+      toast('warn', msg, 5000);
+    } else {
+      toast('ok', msg);
+    }
+
+    state.selected.clear();
+    navigate(state.path, false);
+  }
+
   // ---------------------------------------------------------------- 删除
 
   function doDelete(entries) {
@@ -2785,6 +2994,11 @@
       if (picked.length) doDelete(picked);
     };
 
+    $('btn-move-sel').onclick = function () {
+      var picked = pickedEntries();
+      if (picked.length) openMoveDialog(picked);
+    };
+
     $('check-all').onchange = function (e) {
       state.selected.clear();
       if (e.target.checked) state.entries.forEach(function (x) { state.selected.add(x.path); });
@@ -2984,6 +3198,7 @@
   G.canEdit = canEdit;
   G.canPreview = canPreview;
   G.openPreview = openPreview;
+  G.openMoveDialog = openMoveDialog;
   G.editMax = editMax;
   G.applySession = applySession;
 })();

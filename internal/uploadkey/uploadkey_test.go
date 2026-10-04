@@ -74,8 +74,21 @@ func TestVerifyRejects(t *testing.T) {
 	if _, err := s.Verify("gofs_notavalidtoken"); err != ErrNotFound {
 		t.Errorf("伪造密钥应返回 ErrNotFound，实际 %v", err)
 	}
-	// 改一个字符也应失败
-	tampered := token[:len(token)-1] + "X"
+	// 改一个字符也应失败。
+	//
+	// ⚠️ 必须换成一个**确定为不同**的字符。写死成 "X" 的话，
+	// token 末位本身是随机 base64url，有 1/64 的概率本来就是 'X' ——
+	// 那样 tampered 与 token 完全相同，校验当然通过，
+	// 测试就会无缘无故地红一次（约 1.6% 的运行）。
+	last := token[len(token)-1]
+	repl := byte('X')
+	if last == repl {
+		repl = 'Y'
+	}
+	tampered := token[:len(token)-1] + string(repl)
+	if tampered == token {
+		t.Fatal("构造出的「篡改版」和原 token 一样，这条测试没测到东西")
+	}
 	if _, err := s.Verify(tampered); err == nil {
 		t.Errorf("被篡改的密钥不应通过校验")
 	}
