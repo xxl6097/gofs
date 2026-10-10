@@ -651,6 +651,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .op-btn[data-kind="preview"] { color: var(--op-preview); }
 .op-btn[data-kind="move"] { color: var(--op-rename); }
 .op-btn[data-kind="link"] { color: var(--op-list); }
+.op-btn[data-kind="share"] { color: var(--op-open); }
 .op-btn[data-kind="download"] { color: var(--op-download); }
 .op-btn[data-kind="edit"] { color: var(--op-edit); }
 .op-btn[data-kind="unzip"] { color: var(--op-unzip); }
@@ -713,6 +714,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .action-item[data-kind="rename"] svg { color: var(--op-rename); }
 .action-item[data-kind="move"] svg { color: var(--op-rename); }
 .action-item[data-kind="link"] svg { color: var(--op-list); }
+.action-item[data-kind="share"] svg { color: var(--op-open); }
 /* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
 .action-item[data-kind="trash"] { color: var(--op-danger); }
 .action-item[data-kind="trash"] svg { color: var(--op-danger); }

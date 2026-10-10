@@ -537,6 +537,138 @@
     }
   }
 
+  // SHARE_TTLS 是分享链接可选的有效期。
+  //
+  // 没有「永久」这一档：分享链接会把内容公开出去，而一条永不过期的公开
+  // 地址一旦流出就再也收不回来了。要长期开放就每次续一下，或者走
+  // 「密钥」面板里那条真正的永久选项（那里是显式操作）。
+  var SHARE_TTLS = [
+    { label: '1 小时', seconds: 3600 },
+    { label: '1 天', seconds: 86400 },
+    { label: '7 天', seconds: 604800 },
+    { label: '30 天', seconds: 2592000 }
+  ];
+
+  // openShareDialog 生成一条**免登录**的分享链接。
+  //
+  // 与 copyEntryLink（复制普通链接，仍需登录）是两件事，刻意分开：
+  // 「变公开」必须是一次显式动作，否则很容易把公开地址当成内部地址发出去。
+  async function openShareDialog(entry) {
+    var sel = document.createElement('select');
+    sel.className = 'select';
+    SHARE_TTLS.forEach(function (o, i) {
+      var opt = document.createElement('option');
+      opt.value = String(o.seconds);
+      opt.textContent = o.label;
+      if (i === 2) opt.selected = true; // 默认 7 天
+      sel.appendChild(opt);
+    });
+
+    var field = document.createElement('div');
+    field.className = 'field';
+    var lb = document.createElement('label');
+    lb.textContent = '链接有效期';
+    field.appendChild(lb);
+    field.appendChild(sel);
+
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = '任何拿到这条链接的人都能' +
+      (entry.is_dir ? '浏览该目录及其全部子目录' : '下载这个文件') +
+      '，**不需要登录**。链接到期自动失效，也可以随时在「密钥」面板里撤销。';
+    field.appendChild(hint);
+
+    var m = openModal({
+      title: '分享链接',
+      body: field,
+      footer: modalFoot([
+        { label: '取消', onClick: function () { m.close(); } },
+        { label: '生成并复制', cls: 'primary', onClick: function () { submit(); } }
+      ])
+    });
+
+    async function submit() {
+      var btn = m.el.querySelector('.modal-foot .btn.primary');
+      if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+      try {
+        var res = await apiFetch(API_KEYS, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind: 'read',
+            name: entry.name,
+            scope: entry.path,
+            ttl_seconds: parseInt(sel.value, 10) || 0
+          })
+        });
+        if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+        var data = await res.json();
+        // 用**路径形式**的地址（/__share__/<token>/<原路径>），而不是 ?share=。
+        //
+        // 差别在 wget：查询串会被拼进文件名，递归下载下来是
+        // `readme.txt?share=gofs_xxx` 这种没法用的名字；路径形式下所有链接
+        // 都是普通相对路径，`wget -r` 拉下来的文件名是干净的。
+        // 浏览器两种都能打开。
+        var url = location.origin +
+          raw('/__share__/' + encodeURIComponent(data.token) + encPath(entry.path));
+        var ttlText = sel.options[sel.selectedIndex].textContent;
+
+        // ⚠️ 链接这时候**已经在服务端建好了**，而明文只此一次、之后只剩摘要。
+        // 所以复制失败绝不能当成「生成失败」——那样链接既在生效，用户又拿不到，
+        // 只能去密钥面板把它撤销掉。这里改成把地址显示出来让用户手动复制。
+        try {
+          await copyText(url);
+          m.close();
+          toast('ok', '分享链接已复制（' + ttlText + '内有效）', 5000);
+          return;
+        } catch (e) {
+          showShareLink(m, url, ttlText, e.message);
+        }
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = '生成并复制'; }
+        toast('err', '生成分享链接失败：' + e.message);
+      }
+    }
+  }
+
+  // showShareLink 在自动复制失败时，把地址显示出来让用户手动复制。
+  //
+  // 这一步是必需的：链接已经生效，而明文只在这一次返回里给过 ——
+  // 不显示出来，这条链接就等于「已经公开但没人知道地址」，
+  // 用户只能去密钥面板撤销。
+  function showShareLink(prev, url, ttlText, why) {
+    var box = document.createElement('div');
+
+    var warn = document.createElement('div');
+    warn.className = 'hint-box danger';
+    warn.textContent = '链接已经生成并生效，但自动复制失败了（' + why + '）。' +
+      '请手动选中下面的地址复制 —— 它只显示这一次。';
+    box.appendChild(warn);
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'key-input';
+    input.readOnly = true;
+    input.value = url;
+    input.style.marginTop = '10px';
+    box.appendChild(input);
+
+    var note = document.createElement('div');
+    note.className = 'hint';
+    note.textContent = '有效期：' + ttlText + '。可以在「密钥」面板里随时撤销。';
+    box.appendChild(note);
+
+    prev.close();
+    var m = openModal({
+      title: '分享链接',
+      body: box,
+      footer: modalFoot([{ label: '我已复制', cls: 'primary', onClick: function () { m.close(); } }])
+    });
+    // 选中，方便直接 ⌘C。
+    input.focus();
+    input.select();
+  }
+
   // isAbort 判断一个错误是不是「用户主动取消」。
   //
   // fetch 与 body reader 在 abort 时都以 AbortError 拒绝，要把它和
@@ -789,6 +921,7 @@
     preview: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',
     move: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 13h7"/><path d="m13.5 10.5 2.5 2.5-2.5 2.5"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/>',
+    share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4"/><path d="m15.4 6.5-6.8 4"/>',
     folder: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
     up: '<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',
     unzip: '<path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="m9 13 3 3 3-3"/>',
@@ -1251,6 +1384,11 @@
       // 「链接」对所有能读到的人都有意义，不受写权限约束 ——
       // 只读账号同样需要把文件地址发给别人。
       actions.push({ kind: 'link', label: '链接', run: function () { copyEntryLink(e); } });
+      // 「分享」会生成一条免登录的公开地址，属于授权动作，所以要求写权限
+      // （服务端还会再按范围校验一次）。
+      if (can('write')) {
+        actions.push({ kind: 'share', label: '分享', run: function () { openShareDialog(e); } });
+      }
       if (can('write')) {
         // 移动排在重命名前面：改个名字用它自己的输入框就够，
         // 挪窝才是需要挑目标的那件事。
@@ -2663,6 +2801,9 @@
     body.appendChild(previewNode(kind, fileURL(entry.path), entry));
   }
 
+  // 凭证管理端点（上传密钥与分享链接共用）。
+  var API_KEYS = raw('/__gofs__/keys');
+
   // 服务端的 Office 内容提取端点。
   var OFFICE_EP = raw('/__gofs__/office');
 
@@ -3598,6 +3739,7 @@
   G.openMoveDialog = openMoveDialog;
   G.copyText = copyText;
   G.copyEntryLink = copyEntryLink;
+  G.openShareDialog = openShareDialog;
   G.editMax = editMax;
   G.applySession = applySession;
 })();

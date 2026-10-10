@@ -100,7 +100,11 @@ func (s *Server) buildPerms(p permResult) permsData {
 		Search:  canRead && s.cfg.AllowSearch,
 		Archive: canRead && s.cfg.AllowArchive,
 		Extract: rw && s.cfg.AllowExtract,
-		Edit:    canRead && s.cfg.AllowEdit,
+		// Edit 必须跟 Write/Delete/Extract 一样用 rw，不能只要求 canRead。
+		// 漏了这一条，只读账号会看到「编辑」按钮，点下去必然被
+		// textSave 的 403（它要求读写权限）挡回来 —— 按钮等于骗人。
+		// 分享链接是只读的，这个 bug 在它上面最容易暴露。
+		Edit: rw && s.cfg.AllowEdit,
 	}
 }
 

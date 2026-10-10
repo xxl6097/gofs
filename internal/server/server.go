@@ -130,6 +130,9 @@ func (s *Server) Handler() http.Handler {
 	h = s.withLogging(h)
 	h = s.withConcurrency(h)
 	h = s.withPathPrefix(h)
+	// 放在最外层：先把 /__share__/<token>/… 改写成真实路径，
+	// 后面所有中间件与路由看到的都是干净的路径。
+	h = s.withSharePath(h)
 	return h
 }
 
@@ -326,6 +329,69 @@ func credentials(r *http.Request) (user, pass string, ok bool) {
 // sessionCookieName 是会话 cookie 的名字。
 const sessionCookieName = "gofs_sid"
 
+// shareCookieName 是分享链接的 cookie 名字。
+//
+// 为什么分享要下发一个 cookie：目录分享打开的是**页面**，而页面里的目录列表、
+// 预览这些都是前端自己再发 XHR 拉的 —— 那些请求不会带最初 URL 上的 `?share=`，
+// 于是全部 401，用户看到的是登录框而不是目录。
+// 下发一个 Path 限定在分享范围内的 cookie，后续请求就会自动带上。
+//
+// 它和会话 cookie 是两回事：这条只代表「某个分享链接被打开过」，
+// 权限恒为只读，且严格限制在链接自身的范围内。
+const shareCookieName = "gofs_share"
+
+// shareTokenOf 取出请求里的分享令牌：查询参数优先，其次是 cookie。
+//
+// 查询参数优先是有意的：同一个浏览器可能开过多个分享链接，
+// 显式带上来的那一个才是当前意图。
+func shareTokenOf(r *http.Request) string {
+	// 路径形式（/__share__/<token>/…）：令牌在 context 里，伪造不了。
+	if v, ok := r.Context().Value(shareCtxKey{}).(string); ok && v != "" {
+		return v
+	}
+	if v := r.URL.Query().Get("share"); v != "" {
+		return v
+	}
+	if c, err := r.Cookie(shareCookieName); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// setShareCookie 把分享令牌记到 cookie 上，Path 限定在分享范围内。
+//
+// Path 限定是关键：这条 cookie 只该在分享到的那棵子树里被带上，
+// 不该跟着用户跑到站点的别处去。
+func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expires time.Time) {
+	if token == "" {
+		return
+	}
+	// 默认 12 小时：目录分享要能在页面里正常翻页，太短会在浏览中途失效。
+	maxAge := int((12 * time.Hour).Seconds())
+	if !expires.IsZero() {
+		left := int(time.Until(expires).Seconds())
+		if left <= 0 {
+			return // 已经过期，不必下发
+		}
+		if left < maxAge {
+			maxAge = left
+		}
+	}
+	p := strings.TrimSuffix(scope, "/") + "/"
+	if strings.HasPrefix(p, "//") {
+		p = "/"
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     shareCookieName,
+		Value:    token,
+		Path:     p,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.TLSCert != "",
+	})
+}
+
 // sessionCookiePath 返回 cookie 的作用路径。
 //
 // 必须带上访问前缀：部署在 /files 下时，cookie 若只写 Path=/，
@@ -405,6 +471,19 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 
 // permOf 按请求身份计算对 urlPath 的权限。
 func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
+	// 分享令牌：换来的只是「不用登录」，权限恒为只读，且严格限制在令牌范围内。
+	//
+	// ⚠️ 这一支必须放在这里（而不是只放在 authorize 里）：
+	// checkPerm 走的就是 permOf，而它决定了**页面数据**里的 perms 与
+	// auth_required。只在 authorize 里认令牌的话，分享访客拿到的页面是
+	// 「需要登录、权限全无」的空壳 —— 前端会弹登录框，正好是分享要避免的事。
+	if tok := shareTokenOf(r); tok != "" {
+		if k, err := s.keys.Verify(tok); err == nil &&
+			k.KindOf() == uploadkey.KindRead && k.AllowsPath(urlPath) {
+			return auth.PermRead, "share:" + k.Prefix, true
+		}
+	}
+
 	user, pass, hasCred, cookieUser := s.credsOf(r)
 	switch {
 	case hasCred:
@@ -439,6 +518,26 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
 		return permResult{}, false
+	}
+
+	// 分享链接：带 `?share=<token>`（或那条 cookie）的请求，按令牌授予**只读**权限。
+	//
+	// 它换来的只是「不用登录」，不是「能读任何东西」—— 令牌自身限定了范围，
+	// 超出范围的请求会退回去走正常鉴权（于是拿到 401，而不是悄悄放行）。
+	//
+	// 写到权限判定之前，是因为这就是一次正常的鉴权判定，
+	// 只是凭据从「账号密码」换成了「分享令牌」。
+	if tok := shareTokenOf(r); tok != "" {
+		if k, err := s.keys.Verify(tok); err == nil &&
+			k.KindOf() == uploadkey.KindRead && k.AllowsPath(urlPath) {
+			// 首次用 `?share=` 打开时下发 cookie，让页面后续的 XHR 也认得出。
+			// 只认查询参数那一次，避免每次请求都重设 Max-Age。
+			if r.URL.Query().Get("share") != "" {
+				s.setShareCookie(w, tok, k.Scope, k.ExpiresAt)
+			}
+			// 恒为只读：写操作会被 requireWrite 挡下。
+			return permResult{Perm: auth.PermRead, User: "share:" + k.Prefix, Authenticated: true}, true
+		}
 	}
 
 	// hadCookie 单独记一下：credsOf 解析失败时 cookieUser 是空的，
@@ -685,6 +784,13 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 			}
 			fmt.Fprintln(w, name)
 		}
+		return
+	}
+
+	// 命令行工具（wget / curl 这类）要的是**带链接的列表**，不是 SPA 外壳。
+	// 走这一支的判据与 ?json / ?simple 一致：由客户端用 Accept 声明要什么。
+	if isToolClient(r) {
+		s.renderLinkIndex(w, r, listing, shareTokenOf(r))
 		return
 	}
 

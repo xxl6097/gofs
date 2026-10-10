@@ -20,6 +20,7 @@ type keyView struct {
 	Name       string `json:"name"`
 	Prefix     string `json:"prefix"`
 	Scope      string `json:"scope"`
+	Kind       string `json:"kind"`
 	Creator    string `json:"creator"`
 	Status     string `json:"status"`
 	CreatedAt  string `json:"created_at"`
@@ -37,6 +38,8 @@ type keyCreateRequest struct {
 	Scope      string `json:"scope"`
 	TTLSeconds int64  `json:"ttl_seconds"` // 0 表示永不过期
 	Note       string `json:"note"`
+	// Kind 为凭证类型："upload"（默认）或 "read"（分享链接）。
+	Kind string `json:"kind"`
 }
 
 // handleKeys 管理上传密钥。
@@ -122,11 +125,30 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 		return
 	}
 
-	// 密钥的作用范围必须落在创建者自己有写权限的目录内，
-	// 否则等于把权限借给了自己够不到的地方。
+	// 作用范围必须落在创建者自己够得着的地方，否则等于把权限借给了自己够不到的地方。
+	//
+	// 要求的权限按类型区分：上传密钥要**写**权限（能传才能授），
+	// 分享链接要**读**权限（能看才能分享）。两边的共同原则都是
+	// 「只能授出自己有的」。
+	kind := uploadkey.KindUpload
+	need := auth.PermReadWrite
+	needDesc := "写"
+	if req.Kind == uploadkey.KindRead {
+		kind = uploadkey.KindRead
+		need = auth.PermRead
+		needDesc = "读"
+	}
 	scope := fsutil.CleanURLPath(req.Scope)
-	if sp := s.checkPerm(r, scope); sp != auth.PermReadWrite {
-		http.Error(w, fmt.Sprintf("403 Forbidden: 你对目录 %s 没有写权限，无法签发该范围的密钥", scope),
+	if sp := s.checkPerm(r, scope); sp < need {
+		http.Error(w, fmt.Sprintf("403 Forbidden: 你对 %s 没有%s权限，无法签发该范围的凭证", scope, needDesc),
+			http.StatusForbidden)
+		return
+	}
+	// 分享链接会把内容**公开**出去（拿到链接的人不需要登录），
+	// 所以额外要求服务开启了上传/共享能力，避免在一个只读实例上
+	// 悄悄开出一条公开通道。
+	if kind == uploadkey.KindRead && !s.cfg.AllowUpload && !s.cfg.AllowKeys {
+		http.Error(w, "403 Forbidden: 本服务未开启任何可写的功能，无法创建分享链接",
 			http.StatusForbidden)
 		return
 	}
@@ -137,6 +159,7 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 		TTL:     time.Duration(req.TTLSeconds) * time.Second,
 		Creator: creator,
 		Note:    req.Note,
+		Kind:    kind,
 	})
 	if err != nil {
 		s.writeErr(w, err)
@@ -147,8 +170,12 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	if !k.Permanent() {
 		ttlDesc = "有效期至 " + k.ExpiresAt.Format(time.RFC3339)
 	}
-	s.logger.Infof("签发上传密钥 %s（%s，范围 %s，%s，创建者 %s）",
-		k.Prefix, k.Name, k.Scope, ttlDesc, creator)
+	if kind == uploadkey.KindRead {
+		s.logger.Infof("创建分享链接 %s（范围 %s，%s，创建者 %s）", k.Prefix, k.Scope, ttlDesc, creator)
+	} else {
+		s.logger.Infof("签发上传密钥 %s（%s，范围 %s，%s，创建者 %s）",
+			k.Prefix, k.Name, k.Scope, ttlDesc, creator)
+	}
 
 	s.writeJSONStatus(w, http.StatusCreated, map[string]any{
 		"key":   s.keyView(k),
@@ -196,6 +223,7 @@ func (s *Server) keyView(k *uploadkey.Key) keyView {
 		Name:       k.Name,
 		Prefix:     k.Prefix,
 		Scope:      k.Scope,
+		Kind:       k.KindOf(),
 		Creator:    k.Creator,
 		Status:     k.Status(now),
 		CreatedAt:  k.CreatedAt.Format(time.RFC3339),

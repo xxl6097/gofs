@@ -49,8 +49,14 @@ type Key struct {
 	Name   string `json:"name"`
 	Prefix string `json:"prefix"` // 明文前若干位，仅供人工识别
 	Hash   string `json:"hash"`   // sha256(明文) 的十六进制摘要
-	// Scope 是允许上传的路径前缀，例如 "/uploads"；"/" 表示不限。
-	Scope      string    `json:"scope"`
+	// Scope 是允许访问的路径前缀，例如 "/uploads"；"/" 表示不限。
+	//
+	// 对上传密钥是「能传到哪」，对分享链接是「能读到哪」。
+	Scope string `json:"scope"`
+	// Kind 区分这把凭证能做什么：
+	//   ""/"upload" 上传密钥（历史数据没有这个字段，按上传处理）
+	//   "read"      分享链接：只读，不需要登录
+	Kind       string    `json:"kind,omitempty"`
 	Creator    string    `json:"creator"`
 	CreatedAt  time.Time `json:"created_at"`
 	ExpiresAt  time.Time `json:"expires_at"` // 零值表示永不过期
@@ -87,6 +93,25 @@ func (k *Key) Remaining(now time.Time) time.Duration {
 	return d
 }
 
+// 凭证类型。
+const (
+	// KindUpload 是上传密钥：只能往 Scope 里传文件（默认）。
+	KindUpload = "upload"
+	// KindRead 是分享链接：只能读 Scope 下的内容，**不需要登录**。
+	KindRead = "read"
+)
+
+// KindOf 返回归一化后的类型。
+//
+// 历史数据里没有 kind 字段，一律当作上传密钥 —— 它们本来就是上传用的，
+// 不能因为加了这个字段就把老密钥的语义变掉。
+func (k *Key) KindOf() string {
+	if k.Kind == KindRead {
+		return KindRead
+	}
+	return KindUpload
+}
+
 // CreateOptions 是创建密钥的参数。
 type CreateOptions struct {
 	Name    string
@@ -94,6 +119,8 @@ type CreateOptions struct {
 	TTL     time.Duration // 0 表示永不过期
 	Creator string
 	Note    string
+	// Kind 为凭证类型，留空按 KindUpload 处理。
+	Kind string
 }
 
 // Store 保存全部密钥，可选择持久化到磁盘。
@@ -243,6 +270,14 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 		name = "未命名密钥"
 	}
 
+	kind := opts.Kind
+	if kind != KindRead {
+		kind = KindUpload
+	}
+	if name == "未命名密钥" && kind == KindRead {
+		name = "分享链接"
+	}
+
 	now := time.Now()
 	k := &Key{
 		ID:        id,
@@ -250,6 +285,7 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 		Prefix:    visiblePrefix(token),
 		Hash:      hashToken(token),
 		Scope:     scope,
+		Kind:      kind,
 		Creator:   opts.Creator,
 		CreatedAt: now,
 		Note:      strings.TrimSpace(opts.Note),
