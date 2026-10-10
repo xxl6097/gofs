@@ -32,26 +32,8 @@
     return '不到 1 分钟后过期';
   }
 
-  // copyText 优先用剪贴板 API；非安全上下文（纯 HTTP）下退回 execCommand。
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.top = '-1000px';
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      var ok = false;
-      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-      ta.remove();
-      ok ? resolve() : reject(new Error('浏览器拒绝了复制操作，请手动选中复制'));
-    });
-  }
+  // copyText 复用 app.js 导出的实现，避免同一段逻辑维护两份。
+  var copyText = G.copyText;
 
   function serviceBase() {
     return location.origin + (G.data.path_prefix || '');

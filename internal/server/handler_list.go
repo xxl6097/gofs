@@ -121,7 +121,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		UploadDated:      s.cfg.UploadDated(),
 		UploadDateDir:    s.cfg.UploadDateDir(time.Now()),
 		UploadDateLayout: s.cfg.UploadDateLayout,
-		EditMaxSize:      s.cfg.EditMaxSize,
+		EditMaxSize:      s.settings.EditMaxSize(),
 		AllowKeys:        s.cfg.AllowKeys && p.Perm == auth.PermReadWrite,
 		UploadMaxSize:    s.settings.UploadMaxSize(),
 		AllowSettings:    admin,
@@ -243,7 +243,7 @@ func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath 
 		Perms:        permsData{},
 		AuthOn:       true,
 		AuthRequired: true,
-		EditMaxSize:  s.cfg.EditMaxSize,
+		EditMaxSize:  s.settings.EditMaxSize(),
 	})
 }
 

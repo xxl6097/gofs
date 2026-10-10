@@ -29,6 +29,11 @@ type settingsReply struct {
 	UploadMaxSizeDefault int64 `json:"upload_max_size_default"`
 	// UploadMaxSizeUnlimited 表示当前是否处于「不限制」状态。
 	UploadMaxSizeUnlimited bool `json:"upload_max_size_unlimited"`
+
+	// EditMaxSize 为当前生效的在线编辑大小上限，0 表示不限制。
+	EditMaxSize int64 `json:"edit_max_size"`
+	// EditMaxSizeDefault 为启动参数里的取值，用于「恢复默认」。
+	EditMaxSizeDefault int64 `json:"edit_max_size_default"`
 	// UploadDateDir 为当前的上传归档目录（未开启归档时为空串）。
 	UploadDateDir string `json:"upload_date_dir,omitempty"`
 }
@@ -40,6 +45,7 @@ type settingsReply struct {
 type settingsRequest struct {
 	Root          *string `json:"root"`
 	UploadMaxSize *int64  `json:"upload_max_size"`
+	EditMaxSize   *int64  `json:"edit_max_size"`
 }
 
 // handleSettings 读取或修改服务级设置（根目录、单文件上传上限）。
@@ -68,6 +74,8 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		UploadMaxSize:          s.settings.UploadMaxSize(),
 		UploadMaxSizeDefault:   s.cfg.UploadMaxSize,
 		UploadMaxSizeUnlimited: s.settings.UploadMaxSize() == 0,
+		EditMaxSize:            s.settings.EditMaxSize(),
+		EditMaxSizeDefault:     s.cfg.EditMaxSize,
 	}
 	if s.cfg.UploadDated() {
 		rep.UploadDateDir = s.cfg.UploadDateDir(time.Now())
@@ -97,7 +105,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
 		return
 	}
-	if req.Root == nil && req.UploadMaxSize == nil {
+	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil {
 		http.Error(w, "400 Bad Request: 没有需要修改的设置项", http.StatusBadRequest)
 		return
 	}
@@ -124,6 +132,23 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		s.settings.SetUploadMaxSize(*req.UploadMaxSize)
 		s.logger.Infof("单文件上传上限：%s → %s",
 			humanSize(old), humanSize(s.settings.UploadMaxSize()))
+	}
+
+	if req.EditMaxSize != nil {
+		// 编辑上限**没有「不限制」这一档**：打开一个文件要把整份内容读进内存，
+		// 放开等于给一个几 GB 的「文本」文件留个口子。
+		// 启动参数 --edit-max-size 也一直是「必须为正整数」，这里保持一致 ——
+		// 否则「0 表示不限制」和「0 会被判成超过上限」会互相打架，
+		// 结果是把所有文件都判成超限（每个都 413）。
+		if *req.EditMaxSize <= 0 {
+			http.Error(w, "400 Bad Request: 编辑上限必须为正整数（不支持不限制）",
+				http.StatusBadRequest)
+			return
+		}
+		old := s.settings.EditMaxSize()
+		s.settings.SetEditMaxSize(*req.EditMaxSize)
+		s.logger.Infof("在线编辑上限：%s → %s",
+			humanSize(old), humanSize(s.settings.EditMaxSize()))
 	}
 
 	s.writeJSON(w, s.buildSettings(true))

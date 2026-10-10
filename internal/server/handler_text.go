@@ -127,9 +127,9 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "400 Bad Request: 目标是目录，请指定文件", http.StatusBadRequest)
 		return
 	}
-	if st.Size() > s.cfg.EditMaxSize {
+	if st.Size() > s.settings.EditMaxSize() {
 		http.Error(w, fmt.Sprintf("413 Payload Too Large: 文件 %s 超过在线编辑上限 %s，请下载后编辑",
-			formatBytes(st.Size()), formatBytes(s.cfg.EditMaxSize)), http.StatusRequestEntityTooLarge)
+			formatBytes(st.Size()), formatBytes(s.settings.EditMaxSize())), http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 		Hash:     contentHash(raw),
 		Editable: true,
 		ReadOnly: p.Perm != auth.PermReadWrite,
-		MaxSize:  s.cfg.EditMaxSize,
+		MaxSize:  s.settings.EditMaxSize(),
 		MaxSave:  textfile.MaxSaveSize,
 	})
 }
@@ -226,7 +226,7 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 		}
 		baseInfo = st
 		// 只在体积可控时读原内容，避免为了判定换行把大文件整个读进内存。
-		if st.Size() <= s.cfg.EditMaxSize {
+		if st.Size() <= s.settings.EditMaxSize() {
 			existing, _ = os.ReadFile(abs)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {

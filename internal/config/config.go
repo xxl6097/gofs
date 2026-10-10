@@ -498,7 +498,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.BoolVar(&cfg.AllowAll, "allow-all", cfg.AllowAll, "允许所有操作")
 	fs.BoolVar(&cfg.AllowUpload, "allow-upload", cfg.AllowUpload, "允许上传文件/目录")
 	fs.BoolVar(&cfg.AllowEdit, "allow-edit", cfg.AllowEdit, "允许在线编辑文本文件（未指定时跟随 --allow-upload）")
-	fs.Int64Var(&cfg.EditMaxSize, "edit-max-size", cfg.EditMaxSize, "在线编辑允许打开的最大文件尺寸（字节）")
+	fs.Int64Var(&cfg.EditMaxSize, "edit-max-size", cfg.EditMaxSize,
+		"在线编辑允许打开的最大文件尺寸（字节），必须为正整数")
 	fs.BoolVar(&cfg.AllowKeys, "allow-keys", cfg.AllowKeys, "允许管理上传密钥（未指定时跟随 --allow-upload）")
 	fs.StringVar(&cfg.KeyFile, "key-file", cfg.KeyFile, "上传密钥存储路径，置空则只保存在内存中")
 	fs.BoolVar(&noUserManage, "no-user-manage", false, "禁止在页面上增删改用户")
@@ -799,7 +800,8 @@ func usageText() string {
       --allow-upload         允许上传
       --allow-edit           允许在线编辑文本文件
                              （未显式指定时跟随 --allow-upload 与 -A）
-      --edit-max-size <n>    在线编辑允许打开的最大文件尺寸，默认 2MiB
+      --edit-max-size <n>    在线编辑允许打开的最大文件尺寸，默认 2MiB，必须为正整数
+                             （登录后也可以在页面的「服务设置」里改，改完立刻生效）
       --allow-keys           允许管理上传密钥（未指定时跟随 --allow-upload）
       --key-file <path>      上传密钥存储路径，默认 <用户配置目录>/gofs/keys.json；
                              置空则只保存在内存中，重启即失效

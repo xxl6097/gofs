@@ -73,7 +73,13 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveArchive 解析并校验压缩包路径，返回 Reader 供调用方使用。
-func (s *Server) resolveArchive(w http.ResponseWriter, urlPath string) (archive.Reader, string, bool) {
+//
+// ⚠️ 这里必须做**读权限**校验，不能只靠调用方记得做。
+// /__gofs__/extract 是一条独立路由，不经过 handleRoot 的授权，而它既能
+// 列出包内清单、又能取出包内单个文件 —— 少这一道，任何能连上服务的人
+// 都能读到服务目录里任意压缩包的内容，绕过全部路径级权限。
+// （历史教训：这一道原本是没有的，见 TestExtractListRequiresAuth。）
+func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath string) (archive.Reader, string, bool) {
 	if !s.cfg.AllowExtract {
 		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
 		return nil, "", false
@@ -85,6 +91,16 @@ func (s *Server) resolveArchive(w http.ResponseWriter, urlPath string) (archive.
 	clean := fsutil.CleanURLPath(urlPath)
 	if clean == "/" {
 		http.Error(w, "400 Bad Request: 缺少 path 参数", http.StatusBadRequest)
+		return nil, "", false
+	}
+	// 读这份压缩包需要对该路径有读权限。
+	// authorize 会按需写 401 / 403 / 429，并计入认证失败限速。
+	p, ok := s.authorize(w, r, clean)
+	if !ok {
+		return nil, "", false
+	}
+	if p.Perm < auth.PermRead {
+		http.Error(w, "403 Forbidden: 没有读取该压缩包的权限", http.StatusForbidden)
 		return nil, "", false
 	}
 	abs, err := s.res.Resolve(clean)
@@ -122,7 +138,7 @@ func (s *Server) resolveArchive(w http.ResponseWriter, urlPath string) (archive.
 // extractList 列出压缩包内容，或流式输出包内单个文件。
 func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Query().Get("path")
-	rd, clean, ok := s.resolveArchive(w, urlPath)
+	rd, clean, ok := s.resolveArchive(w, r, urlPath)
 	if !ok {
 		return
 	}

@@ -113,7 +113,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"perms":           s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
 		"upload_dated":    s.cfg.UploadDated(),
 		"allow_keys":      s.cfg.AllowKeys && perm == auth.PermReadWrite,
-		"edit_max_size":   s.cfg.EditMaxSize,
+		"edit_max_size":   s.settings.EditMaxSize(),
 		"upload_max_size": s.settings.UploadMaxSize(),
 		"allow_settings":  admin,
 		"allow_users":     s.cfg.AllowUserManage && admin,

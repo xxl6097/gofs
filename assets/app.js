@@ -214,6 +214,11 @@
     try {
       res = await fetch(url, opts);
     } catch (e) {
+      // ⚠️ 主动取消必须原样抛出。
+      // 包成 new Error('网络错误：…') 会把 AbortError 这个名字丢掉，
+      // 上层就再也分不清「用户点了取消」和「网线断了」——
+      // 结果就是点了取消却弹出「下载失败：网络错误」。
+      if (isAbort(e)) throw e;
       throw new Error('网络错误：' + e.message);
     }
     if (res.status === 401) {
@@ -472,7 +477,75 @@
   }
 
   // progressToast 返回一个不会自动消失的提示，用于展示下载进度。
-  function progressToast(title) {
+  // copyText 复制一段文本到剪贴板。
+  //
+  // 优先用剪贴板 API；非安全上下文（纯 HTTP 部署）下它不存在，
+  // 退回 execCommand —— 否则「复制链接」在 http:// 下会直接不可用。
+  function copyText(text) {
+    // 剪贴板 API 只在安全上下文里有；而且**有也不代表能用** ——
+    // 文档失焦、权限被拒时它会 reject。以前只在「没有这个 API」时退回，
+    // 于是那两种情况就直接报错了。现在失败也退。
+    if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return legacyCopy(text);
+      });
+    }
+    return legacyCopy(text);
+  }
+
+  // legacyCopy 用已经废弃但仍然可用的 execCommand 兜底。
+  function legacyCopy(text) {
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      ta.remove();
+      ok ? resolve() : reject(new Error('浏览器拒绝了复制操作，请手动选中复制'));
+    });
+  }
+
+  // fileLink 返回一个可以直接粘到浏览器地址栏的绝对地址。
+  //
+  // 用 location.origin 而不是相对路径：复制出去的链接是给别人的，
+  // 相对路径到了别人那里就断了。
+  function fileLink(path) {
+    return location.origin + fileURL(path);
+  }
+
+  // copyEntryLink 复制某个文件 / 目录的链接。
+  async function copyEntryLink(e) {
+    var url = fileLink(e.path);
+    try {
+      await copyText(url);
+    } catch (err) {
+      toast('err', '复制失败：' + err.message);
+      return;
+    }
+    // 开了鉴权时如实提醒：链接本身不含凭据，对方得先登录。
+    // 不说的话，发出去的人会以为对方点开就能看。
+    if (DATA.auth_on) {
+      toast('ok', '链接已复制（对方需要登录后才能访问）', 4200);
+    } else {
+      toast('ok', '链接已复制');
+    }
+  }
+
+  // isAbort 判断一个错误是不是「用户主动取消」。
+  //
+  // fetch 与 body reader 在 abort 时都以 AbortError 拒绝，要把它和
+  // 真正的网络故障区分开 —— 否则用户点了取消，界面却报「下载失败」。
+  function isAbort(err) {
+    return !!err && (err.name === 'AbortError' || err.name === 'TimeoutError');
+  }
+
+  function progressToast(title, onCancel) {
     var el = document.createElement('div');
     el.className = 'toast info';
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -483,9 +556,26 @@
     m.className = 'msg';
     m.textContent = title;
     el.appendChild(m);
+    // 「取消」按钮只在调用方给了回调时才出现（上传进度等不可取消的场景不显示）。
+    var cancelBtn = null;
+    if (onCancel) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'toast-action';
+      cancelBtn.textContent = '取消';
+      cancelBtn.onclick = function () {
+        // 立刻禁用，避免连点触发第二次 abort。
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = '取消中…';
+        onCancel();
+      };
+      el.appendChild(cancelBtn);
+    }
     $('toasts').appendChild(el);
     var killed = false;
     var sp = makeSpeedometer();
+    // 结束（成功 / 失败 / 取消）后取消按钮就没意义了，收掉。
+    function dropCancel() { if (cancelBtn) { cancelBtn.remove(); cancelBtn = null; } }
     return {
       update: function (loaded, total) {
         if (killed) return;
@@ -497,6 +587,7 @@
       done: function (msg) {
         if (killed) return;
         killed = true;
+        dropCancel();
         el.className = 'toast ok';
         svg.innerHTML = '<path d="M20 6 9 17l-5-5"/>';
         m.textContent = msg;
@@ -509,6 +600,7 @@
       fail: function (msg) {
         if (killed) return;
         killed = true;
+        dropCancel();
         el.className = 'toast err';
         svg.innerHTML = '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>';
         m.textContent = msg;
@@ -522,15 +614,44 @@
   }
 
   // downloadEntry 下载单个文件并显示进度。
+  // MAX_ZIP_URL 是「打包下载用 GET 拼 URL」的长度上限。
+  //
+  // 超过就退回 POST：网关对 URL 长度有硬限制（nginx 默认 8KB），
+  // 而选中的路径数量是用户可控的。留一半余量给其余查询参数与编码膨胀。
+  var MAX_ZIP_URL = 4000;
+
+  // nativeDownload 交给**浏览器自己**去下载。
+  //
+  // 不再走 fetch → blob → <a download> 那套，理由有两个：
+  //   - blob 要求整个文件先读进内存，几百 MB 的文件足以把标签页拖死；
+  //   - 浏览器自带的下载管理器有进度、暂停、续传、取消，比我们自己做的完整。
+  //
+  // 鉴权靠登录时下发的会话 cookie：浏览器自己发起的请求会自动带上它。
+  // 这正是当初引入 cookie 的原因 —— 否则裸 <a href> 拿不到 Authorization 头，
+  // 只会收到 401，也就只能绕道 blob。
+  //
+  // 文件名以服务端返回的 Content-Disposition 为准；这里传的 filename
+  // 只是让没有那个头时也能存成合理的名字。
+  function nativeDownload(url, filename) {
+    var a = document.createElement('a');
+    a.href = url;
+    // 始终设置 download：空串按规范表示「用服务端 Content-Disposition 里的名字」。
+    // 条件设置（filename 为空就跳过）会让这个元素在行为上分叉 ——
+    // 打包下载那条路径就没有任何标记表明它是一次下载。
+    a.download = filename || '';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  // downloadEntry 下载单个文件。
+  //
+  // 直接让浏览器下：进度、暂停、续传、取消都由浏览器的下载管理器负责，
+  // 页面里不再需要自己的进度条与取消按钮（那套只在「必须走 fetch」的
+  // 场景下才保留，见打包下载里的 POST 分支）。
   function downloadEntry(e) {
-    var t = progressToast('下载 ' + e.name);
-    downloadFile(fileURL(e.path), e.name, function (loaded, total) {
-      t.update(loaded, total);
-    }).then(function () {
-      t.done('已下载 ' + e.name);
-    }).catch(function (err) {
-      t.fail('下载失败：' + err.message);
-    });
+    nativeDownload(fileURL(e.path), e.name);
   }
 
   // 对每一段分别编码，保留 / 分隔符。
@@ -657,6 +778,8 @@
     if (/^(mp4|mov|mkv|avi|webm|flv|m4v|ogv)$/.test(ext)) return 'video';
     if (/^(mp3|wav|flac|aac|ogg|opus|m4a)$/.test(ext)) return 'audio';
     if (/^(pdf)$/.test(ext)) return 'pdf';
+    // Office 文档（OOXML）。老的 doc/xls/ppt 是二进制格式，解析不了，不在此列。
+    if (/^(docx|xlsx|pptx|docm|xlsm|pptm)$/.test(ext)) return 'office';
     if (/^(go|js|ts|jsx|tsx|java|py|rb|rs|c|h|cpp|cs|php|sh|sql|json|ya?ml|xml|html|css|toml|ini|conf|md)$/.test(ext)) return 'code';
     return 'file';
   }
@@ -665,6 +788,7 @@
     download: '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/><path d="M4 20h16"/>',
     preview: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',
     move: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 13h7"/><path d="m13.5 10.5 2.5 2.5-2.5 2.5"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/>',
     folder: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
     up: '<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',
     unzip: '<path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="m9 13 3 3 3-3"/>',
@@ -1124,6 +1248,9 @@
           actions.push({ kind: 'list', label: '内容', run: function () { openArchivePreview(e); } });
         }
       }
+      // 「链接」对所有能读到的人都有意义，不受写权限约束 ——
+      // 只读账号同样需要把文件地址发给别人。
+      actions.push({ kind: 'link', label: '链接', run: function () { copyEntryLink(e); } });
       if (can('write')) {
         // 移动排在重命名前面：改个名字用它自己的输入框就够，
         // 挪窝才是需要挑目标的那件事。
@@ -1145,15 +1272,18 @@
         ops.appendChild(b);
       });
 
-      // 窄屏把上面这些按钮全藏起来，只留这一个「更多」；宽屏反过来。
-      // 显隐交给 CSS，避免 JS 的断点判断跟 CSS 打架。
-      if (actions.length > 1) {
-        var moreBtn = makeOpBtn('more', '更多', 'ops-more');
-        moreBtn.title = '更多操作';
-        moreBtn.setAttribute('aria-label', '更多操作');
-        moreBtn.onclick = function () { openRowActions(e, actions); };
-        ops.appendChild(moreBtn);
-      }
+      // 「更多」是这排按钮的兜底出口，所以**总是**渲染：
+      //   正常宽度下 display:none 不占位；
+      //   放不下（.ops-tight）或窄屏时才出现。
+      //
+      // 之前只在 actions.length > 1 时才建它 —— 那样一个只有单项操作的行
+      // （例如只读账号只有一个「链接」）一旦放不下，就会变成一格空白，
+      // 那一项操作彻底点不到了。
+      var moreBtn = makeOpBtn('more', '更多', 'ops-more');
+      moreBtn.title = '更多操作';
+      moreBtn.setAttribute('aria-label', '更多操作');
+      moreBtn.onclick = function () { openRowActions(e, actions); };
+      ops.appendChild(moreBtn);
 
       tdOps.appendChild(ops);
       tr.appendChild(tdOps);
@@ -1162,6 +1292,84 @@
 
     syncSelection();
     renderSortHeader();
+    collapseWrappedOps();
+  }
+
+  // collapseWrappedOps 决定每一行的操作按钮是铺开还是收进「更多」。
+  //
+  // 为什么不能用一个固定的媒体查询断点：按钮数量是**变化**的 ——
+  // 目录只有「打开/链接/移动/重命名/删除」，而一个压缩包还多出
+  // 「下载/预览/编辑/解压/内容」，能不能放下取决于当前账号的权限、
+  // 文件类型和列宽三者。同一个宽度下，有的行放得下、有的放不下。
+  //
+  // 所以按实际宽度测：把每个按钮的实际宽度加起来（含间距），
+  // 超过格子宽度就说明放不下。
+  //
+  // ⚠️ 不能用 scrollWidth > clientWidth 来判断：.ops 是 nowrap +
+  // justify-content:flex-end，放不下时按钮是往**左**溢出的，
+  // 而可滚动溢出区域只往右（行内结束方向）延伸 ——
+  // 实测 7 个按钮共 234px 挤在 172px 的格子里，scrollWidth 依然是 172。
+  // 靠它判断的话收起逻辑永远不会触发。
+  //
+  // 按「按钮集合」分组只测第一行：同一组的按钮完全相同、列宽也一样，
+  // 测一次就够。否则两千行就是两千次布局读取 —— 那点延迟在切换目录时
+  // 是看得见的。
+  // opsOverflows 判断这一排按钮在当前格子里放不放得下。
+  //
+  // 把子元素的实测宽度累加（含间距）再和容器宽度比 —— 方向无关，
+  // 不像 scrollWidth 那样只在向右溢出时才认账。
+  function opsOverflows(ops) {
+    var kids = ops.children;
+    if (!kids.length) return false;
+    var need = 0;
+    var shown = 0;
+    for (var i = 0; i < kids.length; i++) {
+      var w = kids[i].getBoundingClientRect().width;
+      // display:none 的子元素（未展开时的「更多」）不是 flex 项，
+      // 既不占宽度也不占间距 —— 把它算进去会让判定偏保守。
+      if (w === 0) continue;
+      need += w;
+      shown++;
+    }
+    if (shown > 1) {
+      var gap = parseFloat(getComputedStyle(ops).columnGap) || 0;
+      need += gap * (shown - 1);
+    }
+    // +1 的容差：亚像素宽度会让「刚好放下」被误判成溢出。
+    return need > ops.clientWidth + 1;
+  }
+
+  function collapseWrappedOps() {
+    var rows = document.querySelectorAll('#tbody tr');
+    if (!rows.length) return;
+
+    var groups = {};      // 分组键 -> 该组的 .ops 元素
+    var probes = [];      // 每组取一个代表来测量
+
+    Array.prototype.forEach.call(rows, function (tr) {
+      var ops = tr.querySelector('.ops');
+      if (!ops) return;
+      var kinds = [];
+      Array.prototype.forEach.call(ops.querySelectorAll('.op-btn'), function (b) {
+        if (b.dataset.kind !== 'more') kinds.push(b.dataset.kind);
+      });
+      var key = kinds.join(',');
+      if (groups[key]) { groups[key].push(ops); return; }
+      groups[key] = [ops];
+      probes.push({ key: key, ops: ops });
+    });
+
+    // 先读完再写：读写交替会让每次读都触发一次强制重排。
+    var tight = {};
+    probes.forEach(function (p) {
+      tight[p.key] = opsOverflows(p.ops);
+    });
+
+    Object.keys(groups).forEach(function (key) {
+      groups[key].forEach(function (ops) {
+        ops.classList.toggle('ops-tight', !!tight[key]);
+      });
+    });
   }
 
   // openRowActions 是窄屏下的操作入口：把整行操作铺成一个列表。
@@ -1522,15 +1730,24 @@
       var reader = res.body.getReader();
       var chunks = [];
       var received = 0;
-      for (;;) {
-        var step = await reader.read();
-        if (step.done) break;
-        chunks.push(step.value);
-        received += step.value.length;
-        onProgress(received, len);
+      try {
+        for (;;) {
+          var step = await reader.read();
+          if (step.done) break;
+          chunks.push(step.value);
+          received += step.value.length;
+          onProgress(received, len);
+        }
+      } catch (err) {
+        // 取消时 read() 以 AbortError 拒绝。顺手把流也取消掉，
+        // 让服务端尽早知道没人要这份数据了（否则它会一直写完）。
+        try { await reader.cancel(); } catch (e) { /* 已经断了 */ }
+        throw err;
       }
       blob = new Blob(chunks, { type: res.headers.get('content-type') || 'application/octet-stream' });
     } else {
+      // 这条路径拿不到中途的控制权（blob() 是一次性的），
+      // 但 abort 仍然能让 fetch 本身中断。
       blob = await res.blob();
     }
 
@@ -2381,6 +2598,9 @@
       case 'image':
       case 'pdf':
         return true;
+      case 'office':
+        // 内容由服务端提取，与浏览器能力无关。
+        return true;
       case 'video':
         return mediaPlayable(ext, true);
       case 'audio':
@@ -2416,6 +2636,7 @@
       full: true,
       footer: modalFoot([
         { label: '关闭', onClick: function () { m.close(); } },
+        { label: '复制链接', onClick: function () { copyEntryLink(entry); } },
         {
           label: '下载',
           cls: 'primary',
@@ -2433,7 +2654,183 @@
     });
 
     body.textContent = '';
+    // Office 文档要先向服务端取结构化内容再渲染，走不了「给个地址就完事」那条路。
+    if (kind === 'office') {
+      renderOfficePreview(body, entry);
+      return;
+    }
+
     body.appendChild(previewNode(kind, fileURL(entry.path), entry));
+  }
+
+  // 服务端的 Office 内容提取端点。
+  var OFFICE_EP = raw('/__gofs__/office');
+
+  // renderOfficePreview 取回文档内容并渲染。
+  //
+  // ⚠️ 全程只用 textContent 与 createElement，**不碰 innerHTML**。
+  // 服务端返回的是中性模型（块 / 表格 / 文本片段），文档里的内容再刁钻
+  // 也只会变成文本节点 —— 数据与标记在架构上就是分开的，不依赖转义是否周全。
+  async function renderOfficePreview(body, entry) {
+    var tip = document.createElement('div');
+    tip.className = 'office-tip';
+    tip.textContent = '正在解析文档…';
+    body.textContent = '';
+    body.appendChild(tip);
+
+    var doc;
+    try {
+      var res = await apiFetch(OFFICE_EP + '?path=' + encodeURIComponent(entry.path));
+      if (!res.ok) {
+        throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+      }
+      doc = await res.json();
+    } catch (err) {
+      tip.textContent = '无法预览：' + err.message;
+      tip.classList.add('office-tip-error');
+      return;
+    }
+
+    body.textContent = '';
+    var root = document.createElement('div');
+    root.className = 'office-doc';
+    body.appendChild(root);
+
+    var parts = doc.parts || [];
+    if (!parts.length) {
+      root.appendChild(textEl('div', 'office-tip', '这个文档里没有可显示的内容。'));
+      return;
+    }
+
+    // 多部分（工作表 / 幻灯片）时给个切换条；只有一个部分就不必了。
+    var showTabs = parts.length > 1;
+    var pane = document.createElement('div');
+    pane.className = 'office-pane';
+    if (showTabs) {
+      root.appendChild(buildOfficeTabs(parts, pane));
+    }
+    root.appendChild(pane);
+    renderOfficePart(pane, parts[0]);
+
+    if (doc.truncated) {
+      root.appendChild(textEl('div', 'office-note',
+        '内容较多，只显示了前面一部分。完整内容请下载后查看。'));
+    }
+    (doc.notes || []).forEach(function (n) {
+      root.appendChild(textEl('div', 'office-note', n));
+    });
+  }
+
+  // buildOfficeTabs 造出工作表 / 幻灯片切换条。
+  function buildOfficeTabs(parts, pane) {
+    var bar = document.createElement('div');
+    bar.className = 'office-tabs';
+    var btns = [];
+    parts.forEach(function (part, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'office-tab' + (i === 0 ? ' active' : '');
+      b.textContent = part.name || ('第 ' + (i + 1) + ' 部分');
+      b.onclick = function () {
+        btns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        renderOfficePart(pane, part);
+      };
+      btns.push(b);
+      bar.appendChild(b);
+    });
+    return bar;
+  }
+
+  // renderOfficePart 渲染一个部分（正文 / 一张工作表 / 一张幻灯片）。
+  function renderOfficePart(pane, part) {
+    pane.textContent = '';
+    var blocks = (part && part.blocks) || [];
+    if (!blocks.length) {
+      pane.appendChild(textEl('div', 'office-tip', '（这一部分没有文字内容）'));
+      return;
+    }
+    blocks.forEach(function (b) {
+      var node = buildOfficeBlock(b);
+      if (node) pane.appendChild(node);
+    });
+  }
+
+  // buildOfficeBlock 把一块内容变成 DOM 节点。
+  function buildOfficeBlock(b) {
+    switch (b.type) {
+      case 'heading': {
+        var level = Math.min(Math.max(b.level || 1, 1), 4);
+        var h = document.createElement('h' + (level + 1)); // h2..h5，避开页面自己的 h1
+        h.className = 'office-h office-h' + level;
+        appendRuns(h, b.runs);
+        return h;
+      }
+      case 'list': {
+        var li = document.createElement('li');
+        li.className = 'office-li';
+        if (b.level > 1) li.style.marginLeft = ((b.level - 1) * 18) + 'px';
+        appendRuns(li, b.runs);
+        return li;
+      }
+      case 'quote': {
+        var q = document.createElement('blockquote');
+        q.className = 'office-quote';
+        appendRuns(q, b.runs);
+        return q;
+      }
+      case 'table':
+        return buildOfficeTable(b.rows);
+      default: {
+        var p = document.createElement('p');
+        p.className = 'office-p';
+        appendRuns(p, b.runs);
+        return p;
+      }
+    }
+  }
+
+  // buildOfficeTable 渲染表格。
+  function buildOfficeTable(rows) {
+    var t = document.createElement('table');
+    t.className = 'office-table';
+    (rows || []).forEach(function (row) {
+      var tr = document.createElement('tr');
+      (row || []).forEach(function (cell) {
+        var td = document.createElement(cell && cell.h ? 'th' : 'td');
+        // 横向合并：Word 的 gridSpan / Excel 的合并单元格都归到这里。
+        if (cell && cell.cs > 1) td.colSpan = cell.cs;
+        td.textContent = (cell && cell.t) || '';
+        tr.appendChild(td);
+      });
+      t.appendChild(tr);
+    });
+    return t;
+  }
+
+  // appendRuns 把带样式的文本片段拼进容器。
+  function appendRuns(parent, runs) {
+    (runs || []).forEach(function (r) {
+      var text = r.t || '';
+      if (!r.b && !r.i && !r.u) {
+        parent.appendChild(document.createTextNode(text));
+        return;
+      }
+      var span = document.createElement('span');
+      if (r.b) span.className += ' office-b';
+      if (r.i) span.className += ' office-i';
+      if (r.u) span.className += ' office-u';
+      span.textContent = text;
+      parent.appendChild(span);
+    });
+  }
+
+  // textEl 造一个带类名与文本的简单元素。
+  function textEl(tag, cls, text) {
+    var e = document.createElement(tag);
+    e.className = cls;
+    e.textContent = text;
+    return e;
   }
 
   // previewNode 按类型造出承载预览的元素。
@@ -2600,19 +2997,9 @@
           take.dataset.kind = 'download';
           take.textContent = '取出';
           take.onclick = function () {
-            take.disabled = true;
-            take.textContent = '…';
-            downloadFile(
-              API + '?path=' + encodeURIComponent(entry.path) + '&file=' + encodeURIComponent(en.name),
-              baseName(en.name)
-            ).then(function () {
-              toast('ok', '已取出 ' + baseName(en.name));
-            }).catch(function (err) {
-              toast('err', '取出失败：' + err.message);
-            }).finally(function () {
-              take.disabled = false;
-              take.textContent = '取出';
-            });
+            // 包内条目同样是原生下载：服务端已经带了 Content-Disposition。
+            nativeDownload(API + '?path=' + encodeURIComponent(entry.path) +
+              '&file=' + encodeURIComponent(en.name), en.name);
           };
           tdOp.appendChild(take);
         }
@@ -2942,6 +3329,9 @@
     // 不重算就得刷新页面才正确。只在真的跨过断点时才算，避免拖动时抖动。
     var wasNarrow = isNarrow();
     window.addEventListener('resize', function () {
+      // 操作列的收起与否取决于实际宽度，所以每次改宽都要重算 ——
+      // 不能只在跨过断点时算（拖动窗口时列宽一直在变）。
+      collapseWrappedOps();
       var now = isNarrow();
       if (now === wasNarrow) return;
       wasNarrow = now;
@@ -2959,22 +3349,28 @@
       var dirName = baseName(state.path) || 'root';
       var picked = pickedEntries();
       var label = picked.length ? ('所选 ' + picked.length + ' 项') : dirName;
-      var t = progressToast('打包 ' + label);
-
-      var onProgress = function (loaded, total) { t.update(loaded, total); };
-      var task;
+      // 优先走浏览器的原生下载（进度、暂停、续传都归它管）。
+      var zipURL = fileURL(state.path) + '?zip';
       if (picked.length) {
-        // 用 POST 携带选中列表：选中几百个文件时 URL 会超长被网关拒绝。
-        task = downloadFile(fileURL(state.path) + '?zip', '', onProgress, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ picks: picked.map(function (e) { return e.path; }) })
-        });
-      } else {
-        task = downloadFile(fileURL(state.path) + '?zip', '', onProgress);
+        picked.forEach(function (e) { zipURL += '&pick=' + encodeURIComponent(e.path); });
       }
 
-      task.then(function (res) {
+      // URL 太长的兜底：几千个字符的地址会被网关直接拒掉（nginx 默认 8KB）。
+      // 真到那一步才退回 POST + fetch，那条路才有自定义进度与取消按钮。
+      if (zipURL.length <= MAX_ZIP_URL) {
+        nativeDownload(zipURL, '');
+        return;
+      }
+
+      var ctl = new AbortController();
+      var t = progressToast('打包 ' + label, function () { ctl.abort(); });
+      var onProgress = function (loaded, total) { t.update(loaded, total); };
+      downloadFile(fileURL(state.path) + '?zip', '', onProgress, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctl.signal,
+        body: JSON.stringify({ picks: picked.map(function (e) { return e.path; }) })
+      }).then(function (res) {
         t.done('已打包 ' + label);
         var skipped = parseInt(res.headers.get('x-gofs-archive-skipped') || '0', 10);
         if (skipped > 0) {
@@ -2982,6 +3378,7 @@
           toast('warn', '有 ' + skipped + ' 项被跳过（不存在或没有读取权限）');
         }
       }).catch(function (err) {
+        if (isAbort(err)) { t.done('已取消打包'); return; }
         t.fail('打包失败：' + err.message);
       });
     };
@@ -3199,6 +3596,8 @@
   G.canPreview = canPreview;
   G.openPreview = openPreview;
   G.openMoveDialog = openMoveDialog;
+  G.copyText = copyText;
+  G.copyEntryLink = copyEntryLink;
   G.editMax = editMax;
   G.applySession = applySession;
 })();

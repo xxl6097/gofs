@@ -119,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/__gofs__/users", s.handleUsers)
 	mux.HandleFunc("/__gofs__/extract", s.handleExtract)
 	mux.HandleFunc("/__gofs__/text", s.handleText)
+	mux.HandleFunc("/__gofs__/office", s.handleOffice)
 	mux.HandleFunc("/__gofs__/assets/", s.handleAsset)
 	mux.HandleFunc("/", s.handleRoot)
 
@@ -828,6 +829,10 @@ func (s *Server) writeJSON(w http.ResponseWriter, v any) {
 // writeJSONStatus 以指定状态码输出 JSON 响应。
 func (s *Server) writeJSONStatus(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// 禁止浏览器按内容嗅探类型。JSON 里可能带着文档原文（包括 <script> 字样），
+	// 万一被某条路径当成 text/html 渲染，那就是一个 XSS。
+	// 声明成 JSON + nosniff，它就只是数据。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if code != http.StatusOK {
 		w.WriteHeader(code)
 	}

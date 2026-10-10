@@ -14,6 +14,9 @@
   var EP = BASE + '/__gofs__/settings';
 
   var UNITS = [
+    // KiB 是给「在线编辑上限」用的：512 KiB 这类取值很常见，
+    // 单位表从 MiB 起的话，它会显示成 0.0 GiB。
+    { label: 'KiB', factor: 1024 },
     { label: 'MiB', factor: 1024 * 1024 },
     { label: 'GiB', factor: 1024 * 1024 * 1024 },
     { label: 'TiB', factor: 1024 * 1024 * 1024 * 1024 }
@@ -22,7 +25,7 @@
   // pickUnit 选一个让数值落在 1~1024 之间的单位，避免显示成
   // 「10737418240 B」这种要数零的写法。
   function pickUnit(bytes) {
-    var best = UNITS[1];
+    var best = UNITS[0];
     for (var i = 0; i < UNITS.length; i++) {
       if (bytes >= UNITS[i].factor) best = UNITS[i];
     }
@@ -36,6 +39,110 @@
     var v = bytes / u.factor;
     // 整数就不带小数点，否则保留一位（10.5 GiB 比 10.5000001 GiB 好读）。
     return { value: Number.isInteger(v) ? String(v) : v.toFixed(1), unit: u };
+  }
+
+  // makeSizeField 造一个「数值 + 单位 + 不限制」的大小输入控件。
+  //
+  // 上传上限与编辑上限长得一模一样，抽出来一份：两段几乎相同的代码
+  // 各写一遍，改了一处忘了另一处是迟早的事。
+  //
+  // 返回 { field, read, refresh }：
+  //   read()    读出字节数，0 表示不限制，NaN 表示输入非法
+  //   refresh() 重算提示文案（当前值 + 启动默认值 + 恢复默认按钮）
+  function makeSizeField(opts) {
+    var field = makeField(opts.label);
+    var row = document.createElement('div');
+    row.className = 'row';
+
+    var initial = splitSize(opts.value);
+    var input = textInput(opts.value ? initial.value : '');
+    input.style.flex = '1';
+    input.style.minWidth = '0';
+    input.placeholder = opts.placeholder || '';
+    row.appendChild(input);
+
+    var unitSel = document.createElement('select');
+    unitSel.className = 'select';
+    UNITS.forEach(function (u) {
+      var o = document.createElement('option');
+      o.value = String(u.factor);
+      o.textContent = u.label;
+      if (u.label === initial.unit.label) o.selected = true;
+      unitSel.appendChild(o);
+    });
+    row.appendChild(unitSel);
+
+    // 有些上限没有「不限制」这一档（编辑上限就是 —— 服务端只收正整数）。
+    // 界面上就不该给出这个选项，否则用户勾了会拿到 400。
+    var allowUnlimited = opts.allowUnlimited !== false;
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    if (allowUnlimited) {
+      var unlimited = document.createElement('label');
+      unlimited.className = 'checkbox';
+      cb.checked = !opts.value;
+      var text = document.createElement('span');
+      text.textContent = '不限制';
+      unlimited.appendChild(cb);
+      unlimited.appendChild(text);
+      row.appendChild(unlimited);
+    }
+
+    field.appendChild(row);
+    var hint = addHint(field, '');
+
+    function syncInputs() {
+      input.disabled = cb.checked;
+      unitSel.disabled = cb.checked;
+    }
+
+    function fmt(v) { return v > 0 ? G.fmtSize(v) : '不限制'; }
+
+    function refresh() {
+      hint.textContent = '';
+      hint.appendChild(document.createTextNode(
+        (allowUnlimited && cb.checked) ? opts.unlimitedHint : opts.limitedHint));
+      hint.appendChild(document.createTextNode('　当前生效：'));
+      var b = document.createElement('b');
+      b.textContent = fmt(opts.current());
+      hint.appendChild(b);
+      hint.appendChild(document.createTextNode(
+        '　·　启动参数默认值：' + fmt(opts.def)));
+
+      var quick = document.createElement('button');
+      quick.type = 'button';
+      quick.className = 'btn btn-sm';
+      quick.style.marginTop = '8px';
+      quick.textContent = '恢复启动时的默认值';
+      quick.onclick = function () {
+        var d = splitSize(opts.def);
+        if (allowUnlimited) cb.checked = opts.def === 0;
+        input.value = d.value;
+        for (var i = 0; i < unitSel.options.length; i++) {
+          if (unitSel.options[i].value === String(d.unit.factor)) unitSel.selectedIndex = i;
+        }
+        syncInputs();
+        refresh();
+      };
+      hint.appendChild(document.createElement('br'));
+      hint.appendChild(quick);
+    }
+
+    function read() {
+      if (allowUnlimited && cb.checked) return 0;
+      var v = parseFloat(String(input.value).replace(/,/g, '').trim());
+      if (!isFinite(v) || v < 0) return NaN;
+      var factor = parseInt(unitSel.value, 10) || 1;
+      return Math.round(v * factor);
+    }
+
+    cb.onchange = function () { syncInputs(); refresh(); };
+    input.oninput = refresh;
+    unitSel.onchange = refresh;
+
+    syncInputs();
+    refresh();
+    return { field: field, read: read, refresh: refresh };
   }
 
   function makeField(labelText) {
@@ -125,96 +232,34 @@
 
     // ---- 单文件上传上限 ----
 
-    var maxField = makeField('单文件上传上限');
-    var maxRow = document.createElement('div');
-    maxRow.className = 'row';
-
-    var initial = splitSize(cur.upload_max_size);
-    var maxInput = textInput(cur.upload_max_size ? initial.value : '');
-    maxInput.style.flex = '1';
-    maxInput.style.minWidth = '0';
-    maxInput.placeholder = '例如 10';
-    maxRow.appendChild(maxInput);
-
-    var unitSel = document.createElement('select');
-    unitSel.className = 'select';
-    UNITS.forEach(function (u) {
-      var o = document.createElement('option');
-      o.value = String(u.factor);
-      o.textContent = u.label;
-      if (u.label === initial.unit.label) o.selected = true;
-      unitSel.appendChild(o);
+    // ---- 单文件上传上限 ----
+    var uploadField = makeSizeField({
+      label: '单文件上传上限',
+      value: cur.upload_max_size,
+      def: cur.upload_max_size_default,
+      current: function () { return cur.upload_max_size; },
+      placeholder: '例如 10',
+      unlimitedHint: '不限制单文件大小 —— 只要磁盘放得下就能传。',
+      limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。'
     });
-    maxRow.appendChild(unitSel);
+    body.appendChild(uploadField.field);
 
-    var unlimited = document.createElement('label');
-    unlimited.className = 'checkbox';
-    var unlimitedCb = document.createElement('input');
-    unlimitedCb.type = 'checkbox';
-    unlimitedCb.checked = !cur.upload_max_size;
-    var unlimitedText = document.createElement('span');
-    unlimitedText.textContent = '不限制';
-    unlimited.appendChild(unlimitedCb);
-    unlimited.appendChild(unlimitedText);
-    maxRow.appendChild(unlimited);
-
-    maxField.appendChild(maxRow);
-    var maxHint = addHint(maxField, '');
-    body.appendChild(maxField);
-
-    function refreshMaxHint() {
-      maxHint.textContent = '';
-      maxHint.appendChild(document.createTextNode(
-        unlimitedCb.checked
-          ? '不限制单文件大小 —— 只要磁盘放得下就能传。'
-          : '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。'));
-      maxHint.appendChild(document.createTextNode('　当前生效：'));
-      var b = document.createElement('b');
-      b.textContent = cur.upload_max_size > 0 ? G.fmtSize(cur.upload_max_size) : '不限制';
-      maxHint.appendChild(b);
-      maxHint.appendChild(document.createTextNode(
-        '　·　启动参数默认值：' + (cur.upload_max_size_default > 0
-          ? G.fmtSize(cur.upload_max_size_default) : '不限制')));
-
-      var quick = document.createElement('button');
-      quick.type = 'button';
-      quick.className = 'btn btn-sm';
-      quick.style.marginTop = '8px';
-      quick.textContent = '恢复启动时的默认值';
-      quick.onclick = function () {
-        var d = splitSize(cur.upload_max_size_default);
-        unlimitedCb.checked = cur.upload_max_size_default === 0;
-        maxInput.value = d.value;
-        // 让下拉选到对应单位
-        for (var i = 0; i < unitSel.options.length; i++) {
-          if (unitSel.options[i].value === String(d.unit.factor)) unitSel.selectedIndex = i;
-        }
-        syncInputs();
-        refreshMaxHint();
-      };
-      maxHint.appendChild(document.createElement('br'));
-      maxHint.appendChild(quick);
-    }
-
-    function syncInputs() {
-      maxInput.disabled = unlimitedCb.checked;
-      unitSel.disabled = unlimitedCb.checked;
-    }
-
-    function readMax() {
-      if (unlimitedCb.checked) return 0;
-      var v = parseFloat(String(maxInput.value).replace(/,/g, '').trim());
-      if (!isFinite(v) || v < 0) return NaN;
-      var factor = parseInt(unitSel.value, 10) || 1;
-      return Math.round(v * factor);
-    }
-
-    unlimitedCb.onchange = function () { syncInputs(); refreshMaxHint(); };
-    maxInput.oninput = refreshMaxHint;
-    unitSel.onchange = refreshMaxHint;
-
-    syncInputs();
-    refreshMaxHint();
+    // ---- 在线编辑大小上限 ----
+    //
+    // 超过这个大小的文件不提供「编辑」入口，服务端也会拒绝读写 ——
+    // 编辑器要把整个文件读进内存，放开等于给一个几百 MB 的文件留个口子。
+    var editField = makeSizeField({
+      label: '在线编辑大小上限',
+      value: cur.edit_max_size,
+      def: cur.edit_max_size_default,
+      current: function () { return cur.edit_max_size; },
+      placeholder: '例如 2',
+      // 编辑上限没有「不限制」：打开文件要把整份内容读进内存，
+      // 放开等于给一个几 GB 的「文本」文件留个口子。服务端也只收正整数。
+      allowUnlimited: false,
+      limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。'
+    });
+    body.appendChild(editField.field);
 
     body.appendChild(errBox);
 
@@ -235,7 +280,7 @@
         if (nextRoot && nextRoot !== (cur.root || '')) patch.root = nextRoot;
       }
 
-      var nextMax = readMax();
+      var nextMax = uploadField.read();
       if (isNaN(nextMax)) {
         showErr('上传上限请填写一个非负数字，或勾选「不限制」。');
         return;
@@ -253,6 +298,13 @@
         }
         patch.upload_max_size = nextMax;
       }
+
+      var nextEdit = editField.read();
+      if (isNaN(nextEdit)) {
+        showErr('编辑上限请填写一个非负数字，或勾选「不限制」。');
+        return;
+      }
+      if (nextEdit !== cur.edit_max_size) patch.edit_max_size = nextEdit;
 
       if (!Object.keys(patch).length) {
         m.close();
@@ -274,8 +326,11 @@
         }
         var out = await res.json();
 
-        // 把新值同步回页面状态，页脚 / 上传按钮提示才会跟着更新。
+        // 把新值同步回页面状态：上传上限影响页脚提示，
+        // 编辑上限决定列表里给不给「编辑」入口 —— 都要立刻生效，
+        // 否则得刷新页面才看得到变化。
         G.data.upload_max_size = out.upload_max_size;
+        G.data.edit_max_size = out.edit_max_size;
 
         var changedRoot = patch.root !== undefined;
         var mm = out.upload_max_size > 0 ? G.fmtSize(out.upload_max_size) : '不限制';
@@ -289,7 +344,14 @@
           // 原来的路径在新根下多半不存在，直接回到新根。
           G.navigate('/', false);
         } else {
-          G.toast('ok', '上传上限已设为 ' + mm);
+          // 如实说改了哪一项 —— 两项都动过时说一句「上传上限已设为 X」
+          // 会让人以为另一项没生效。
+          var parts = [];
+          if (patch.upload_max_size !== undefined) parts.push('上传上限 ' + mm);
+          if (patch.edit_max_size !== undefined) {
+            parts.push('编辑上限 ' + G.fmtSize(out.edit_max_size));
+          }
+          G.toast('ok', '已保存：' + parts.join('，'));
           if (G.refresh) G.refresh();
         }
       } catch (e) {

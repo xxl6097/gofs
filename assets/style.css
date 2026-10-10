@@ -101,6 +101,137 @@
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
 
+/* ================================================================ Office 预览 */
+
+/* 文档渲染成一页「纸」：浅底、黑字、居中，与深色的应用外壳分开。
+   浅色是刻意的 —— Word 里的黑字在深色底上要反色，表格边框与
+   文字权重都会走样，看起来不像文档。 */
+.office-doc {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 多工作表 / 多幻灯片时的切换条。 */
+.office-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: none;
+}
+.office-tab {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.office-tab:hover { background: var(--bg-hover); color: var(--text); }
+.office-tab.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 纸张本体。 */
+.office-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: #ffffff;
+  color: #1c1f24;
+  border-radius: var(--radius-sm);
+  padding: 30px 36px;
+  font-size: 14.5px;
+  line-height: 1.75;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.office-p { margin: 0 0 10px; }
+.office-h { margin: 18px 0 8px; font-weight: 650; line-height: 1.35; }
+.office-h1 { font-size: 22px; }
+.office-h2 { font-size: 19px; }
+.office-h3 { font-size: 16.5px; }
+.office-h4 { font-size: 15px; }
+.office-pane > *:first-child { margin-top: 0; }
+
+.office-li { margin: 0 0 4px 22px; }
+
+.office-quote {
+  margin: 0 0 10px;
+  padding: 4px 0 4px 14px;
+  border-left: 3px solid #d7dbe2;
+  color: #555b64;
+}
+
+.office-b { font-weight: 700; }
+.office-i { font-style: italic; }
+.office-u { text-decoration: underline; }
+
+/* 表格：Excel 的表格和 Word 的表格共用这一套。
+   边框用浅灰、表头加深，接近文档里的观感。 */
+.office-table {
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 13.5px;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.office-table th,
+.office-table td {
+  border: 1px solid #d7dbe2;
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  max-width: 420px;
+}
+.office-table th {
+  background: #f3f5f8;
+  font-weight: 650;
+}
+.office-table tr:nth-child(even) td { background: #fafbfc; }
+
+/* 提示与截断说明。 */
+.office-tip {
+  color: #6b7280;
+  font-size: 14px;
+  text-align: center;
+  padding: 40px 20px;
+}
+/* 「正在解析」时弹窗底还是深色，这条要配深色前景。 */
+.preview-body > .office-tip { color: #9ba3ae; }
+.office-tip-error { color: #f87171; }
+
+.office-note {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--text-mute);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 11px;
+}
+
+/* 手机端：纸张的留白收一收，否则正文只剩很窄一条。 */
+@media (max-width: 560px) {
+  .office-pane { padding: 16px 14px; font-size: 14px; }
+  .office-table th, .office-table td { max-width: 220px; }
+}
+
 /* ---------------------------------------------------------------- 基础 */
 
 /* hidden 属性必须真的隐藏。
@@ -463,15 +594,26 @@ table.listing {
 
 .ops {
   display: flex;
-  /* 关键：宽度不足时折行，而不是从容器左边缘溢出去覆盖「修改时间」列。
-     配合 justify-content: flex-end，折行后每一行仍右对齐。 */
-  flex-wrap: wrap;
+  /* ⚠️ 不折行。折行意味着「按钮排成两行」，而操作列只有一行的高度，
+     第二行会顶到相邻行上去，看起来像串行。
+     放不下时由 collapseWrappedOps() 给容器加 .ops-tight，整排收进「更多」。
+     这里保持 nowrap 正是为了能**测出**放不下：内容宽度 > 格子宽度即溢出。 */
+  flex-wrap: nowrap;
   gap: 4px;
   justify-content: flex-end;
+  overflow: hidden;
   /* 常态不压到全透明：语义色要能看出来（0.35 时彩色基本变成灰的）。 */
   opacity: .72;
   transition: opacity .14s;
 }
+
+/* 允许溢出才能量出真实内容宽度。默认的 flex-shrink 会把按钮压窄，
+   于是「放不下」被伪装成「放得下」，收起逻辑就永远不会触发。 */
+.ops .op-btn { flex: none; }
+
+/* 放不下：只留「更多」，点开是一个可点的列表（见 openRowActions）。 */
+.ops.ops-tight .op-btn:not(.ops-more) { display: none; }
+.ops.ops-tight .ops-more { display: inline-flex; }
 tr:hover .ops, tr.selected .ops { opacity: 1; }
 
 /* 触摸设备上根本没有 hover：按钮会永远停在 35% 透明度，
@@ -508,6 +650,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .op-btn[data-kind="open"] { color: var(--op-open); }
 .op-btn[data-kind="preview"] { color: var(--op-preview); }
 .op-btn[data-kind="move"] { color: var(--op-rename); }
+.op-btn[data-kind="link"] { color: var(--op-list); }
 .op-btn[data-kind="download"] { color: var(--op-download); }
 .op-btn[data-kind="edit"] { color: var(--op-edit); }
 .op-btn[data-kind="unzip"] { color: var(--op-unzip); }
@@ -569,6 +712,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .action-item[data-kind="list"] svg { color: var(--op-list); }
 .action-item[data-kind="rename"] svg { color: var(--op-rename); }
 .action-item[data-kind="move"] svg { color: var(--op-rename); }
+.action-item[data-kind="link"] svg { color: var(--op-list); }
 /* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
 .action-item[data-kind="trash"] { color: var(--op-danger); }
 .action-item[data-kind="trash"] svg { color: var(--op-danger); }
