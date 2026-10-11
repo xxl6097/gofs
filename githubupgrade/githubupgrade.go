@@ -70,10 +70,6 @@ type Options struct {
 	Owner string
 	Repo  string
 
-	// Token 为访问私有仓库用的令牌（公开仓库可留空）。
-	// 只用于请求头，不会出现在日志或错误信息里。
-	Token string
-
 	// APIBase 为 API 根地址，留空用 DefaultAPIBase。
 	// GitHub Enterprise 填 https://<host>/api/v3。
 	APIBase string
@@ -107,12 +103,12 @@ type Options struct {
 
 // Upgrader 实现 gofs.Upgrader。
 type Upgrader struct {
-	owner, repo, token string
-	apiBase            string
-	assetName          func(goos, goarch string) string
-	checksumsName      string
-	client             *http.Client
-	dryRun             bool
+	owner, repo   string
+	apiBase       string
+	assetName     func(goos, goarch string) string
+	checksumsName string
+	client        *http.Client
+	dryRun        bool
 }
 
 // defaultAssetName 返回 <prefix>-<goos>-<goarch>[.exe] 的拼装函数。
@@ -157,7 +153,6 @@ func New(opts Options) (*Upgrader, error) {
 	return &Upgrader{
 		owner:         strings.TrimSpace(opts.Owner),
 		repo:          strings.TrimSpace(opts.Repo),
-		token:         opts.Token,
 		apiBase:       base,
 		assetName:     name,
 		checksumsName: sums,
@@ -351,9 +346,6 @@ func (u *Upgrader) fetchRelease(ctx context.Context) (*ghRelease, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if u.token != "" {
-		req.Header.Set("Authorization", "Bearer "+u.token)
-	}
 
 	res, err := u.client.Do(req)
 	if err != nil {
@@ -367,9 +359,9 @@ func (u *Upgrader) fetchRelease(ctx context.Context) (*ghRelease, error) {
 		// 没有 release 与仓库名写错都给 404，一并说清两种可能。
 		return nil, fmt.Errorf("仓库 %s/%s 没有已发布的 release（或名称有误）", u.owner, u.repo)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		// 私有仓库没给 token，或 token 没权限。
-		return nil, fmt.Errorf("GitHub 返回 %d：私有仓库需要 Token，且需要 repo 读取权限",
-			res.StatusCode)
+		// 公开仓库不带任何凭据，走到这里基本只剩「匿名请求触发速率限制」一种解释。
+		// 这是开源项目的公共接口，配额按 IP 算，等一会儿再试即可。
+		return nil, fmt.Errorf("GitHub 返回 %d：匿名请求可能触发了速率限制，稍后再试", res.StatusCode)
 	default:
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
 		return nil, fmt.Errorf("GitHub 返回 %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
@@ -400,9 +392,6 @@ func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File,
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 	if err != nil {
 		return "", err
-	}
-	if u.token != "" {
-		req.Header.Set("Authorization", "Bearer "+u.token)
 	}
 	res, err := u.client.Do(req)
 	if err != nil {
@@ -458,9 +447,6 @@ func (u *Upgrader) fetchChecksum(ctx context.Context, rel ghRelease, name string
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumAsset.URL, nil)
 	if err != nil {
 		return "", err
-	}
-	if u.token != "" {
-		req.Header.Set("Authorization", "Bearer "+u.token)
 	}
 	res, err := u.client.Do(req)
 	if err != nil {

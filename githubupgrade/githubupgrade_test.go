@@ -46,7 +46,7 @@ func TestVersionLess(t *testing.T) {
 
 // TestPickAsset 确认按 GOOS/GOARCH 挑资产，而不是拿到第一个就下。
 func TestPickAsset(t *testing.T) {
-	g := &Upgrader{}
+	g := &Upgrader{assetName: defaultAssetName("gofs")}
 	rel := ghRelease{Assets: []ghAsset{
 		{Name: "gofs-linux-amd64"},
 		{Name: "gofs-darwin-arm64"},
@@ -106,13 +106,10 @@ func fakeGitHub(t *testing.T, version string, binary []byte, checksum string) (*
 	})
 
 	srv = httptest.NewServer(mux)
+	// 让被测代码走假服务。
 	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
 		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
-	// 让被测代码走假服务。
-	oldAPI := apiBase
-	u.apiBase = srv.URL
 	return g, func() {
-		apiBase = oldAPI
 		srv.Close()
 	}
 }
@@ -251,10 +248,6 @@ func TestCheckReportsMissingRelease(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
-
-	old := apiBase
-	u.apiBase = srv.URL
-	defer func() { apiBase = old }()
 
 	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
 		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}

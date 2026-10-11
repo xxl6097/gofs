@@ -11,11 +11,10 @@
 //	# 只检查、只下载校验，不替换自己（推荐先这样跑一遍）
 //	/tmp/gofs-demo ... -dry-run
 //
-//	# 私有仓库
-//	GITHUB_TOKEN=ghp_xxx /tmp/gofs-demo ...
-//
 //	# GitHub Enterprise
 //	/tmp/gofs-demo ... -api-base https://git.corp.example/api/v3
+//
+// 仓库是公开的，不需要 token：检查更新走匿名的 GitHub API。
 //
 // 注意：**不要用 go run 跑它**。go run 会把程序编译到临时目录，
 // os.Executable() 拿到的是那个临时文件，替换它没有任何意义。
@@ -38,8 +37,6 @@ func main() {
 	owner := flag.String("owner", "xxl6097", "GitHub 账号")
 	repo := flag.String("repo", "gofs", "仓库名")
 	apiBase := flag.String("api-base", "", "API 根地址（GitHub Enterprise 用），默认 api.github.com")
-	token := flag.String("token", os.Getenv("GITHUB_TOKEN"),
-		"GitHub token（私有仓库需要，也可用 GITHUB_TOKEN 环境变量）")
 	assetPrefix := flag.String("asset-prefix", "gofs", "资产名前缀，默认 gofs（即 gofs-<goos>-<goarch>）")
 	root := flag.String("root", ".", "要服务的目录")
 	port := flag.Int("port", 8000, "监听端口")
@@ -50,7 +47,6 @@ func main() {
 		Owner:       *owner,
 		Repo:        *repo,
 		APIBase:     *apiBase,
-		Token:       *token,
 		AssetPrefix: *assetPrefix,
 		DryRun:      *dryRun,
 	})
