@@ -233,6 +233,13 @@ type Config struct {
 
 	// ShowVersion 为 true 时打印版本并退出。
 	ShowVersion bool
+
+	// Upgrader 为「检查更新 / 执行升级」的实现，由调用方注入。
+	//
+	// 为 nil 表示这个部署不提供在线升级：相关接口返回「未启用」，
+	// 页面上也不显示那一块。库自己不内置任何实现 —— 更新源与校验策略
+	// 应该由部署方决定（见 Upgrader 的注释）。
+	Upgrader Upgrader
 }
 
 // Version 为当前版本号。

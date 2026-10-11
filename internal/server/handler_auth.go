@@ -117,6 +117,11 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"upload_max_size": s.settings.UploadMaxSize(),
 		"allow_settings":  admin,
 		"allow_users":     s.cfg.AllowUserManage && admin,
+		// 与 edit_max_size 同理：登录响应里必须补齐。页面外壳走的是
+		// renderAuthGate（数据全空），登录后再由 applySession 合并 ——
+		// 漏了这一行，「版本与升级」就只有直接带会话访问时才出现，
+		// 从登录框进来的反而看不到。
+		"allow_upgrade": s.cfg.Upgrader != nil,
 	}
 	if s.cfg.UploadDated() {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())

@@ -78,6 +78,9 @@ type pageData struct {
 	// AllowSettings 表示当前用户可以在页面上修改服务级设置
 	// （切换根目录、调整上传上限）。
 	AllowSettings bool `json:"allow_settings"`
+	// AllowUpgrade 表示服务端注入了 Upgrader，页面上才显示「检查更新」。
+	// 未注入时整块都不显示 —— 免得给一个点了必然 404 的按钮。
+	AllowUpgrade bool `json:"allow_upgrade"`
 	// AllowUsers 表示当前用户可以在页面上管理用户（增删改）。
 	AllowUsers bool `json:"allow_users"`
 }
@@ -119,6 +122,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		Query:            query,
 		Listing:          listing,
 		Perms:            s.buildPerms(p),
+		AllowUpgrade:     s.cfg.Upgrader != nil,
 		User:             p.User,
 		Anonymous:        !p.Authenticated,
 		AuthOn:           s.auth.Enabled(),

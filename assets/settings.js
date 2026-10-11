@@ -12,6 +12,7 @@
 
   var BASE = (G.data && G.data.path_prefix) || '';
   var EP = BASE + '/__gofs__/settings';
+  var EP_UPGRADE = BASE + '/__gofs__/upgrade';
 
   var UNITS = [
     // KiB 是给「在线编辑上限」用的：512 KiB 这类取值很常见，
@@ -261,7 +262,213 @@
     });
     body.appendChild(editField.field);
 
+    // ---- 版本与升级 ----
+    //
+    // 只在服务端注入了 Upgrader 时才显示这一块：没有实现却给一个
+    // 点了必然 404 的按钮，比不显示更糟。
+    if (G.data.allow_upgrade) {
+      body.appendChild(buildUpgradeBox());
+    }
+
     body.appendChild(errBox);
+
+    // buildUpgradeBox 造出「版本与升级」那一块。
+    //
+    // 三态：初始（有「检查更新」）→ 已是最新 / 有新版本 → 升级中。
+    // 「检查」与「升级」都只由管理员触发；服务端还会再校验一次权限。
+    function buildUpgradeBox() {
+      var box = document.createElement('div');
+      box.className = 'field upgrade-box';
+
+      var lb = document.createElement('label');
+      lb.textContent = '版本与升级';
+      box.appendChild(lb);
+
+      var row = document.createElement('div');
+      row.className = 'row';
+      row.style.alignItems = 'center';
+
+      var ver = document.createElement('span');
+      ver.className = 'upgrade-ver';
+      ver.textContent = '当前版本 ' + (G.data.version || '未知');
+      row.appendChild(ver);
+
+      var checkBtn = G.btn('检查更新', '', function () { check(); });
+      row.appendChild(checkBtn);
+      box.appendChild(row);
+
+      var hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = '升级由本部署自行实现的更新源提供；升级完成后需要重启服务生效。';
+      box.appendChild(hint);
+
+      var result = document.createElement('div');
+      result.className = 'upgrade-result';
+      box.appendChild(result);
+
+      function setBusy(on, text) {
+        checkBtn.disabled = on;
+        checkBtn.textContent = on ? (text || '检查中…') : '检查更新';
+      }
+
+      async function check() {
+        setBusy(true);
+        result.textContent = '正在检查…';
+        result.className = 'upgrade-result';
+        try {
+          var res = await G.apiFetch(EP_UPGRADE);
+          var data = await res.json();
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          if (!data.updateable) {
+            result.className = 'upgrade-result ok';
+            result.textContent = '已是最新版本（' + data.current + '）。';
+            return;
+          }
+          renderRelease(data.release);
+        } catch (e) {
+          result.className = 'upgrade-result err';
+          result.textContent = '检查更新失败：' + e.message;
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function renderRelease(rel) {
+        result.className = 'upgrade-result';
+        result.textContent = '';
+
+        var head = document.createElement('div');
+        head.className = 'upgrade-head';
+        head.textContent = '发现新版本 ' + rel.version +
+          (rel.published_at ? '（' + rel.published_at + '）' : '');
+        result.appendChild(head);
+
+        if (rel.notes) {
+          var notes = document.createElement('div');
+          notes.className = 'upgrade-notes';
+          // 发布说明按纯文本展示：它是远端内容，不当作标记解析。
+          notes.textContent = rel.notes;
+          result.appendChild(notes);
+        }
+
+        var actions = document.createElement('div');
+        actions.className = 'row';
+        actions.style.marginTop = '8px';
+
+        if (rel.page_url) {
+          var a = document.createElement('a');
+          a.className = 'btn btn-sm';
+          a.href = rel.page_url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = '查看发布页';
+          actions.appendChild(a);
+        }
+
+        var upBtn = G.btn('立即升级', 'primary', function () { upgrade(rel, upBtn); });
+        actions.appendChild(upBtn);
+        result.appendChild(actions);
+
+        var prog = document.createElement('div');
+        prog.className = 'upgrade-progress';
+        prog.hidden = true;
+        result.appendChild(prog);
+        upBtn._prog = prog;
+      }
+
+      function upgrade(rel, btn) {
+        // 升级会替换正在运行的二进制，属于不可逆动作 —— 先确认。
+        G.confirm({
+          title: '确认升级到 ' + rel.version + '？',
+          message: '服务会下载并替换当前的程序文件。',
+          detail: '升级过程中请不要关闭本页面；完成后需要重启服务才会生效。',
+          okLabel: '开始升级',
+          danger: true
+        }).then(function (ok) {
+          if (!ok) return;
+          runUpgrade(rel, btn);
+        });
+      }
+
+      function runUpgrade(rel, btn) {
+        var prog = btn._prog;
+        btn.disabled = true;
+        prog.hidden = false;
+
+        // 用流式读取而不是 EventSource：事件源没法带 Authorization 头，
+        // 而这里有鉴权。逐块解析 SSE 帧即可。
+        G.apiFetch(EP_UPGRADE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ release: rel })
+        }).then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          readSSE(res.body, function (name, payload) {
+            if (name === 'progress') {
+              var pct = payload.total > 0
+                ? '（' + Math.round((payload.loaded / payload.total) * 100) + '%）' : '';
+              prog.className = 'upgrade-progress';
+              prog.textContent = stageText(payload.stage) + ' ' +
+                (payload.message || '') + pct;
+            } else if (name === 'error') {
+              prog.className = 'upgrade-progress err';
+              prog.textContent = '升级失败：' + payload.message;
+              btn.disabled = false;
+            } else if (name === 'done') {
+              prog.className = 'upgrade-progress ok';
+              prog.textContent = payload.message || '升级完成';
+              btn.textContent = '已升级';
+            }
+          });
+        }).catch(function (e) {
+          prog.className = 'upgrade-progress err';
+          prog.textContent = '升级失败：' + e.message;
+          btn.disabled = false;
+        });
+      }
+
+      return box;
+    }
+
+    function stageText(stage) {
+      return {
+        checking: '准备中…',
+        downloading: '下载中…',
+        verifying: '校验中…',
+        replacing: '替换中…',
+        done: '完成'
+      }[stage] || stage;
+    }
+
+    // readSSE 逐块解析 SSE 帧并回调。
+    //
+    // 自己写而不是用 EventSource，是因为 EventSource 不能自定义请求头 ——
+    // 而这条接口要带 Authorization。
+    async function readSSE(stream, onEvent) {
+      if (!stream) return;
+      var reader = stream.getReader();
+      var dec = new TextDecoder();
+      var buf = '';
+      for (;;) {
+        var step = await reader.read();
+        if (step.done) break;
+        buf += dec.decode(step.value, { stream: true });
+        var i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          var frame = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          var name = '', data = '';
+          frame.split('\n').forEach(function (line) {
+            if (line.indexOf('event: ') === 0) name = line.slice(7);
+            else if (line.indexOf('data: ') === 0) data += line.slice(6);
+          });
+          if (!name) continue;
+          var payload = {};
+          try { payload = JSON.parse(data); } catch (e) { /* 忽略坏帧 */ }
+          onEvent(name, payload);
+        }
+      }
+    }
 
     // ---- 保存 ----
 

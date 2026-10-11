@@ -57,6 +57,41 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 	return config.Parse(args, stdout)
 }
 
+// Release / UpgradeProgress / Upgrader 描述在线升级的扩展点。
+//
+// 同样是 internal 类型的别名：gofs **不内置**任何更新实现 ——
+// 更新源（GitHub Releases / 自建接口 / 内网制品库）与校验策略
+// （摘要、签名、来源白名单）应该由部署方决定，不该由库替他们拍板。
+//
+//	// 实现 Upgrader 之后注入即可，页面上会出现「检查更新」入口。
+//	srv, _ := gofs.New(gofs.WithRoot("."), gofs.WithUpgrader(myUpgrader{}))
+type (
+	// Release 描述一个可用的新版本。
+	Release = config.Release
+	// UpgradeProgress 是一次升级过程中的进度。
+	UpgradeProgress = config.UpgradeProgress
+	// Upgrader 由调用方实现「怎么查新版本、怎么装」。
+	//
+	// 未注入时相关接口返回 404，界面上也不显示那一块。
+	Upgrader = config.Upgrader
+)
+
+// 升级阶段常量，供实现方在 Progress 里使用。
+const (
+	StageChecking    = config.StageChecking
+	StageDownloading = config.StageDownloading
+	StageVerifying   = config.StageVerifying
+	StageReplacing   = config.StageReplacing
+	StageDone        = config.StageDone
+)
+
+// WithUpgrader 注入在线升级的实现。
+//
+// 不注入（默认）＝ 这个部署不提供在线升级。
+func WithUpgrader(u Upgrader) Option {
+	return func(c *Config) { c.Upgrader = u }
+}
+
 // Option 在配置上做一次修改，由 New 依次应用。
 type Option func(*Config)
 

@@ -116,6 +116,7 @@ func (s *Server) Handler() http.Handler {
 	// 走密钥而非账号密码，所以放在 keys 之外单独注册。
 	mux.HandleFunc(upScriptName, s.handleUpScript)
 	mux.HandleFunc("/__gofs__/settings", s.handleSettings)
+	mux.HandleFunc("/__gofs__/upgrade", s.handleUpgrade)
 	mux.HandleFunc("/__gofs__/users", s.handleUsers)
 	mux.HandleFunc("/__gofs__/extract", s.handleExtract)
 	mux.HandleFunc("/__gofs__/text", s.handleText)
