@@ -16,7 +16,9 @@ type Release struct {
 	// PageURL 为发布页地址，供用户去看完整说明。
 	PageURL string `json:"page_url,omitempty"`
 	// Size 为待下载体积（字节），0 表示未知。
-	Size int64 `json:"size,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	FullURL  string `json:"full_url,omitempty"`
+	PatchURL string `json:"patch_url,omitempty"`
 }
 
 // UpgradeProgress 是一次升级过程中的进度。
