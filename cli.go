@@ -20,7 +20,7 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return err
 	}
 	if cfg.ShowVersion {
-		fmt.Fprintf(stdout, "gofs %s\n", Version)
+		fmt.Fprintf(stdout, "gofs %s\n", cfg.Version)
 		return nil
 	}
 

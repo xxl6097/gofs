@@ -21,27 +21,6 @@ type Release struct {
 	PatchURL string `json:"patch_url,omitempty"`
 }
 
-// UpgradeProgress 是一次升级过程中的进度。
-type UpgradeProgress struct {
-	// Stage 为当前阶段：checking / downloading / verifying / replacing / done。
-	// 界面按它显示不同的文案，所以取值是约定好的几个。
-	Stage string `json:"stage"`
-	// Loaded / Total 为已下载与总字节数，Total 为 0 表示未知。
-	Loaded int64 `json:"loaded"`
-	Total  int64 `json:"total"`
-	// Message 为一行可读的状态或错误说明。
-	Message string `json:"message,omitempty"`
-}
-
-// 升级阶段常量。界面据此选文案，所以不要随意改名。
-const (
-	StageChecking    = "checking"
-	StageDownloading = "downloading"
-	StageVerifying   = "verifying"
-	StageReplacing   = "replacing"
-	StageDone        = "done"
-)
-
 // Upgrader 由**调用方**实现：gofs 自己不关心更新从哪来、怎么装。
 //
 // 为什么做成接口而不是内置实现：
@@ -61,10 +40,7 @@ type Upgrader interface {
 
 	// Upgrade 执行升级。rel 是 Check 返回的那个版本。
 	//
-	// onProgress 可能为 nil，实现里要么判空、要么用一个空函数兜底；
-	// 它会被并发调用，实现方需要保证线程安全。
-	//
 	// 实现方负责一切：下载、校验、替换、以及决定要不要重启进程。
 	// 返回 nil 表示升级成功（服务端会提示重启）。
-	Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
+	Upgrade(ctx context.Context, rel *Release) error
 }

@@ -394,6 +394,10 @@
         var prog = btn._prog;
         btn.disabled = true;
         prog.hidden = false;
+        prog.className = 'upgrade-progress';
+        // 升级是下载 + 校验 + 替换一条龙，中间没有可上报的进度，
+        // 所以只显示一个不确定态的提示，等 done/error 落地。
+        prog.textContent = '升级中…请勿关闭本页面';
 
         // 用流式读取而不是 EventSource：事件源没法带 Authorization 头，
         // 而这里有鉴权。逐块解析 SSE 帧即可。
@@ -404,13 +408,7 @@
         }).then(function (res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
           readSSE(res.body, function (name, payload) {
-            if (name === 'progress') {
-              var pct = payload.total > 0
-                ? '（' + Math.round((payload.loaded / payload.total) * 100) + '%）' : '';
-              prog.className = 'upgrade-progress';
-              prog.textContent = stageText(payload.stage) + ' ' +
-                (payload.message || '') + pct;
-            } else if (name === 'error') {
+            if (name === 'error') {
               prog.className = 'upgrade-progress err';
               prog.textContent = '升级失败：' + payload.message;
               btn.disabled = false;
@@ -428,16 +426,6 @@
       }
 
       return box;
-    }
-
-    function stageText(stage) {
-      return {
-        checking: '准备中…',
-        downloading: '下载中…',
-        verifying: '校验中…',
-        replacing: '替换中…',
-        done: '完成'
-      }[stage] || stage;
     }
 
     // readSSE 逐块解析 SSE 帧并回调。

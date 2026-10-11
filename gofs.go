@@ -35,8 +35,12 @@ import (
 // 字段含义见各字段的注释；通常不需要直接构造，用 Default 加 Option 即可。
 type Config = config.Config
 
-// Version 为当前版本号。
-const Version = config.Version
+// Version 是未显式指定时的默认版本号，等于 config.DefaultVersion。
+//
+// 它只是兜底：服务对外报告、以及升级比较用的版本以 Config.Version 为准，
+// 由上层用 WithVersion 或直接设 Config.Version 指定。构建时也可用
+// -ldflags "-X github.com/xxl6097/gofs/internal/config.DefaultVersion=x.y.z" 覆盖。
+var Version = config.DefaultVersion
 
 // ErrHelp 表示调用方在参数里请求了帮助信息（-h / --help）。
 // 仅 ParseArgs 与 RunCLI 会返回它，不是错误。
@@ -57,7 +61,7 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 	return config.Parse(args, stdout)
 }
 
-// Release / UpgradeProgress / Upgrader 描述在线升级的扩展点。
+// Release / Upgrader 描述在线升级的扩展点。
 //
 // 同样是 internal 类型的别名：gofs **不内置**任何更新实现 ——
 // 更新源（GitHub Releases / 自建接口 / 内网制品库）与校验策略
@@ -68,21 +72,10 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 type (
 	// Release 描述一个可用的新版本。
 	Release = config.Release
-	// UpgradeProgress 是一次升级过程中的进度。
-	UpgradeProgress = config.UpgradeProgress
 	// Upgrader 由调用方实现「怎么查新版本、怎么装」。
 	//
 	// 未注入时相关接口返回 404，界面上也不显示那一块。
 	Upgrader = config.Upgrader
-)
-
-// 升级阶段常量，供实现方在 Progress 里使用。
-const (
-	StageChecking    = config.StageChecking
-	StageDownloading = config.StageDownloading
-	StageVerifying   = config.StageVerifying
-	StageReplacing   = config.StageReplacing
-	StageDone        = config.StageDone
 )
 
 // WithUpgrader 注入在线升级的实现。
@@ -90,6 +83,15 @@ const (
 // 不注入（默认）＝ 这个部署不提供在线升级。
 func WithUpgrader(u Upgrader) Option {
 	return func(c *Config) { c.Upgrader = u }
+}
+
+// WithVersion 指定本服务对外报告的版本号。
+//
+// 用于页面标题、/__gofs__/health 与升级比较；不指定时用 Version（默认 0.1.0）。
+// 升级实现（如 githubupgrade）需要知道当前版本才能判断「有没有新版」，
+// 所以让它与这里的值保持一致。
+func WithVersion(v string) Option {
+	return func(c *Config) { c.Version = v }
 }
 
 // Option 在配置上做一次修改，由 New 依次应用。

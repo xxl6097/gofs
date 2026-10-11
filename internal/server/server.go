@@ -967,7 +967,7 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, map[string]any{
 		"status":  "ok",
-		"version": config.Version,
+		"version": s.cfg.Version,
 		"time":    time.Now().Format(time.RFC3339),
 	})
 }

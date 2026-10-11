@@ -231,6 +231,12 @@ type Config struct {
 	// RootAllow 为允许切换到的额外路径前缀。
 	RootAllow []string
 
+	// Version 为本服务对外报告的版本号，用于页面标题、健康检查与升级比较。
+	//
+	// 默认取 DefaultVersion（0.1.0）。上层嵌入时可以设成自己的版本，
+	// 例如 gofs.WithVersion("1.4.2") 或直接写 cfg.Version = "1.4.2"。
+	Version string
+
 	// ShowVersion 为 true 时打印版本并退出。
 	ShowVersion bool
 
@@ -242,8 +248,12 @@ type Config struct {
 	Upgrader Upgrader
 }
 
-// Version 为当前版本号。
-const Version = "0.1.0"
+// DefaultVersion 是未显式配置时的版本号。
+//
+// 是 var 而不是 const，便于构建时注入：
+//
+//	go build -ldflags "-X github.com/xxl6097/gofs/internal/config.DefaultVersion=1.2.3"
+var DefaultVersion = "0.1.0"
 
 // ErrHelp 表示用户主动请求了帮助信息。
 var ErrHelp = errors.New("help requested")
@@ -408,12 +418,15 @@ func Defaults() *Config {
 		DisableHTMLSandbox: false,
 		AllowRootSwitch:    true,
 		RootAllow:          nil,
+
+		Version: DefaultVersion,
 	}
 }
 
 // ApplyEnv 用 GOFS_ 前缀的环境变量覆盖配置。
 // 只有真正设置了的变量才会生效，未设置的字段保持原值。
 func (c *Config) ApplyEnv() {
+	c.Version = envStr("GOFS_VERSION", c.Version)
 	c.ServePath = envStr("GOFS_SERVE_PATH", c.ServePath)
 	c.Bind = envStr("GOFS_BIND", c.Bind)
 	c.Port = envInt("GOFS_PORT", c.Port)
@@ -649,6 +662,11 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 // Normalize 做参数合法化、归一化与校验。
 // 以库方式手工构造 Config 后必须调用一次，否则 Compress 等字段可能非法。
 func (c *Config) Normalize() error {
+	// 版本号兜底：手工构造 Config（不经 Defaults）时也要有个可报告的版本。
+	if strings.TrimSpace(c.Version) == "" {
+		c.Version = DefaultVersion
+	}
+
 	// -A 展开成各项权限的并集。
 	if c.AllowAll {
 		c.AllowUpload = true

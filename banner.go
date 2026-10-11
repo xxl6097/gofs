@@ -31,7 +31,7 @@ func (s *Server) Banner(w io.Writer) {
 		}
 		return "-"
 	}
-	fmt.Fprintf(w, "gofs %s\n", Version)
+	fmt.Fprintf(w, "gofs %s\n", cfg.Version)
 	fmt.Fprintf(w, "  监听      : %s://%s\n", s.Scheme(), addr)
 	fmt.Fprintf(w, "  服务目录  : %s\n", root)
 	if cfg.PathPrefix != "" {

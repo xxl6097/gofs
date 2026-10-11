@@ -108,7 +108,7 @@ func fakeGitHub(t *testing.T, version string, binary []byte, checksum string) (*
 	srv = httptest.NewServer(mux)
 	// 让被测代码走假服务。
 	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
-		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
+		currentVersion: gofs.Version, assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
 	return g, func() {
 		srv.Close()
 	}
@@ -159,7 +159,7 @@ func TestUpgradeVerifiesChecksum(t *testing.T) {
 	g, done := fakeGitHub(t, "99.0.0", binary, "0000000000000000000000000000000000000000000000000000000000000000")
 	defer done()
 
-	err := g.Upgrade(context.Background(), &gofs.Release{Version: "99.0.0"}, nil)
+	err := g.Upgrade(context.Background(), &gofs.Release{Version: "99.0.0"})
 	if err == nil {
 		t.Fatal("摘要不匹配却升级成功了")
 	}
@@ -181,24 +181,12 @@ func TestUpgradeDryRunStopsBeforeReplacing(t *testing.T) {
 	defer done()
 	g.dryRun = true
 
-	var stages []string
-	err := g.Upgrade(context.Background(), &gofs.Release{Version: "99.0.0"},
-		func(p gofs.UpgradeProgress) { stages = append(stages, p.Stage) })
+	err := g.Upgrade(context.Background(), &gofs.Release{Version: "99.0.0"})
 	if err != nil {
 		t.Fatalf("dry-run 不该失败: %v", err)
 	}
 	if _, statErr := os.Stat(execSelf(t) + ".old"); statErr == nil {
 		t.Fatal("dry-run 却动了原文件")
-	}
-	// 应当走完下载与校验，然后在替换前停下。
-	joined := strings.Join(stages, ",")
-	for _, want := range []string{gofs.StageDownloading, gofs.StageVerifying, gofs.StageDone} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("阶段里缺少 %q：%v", want, stages)
-		}
-	}
-	if strings.Contains(joined, gofs.StageReplacing) {
-		t.Errorf("dry-run 不该走到替换阶段：%v", stages)
 	}
 }
 
@@ -250,7 +238,7 @@ func TestCheckReportsMissingRelease(t *testing.T) {
 	defer srv.Close()
 
 	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
-		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
+		currentVersion: gofs.Version, assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
 	_, err := g.Check(context.Background())
 	if err == nil {
 		t.Fatal("404 却当成成功")

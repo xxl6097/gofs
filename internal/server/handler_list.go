@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/xxl6097/gofs/internal/auth"
-	"github.com/xxl6097/gofs/internal/config"
 	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
@@ -115,7 +114,7 @@ func (s *Server) buildPerms(p permResult) permsData {
 // admin 决定是否显示「服务设置」入口（切换根目录、调整上传上限）。
 func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string, admin bool) pageData {
 	return pageData{
-		Version:          config.Version,
+		Version:          s.cfg.Version,
 		PathPrefix:       s.cfg.PathPrefix,
 		Path:             listing.Path,
 		Name:             listing.Name,
@@ -243,7 +242,7 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath string) {
 	clean := fsutil.CleanURLPath(urlPath)
 	s.writeHTML(w, pageData{
-		Version:      config.Version,
+		Version:      s.cfg.Version,
 		PathPrefix:   s.cfg.PathPrefix,
 		Path:         clean,
 		Name:         "/",

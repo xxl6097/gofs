@@ -21,8 +21,7 @@ type fakeUpgrader struct {
 	calls  int
 	updRel *config.Release
 
-	mu       sync.Mutex
-	progress []config.UpgradeProgress
+	mu sync.Mutex
 }
 
 func (f *fakeUpgrader) Check(context.Context) (*config.Release, error) {
@@ -30,17 +29,9 @@ func (f *fakeUpgrader) Check(context.Context) (*config.Release, error) {
 	return f.rel, f.cerr
 }
 
-func (f *fakeUpgrader) Upgrade(_ context.Context, rel *config.Release, onProgress func(config.UpgradeProgress)) error {
+func (f *fakeUpgrader) Upgrade(_ context.Context, rel *config.Release) error {
 	f.updRel = rel
-	if f.uerr != nil {
-		return f.uerr
-	}
-	for _, p := range f.progress {
-		if onProgress != nil {
-			onProgress(p)
-		}
-	}
-	return nil
+	return f.uerr
 }
 
 // upgradeServer 造一个注入了 Upgrader 的实例。
@@ -78,8 +69,8 @@ func TestUpgradeCheckReportsRelease(t *testing.T) {
 	if err := json.Unmarshal([]byte(got.body), &d); err != nil {
 		t.Fatalf("解析失败：%v\n%s", err, got.body)
 	}
-	if d.Current != config.Version {
-		t.Errorf("current = %q，期望 %q", d.Current, config.Version)
+	if d.Current != config.DefaultVersion {
+		t.Errorf("current = %q，期望 %q", d.Current, config.DefaultVersion)
 	}
 	if !d.Updateable || d.Latest != "9.9.9" {
 		t.Errorf("没有报出新版本：%s", got.body)
@@ -116,12 +107,9 @@ func TestUpgradeCheckSurfacesError(t *testing.T) {
 	}
 }
 
-// TestUpgradeRunStreamsProgress 覆盖升级：进度要经 SSE 推给前端。
-func TestUpgradeRunStreamsProgress(t *testing.T) {
-	u := &fakeUpgrader{progress: []config.UpgradeProgress{
-		{Stage: config.StageDownloading, Loaded: 50, Total: 100},
-		{Stage: config.StageReplacing, Message: "写入文件"},
-	}}
+// TestUpgradeRunStreamsResult 覆盖升级：结果要经 SSE 推给前端。
+func TestUpgradeRunStreamsResult(t *testing.T) {
+	u := &fakeUpgrader{}
 	s := upgradeServer(t, u)
 
 	body, _ := json.Marshal(map[string]any{
@@ -134,10 +122,8 @@ func TestUpgradeRunStreamsProgress(t *testing.T) {
 	if ct := got.head.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Errorf("Content-Type = %q，期望 SSE", ct)
 	}
-	for _, want := range []string{"event: progress", "downloading", "replacing", "event: done"} {
-		if !strings.Contains(got.body, want) {
-			t.Errorf("SSE 里缺少 %q：\n%s", want, got.body)
-		}
+	if !strings.Contains(got.body, "event: done") {
+		t.Errorf("SSE 里没有完成事件：\n%s", got.body)
 	}
 	// 实现方确实拿到了要升级的版本。
 	if u.updRel == nil || u.updRel.Version != "9.9.9" {

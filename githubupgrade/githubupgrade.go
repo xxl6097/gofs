@@ -14,7 +14,7 @@
 //
 // 它做的事：
 //
-//	检查   调 /repos/<owner>/<repo>/releases/latest，与 gofs.Version 比较
+//	检查   调 /repos/<owner>/<repo>/releases/latest，与 CurrentVersion 比较
 //	升级   下载对应 GOOS/GOARCH 的资产
 //	       → 用同一 release 的 checksums 校验 sha256
 //	       → 原子替换当前可执行文件（失败则回滚）
@@ -70,6 +70,13 @@ type Options struct {
 	Owner string
 	Repo  string
 
+	// CurrentVersion 为当前运行的版本号，用来判断「有没有新版」。
+	//
+	// 留空则用 gofs.Version（默认 0.1.0）。服务的版本由上层指定
+	// （gofs.WithVersion / Config.Version），这里应传入同一个值，
+	// 否则会出现「明明是最新却说有更新」或反之。
+	CurrentVersion string
+
 	// APIBase 为 API 根地址，留空用 DefaultAPIBase。
 	// GitHub Enterprise 填 https://<host>/api/v3。
 	APIBase string
@@ -103,12 +110,13 @@ type Options struct {
 
 // Upgrader 实现 gofs.Upgrader。
 type Upgrader struct {
-	owner, repo   string
-	apiBase       string
-	assetName     func(goos, goarch string) string
-	checksumsName string
-	client        *http.Client
-	dryRun        bool
+	owner, repo    string
+	currentVersion string
+	apiBase        string
+	assetName      func(goos, goarch string) string
+	checksumsName  string
+	client         *http.Client
+	dryRun         bool
 }
 
 // defaultAssetName 返回 <prefix>-<goos>-<goarch>[.exe] 的拼装函数。
@@ -149,15 +157,20 @@ func New(opts Options) (*Upgrader, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
 	}
+	current := strings.TrimSpace(opts.CurrentVersion)
+	if current == "" {
+		current = gofs.Version
+	}
 
 	return &Upgrader{
-		owner:         strings.TrimSpace(opts.Owner),
-		repo:          strings.TrimSpace(opts.Repo),
-		apiBase:       base,
-		assetName:     name,
-		checksumsName: sums,
-		client:        client,
-		dryRun:        opts.DryRun,
+		owner:          strings.TrimSpace(opts.Owner),
+		repo:           strings.TrimSpace(opts.Repo),
+		currentVersion: current,
+		apiBase:        base,
+		assetName:      name,
+		checksumsName:  sums,
+		client:         client,
+		dryRun:         opts.DryRun,
 	}, nil
 }
 
@@ -191,7 +204,7 @@ func (u *Upgrader) Check(ctx context.Context) (*gofs.Release, error) {
 	}
 
 	latest := strings.TrimPrefix(rel.Tag, "v")
-	if !VersionLess(gofs.Version, latest) {
+	if !VersionLess(u.currentVersion, latest) {
 		return nil, nil // 已是最新
 	}
 
@@ -212,17 +225,10 @@ func (u *Upgrader) Check(ctx context.Context) (*gofs.Release, error) {
 }
 
 // Upgrade 下载并替换当前可执行文件。
-func (u *Upgrader) Upgrade(ctx context.Context, rel *gofs.Release,
-	onProgress func(gofs.UpgradeProgress)) error {
-
-	report := func(p gofs.UpgradeProgress) {
-		if onProgress != nil {
-			onProgress(p)
-		}
-	}
-
+func (u *Upgrader) Upgrade(ctx context.Context, _ *gofs.Release) error {
 	// 重新拉一次 release：资产地址以这一次为准，
 	// 不信任前端传上来的任何 URL（那部分是调用方可控的）。
+	// rel 只标记「要升级到哪一版」，实际装的是这里重新查到的最新版。
 	ghRel, err := u.fetchRelease(ctx)
 	if err != nil {
 		return err
@@ -250,14 +256,7 @@ func (u *Upgrader) Upgrade(ctx context.Context, rel *gofs.Release,
 		}
 	}()
 
-	report(gofs.UpgradeProgress{
-		Stage: gofs.StageDownloading, Total: asset.Size, Message: asset.Name,
-	})
-	sum, err := u.download(ctx, asset, tmp, func(n int64) {
-		report(gofs.UpgradeProgress{
-			Stage: gofs.StageDownloading, Loaded: n, Total: asset.Size, Message: asset.Name,
-		})
-	})
+	sum, err := u.download(ctx, asset, tmp)
 	if err != nil {
 		_ = tmp.Close()
 		return err
@@ -267,7 +266,6 @@ func (u *Upgrader) Upgrade(ctx context.Context, rel *gofs.Release,
 	}
 
 	// 先校验，再替换。
-	report(gofs.UpgradeProgress{Stage: gofs.StageVerifying, Message: "校验 sha256"})
 	want, err := u.fetchChecksum(ctx, *ghRel, asset.Name)
 	if err != nil {
 		return err
@@ -277,23 +275,14 @@ func (u *Upgrader) Upgrade(ctx context.Context, rel *gofs.Release,
 	}
 
 	if u.dryRun {
-		report(gofs.UpgradeProgress{
-			Stage:   gofs.StageDone,
-			Message: "dry-run：已下载并校验通过，未替换（临时文件已清理）",
-		})
 		return nil
 	}
 
-	report(gofs.UpgradeProgress{Stage: gofs.StageReplacing, Message: "替换 " + filepath.Base(target)})
 	if err := replaceFile(tmpName, target); err != nil {
 		return err
 	}
 	committed = true
 
-	report(gofs.UpgradeProgress{
-		Stage:   gofs.StageDone,
-		Message: "已替换为 " + rel.Version + "，重启进程后生效",
-	})
 	return nil
 }
 
@@ -386,9 +375,9 @@ func (u *Upgrader) pickAsset(rel ghRelease) (ghAsset, bool) {
 }
 
 // download 把资产写进 f，返回它的 sha256（十六进制）。
-func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File,
-	onBytes func(int64)) (string, error) {
-
+//
+// 边写边算摘要：同一遍读取里既落盘又喂 hash，省一次全文件扫描。
+func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 	if err != nil {
 		return "", err
@@ -403,26 +392,8 @@ func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File,
 	}
 
 	h := sha256.New()
-	var n int64
-	buf := make([]byte, 64<<10)
-	for {
-		read, rerr := res.Body.Read(buf)
-		if read > 0 {
-			if _, werr := f.Write(buf[:read]); werr != nil {
-				return "", fmt.Errorf("写入临时文件失败: %w", werr)
-			}
-			h.Write(buf[:read])
-			n += int64(read)
-			if onBytes != nil {
-				onBytes(n)
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return "", fmt.Errorf("读取响应失败: %w", rerr)
-		}
+	if _, err := io.Copy(io.MultiWriter(f, h), res.Body); err != nil {
+		return "", fmt.Errorf("下载 %s 失败: %w", asset.Name, err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

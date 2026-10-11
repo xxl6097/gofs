@@ -40,15 +40,19 @@ func main() {
 	assetPrefix := flag.String("asset-prefix", "gofs", "资产名前缀，默认 gofs（即 gofs-<goos>-<goarch>）")
 	root := flag.String("root", ".", "要服务的目录")
 	port := flag.Int("port", 8000, "监听端口")
+	version := flag.String("version", gofs.Version, "本程序的版本号（用于与 release 比较，须与实际构建一致）")
 	dryRun := flag.Bool("dry-run", false, "只检查并下载校验，不替换自己")
 	flag.Parse()
 
+	// 版本号要传给两处：升级器据此判断有没有新版，服务用它做展示。
+	// 两者不一致会出现「明明最新却说有更新」。
 	up, err := githubupgrade.New(githubupgrade.Options{
-		Owner:       *owner,
-		Repo:        *repo,
-		APIBase:     *apiBase,
-		AssetPrefix: *assetPrefix,
-		DryRun:      *dryRun,
+		Owner:          *owner,
+		Repo:           *repo,
+		APIBase:        *apiBase,
+		AssetPrefix:    *assetPrefix,
+		CurrentVersion: *version,
+		DryRun:         *dryRun,
 	})
 	if err != nil {
 		log.Fatalf("构造升级器失败: %v", err)
@@ -61,6 +65,7 @@ func main() {
 		gofs.WithRoot(*root),
 		gofs.WithBind("127.0.0.1"),
 		gofs.WithPort(*port),
+		gofs.WithVersion(*version),
 		gofs.WithAllowAll(),
 		gofs.WithAuth("admin:admin123@/:rw"),
 		// 密钥与用户表放内存，别碰开发者本机的真实配置。
