@@ -1338,14 +1338,14 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/__share__/<token>/docs/"
 ## 在线检测升级（扩展点）
 
 页面上有「版本与升级」：点「检查更新」→ 有新版就显示版本号、发布说明与发布页
-→ 确认后「立即升级」→ 升级中（下载 / 校验 / 替换）→ 提示重启生效。
+→ 确认后「立即升级」→ 进度实时推送（下载 / 校验 / 替换）→ 提示重启生效。
 
 **但 gofs 自己不实现「怎么查、怎么装」** —— 它只定义接口，实现由部署方给：
 
 ```go
 type Upgrader interface {
     Check(ctx context.Context) (*Release, error)
-    Upgrade(ctx context.Context, rel *Release) error
+    Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
 }
 
 srv, _ := gofs.New(
@@ -1362,7 +1362,8 @@ srv, _ := gofs.New(
   校验策略（摘要、签名、来源白名单）该由部署方按自己的威胁模型决定，
   不该由库替他们拍板。
 
-接口类型 `Release` / `Upgrader` 都是 root 包导出的。未注入时相关接口返回 404，
+接口与阶段常量（`Release` / `UpgradeProgress` / `Upgrader` /
+`StageDownloading` …）都是 root 包导出的。未注入时相关接口返回 404，
 页面上**整块都不显示** —— 免得给一个点了必然失败的按钮。
 
 版本号不再写死：`Config.Version` 由上层通过 `gofs.WithVersion()`（或 `GOFS_VERSION`

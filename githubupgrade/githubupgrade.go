@@ -225,10 +225,17 @@ func (u *Upgrader) Check(ctx context.Context) (*gofs.Release, error) {
 }
 
 // Upgrade 下载并替换当前可执行文件。
-func (u *Upgrader) Upgrade(ctx context.Context, _ *gofs.Release) error {
+func (u *Upgrader) Upgrade(ctx context.Context, rel *gofs.Release,
+	onProgress func(gofs.UpgradeProgress)) error {
+
+	report := func(p gofs.UpgradeProgress) {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+
 	// 重新拉一次 release：资产地址以这一次为准，
 	// 不信任前端传上来的任何 URL（那部分是调用方可控的）。
-	// rel 只标记「要升级到哪一版」，实际装的是这里重新查到的最新版。
 	ghRel, err := u.fetchRelease(ctx)
 	if err != nil {
 		return err
@@ -256,7 +263,14 @@ func (u *Upgrader) Upgrade(ctx context.Context, _ *gofs.Release) error {
 		}
 	}()
 
-	sum, err := u.download(ctx, asset, tmp)
+	report(gofs.UpgradeProgress{
+		Stage: gofs.StageDownloading, Total: asset.Size, Message: asset.Name,
+	})
+	sum, err := u.download(ctx, asset, tmp, func(n int64) {
+		report(gofs.UpgradeProgress{
+			Stage: gofs.StageDownloading, Loaded: n, Total: asset.Size, Message: asset.Name,
+		})
+	})
 	if err != nil {
 		_ = tmp.Close()
 		return err
@@ -266,6 +280,7 @@ func (u *Upgrader) Upgrade(ctx context.Context, _ *gofs.Release) error {
 	}
 
 	// 先校验，再替换。
+	report(gofs.UpgradeProgress{Stage: gofs.StageVerifying, Message: "校验 sha256"})
 	want, err := u.fetchChecksum(ctx, *ghRel, asset.Name)
 	if err != nil {
 		return err
@@ -275,14 +290,23 @@ func (u *Upgrader) Upgrade(ctx context.Context, _ *gofs.Release) error {
 	}
 
 	if u.dryRun {
+		report(gofs.UpgradeProgress{
+			Stage:   gofs.StageDone,
+			Message: "dry-run：已下载并校验通过，未替换（临时文件已清理）",
+		})
 		return nil
 	}
 
+	report(gofs.UpgradeProgress{Stage: gofs.StageReplacing, Message: "替换 " + filepath.Base(target)})
 	if err := replaceFile(tmpName, target); err != nil {
 		return err
 	}
 	committed = true
 
+	report(gofs.UpgradeProgress{
+		Stage:   gofs.StageDone,
+		Message: "已替换为 " + rel.Version + "，重启进程后生效",
+	})
 	return nil
 }
 
@@ -376,8 +400,10 @@ func (u *Upgrader) pickAsset(rel ghRelease) (ghAsset, bool) {
 
 // download 把资产写进 f，返回它的 sha256（十六进制）。
 //
-// 边写边算摘要：同一遍读取里既落盘又喂 hash，省一次全文件扫描。
-func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File) (string, error) {
+// 边写边算摘要，并通过 onBytes 上报累计字节数（用于升级进度）。
+func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File,
+	onBytes func(int64)) (string, error) {
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 	if err != nil {
 		return "", err
@@ -392,8 +418,26 @@ func (u *Upgrader) download(ctx context.Context, asset ghAsset, f *os.File) (str
 	}
 
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), res.Body); err != nil {
-		return "", fmt.Errorf("下载 %s 失败: %w", asset.Name, err)
+	var n int64
+	buf := make([]byte, 64<<10)
+	for {
+		read, rerr := res.Body.Read(buf)
+		if read > 0 {
+			if _, werr := f.Write(buf[:read]); werr != nil {
+				return "", fmt.Errorf("写入临时文件失败: %w", werr)
+			}
+			h.Write(buf[:read])
+			n += int64(read)
+			if onBytes != nil {
+				onBytes(n)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", fmt.Errorf("读取响应失败: %w", rerr)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

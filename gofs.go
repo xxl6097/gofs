@@ -61,7 +61,7 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 	return config.Parse(args, stdout)
 }
 
-// Release / Upgrader 描述在线升级的扩展点。
+// Release / UpgradeProgress / Upgrader 描述在线升级的扩展点。
 //
 // 同样是 internal 类型的别名：gofs **不内置**任何更新实现 ——
 // 更新源（GitHub Releases / 自建接口 / 内网制品库）与校验策略
@@ -72,10 +72,21 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 type (
 	// Release 描述一个可用的新版本。
 	Release = config.Release
+	// UpgradeProgress 是一次升级过程中的进度。
+	UpgradeProgress = config.UpgradeProgress
 	// Upgrader 由调用方实现「怎么查新版本、怎么装」。
 	//
 	// 未注入时相关接口返回 404，界面上也不显示那一块。
 	Upgrader = config.Upgrader
+)
+
+// 升级阶段常量，供实现方在 Progress 里使用。
+const (
+	StageChecking    = config.StageChecking
+	StageDownloading = config.StageDownloading
+	StageVerifying   = config.StageVerifying
+	StageReplacing   = config.StageReplacing
+	StageDone        = config.StageDone
 )
 
 // WithUpgrader 注入在线升级的实现。

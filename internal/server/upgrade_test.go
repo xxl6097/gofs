@@ -21,7 +21,8 @@ type fakeUpgrader struct {
 	calls  int
 	updRel *config.Release
 
-	mu sync.Mutex
+	mu       sync.Mutex
+	progress []config.UpgradeProgress
 }
 
 func (f *fakeUpgrader) Check(context.Context) (*config.Release, error) {
@@ -29,9 +30,17 @@ func (f *fakeUpgrader) Check(context.Context) (*config.Release, error) {
 	return f.rel, f.cerr
 }
 
-func (f *fakeUpgrader) Upgrade(_ context.Context, rel *config.Release) error {
+func (f *fakeUpgrader) Upgrade(_ context.Context, rel *config.Release, onProgress func(config.UpgradeProgress)) error {
 	f.updRel = rel
-	return f.uerr
+	if f.uerr != nil {
+		return f.uerr
+	}
+	for _, p := range f.progress {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+	return nil
 }
 
 // upgradeServer 造一个注入了 Upgrader 的实例。
@@ -107,9 +116,12 @@ func TestUpgradeCheckSurfacesError(t *testing.T) {
 	}
 }
 
-// TestUpgradeRunStreamsResult 覆盖升级：结果要经 SSE 推给前端。
-func TestUpgradeRunStreamsResult(t *testing.T) {
-	u := &fakeUpgrader{}
+// TestUpgradeRunStreamsProgress 覆盖升级：进度要经 SSE 推给前端。
+func TestUpgradeRunStreamsProgress(t *testing.T) {
+	u := &fakeUpgrader{progress: []config.UpgradeProgress{
+		{Stage: config.StageDownloading, Loaded: 50, Total: 100},
+		{Stage: config.StageReplacing, Message: "写入文件"},
+	}}
 	s := upgradeServer(t, u)
 
 	body, _ := json.Marshal(map[string]any{
@@ -122,8 +134,10 @@ func TestUpgradeRunStreamsResult(t *testing.T) {
 	if ct := got.head.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Errorf("Content-Type = %q，期望 SSE", ct)
 	}
-	if !strings.Contains(got.body, "event: done") {
-		t.Errorf("SSE 里没有完成事件：\n%s", got.body)
+	for _, want := range []string{"event: progress", "downloading", "replacing", "event: done"} {
+		if !strings.Contains(got.body, want) {
+			t.Errorf("SSE 里缺少 %q：\n%s", want, got.body)
+		}
 	}
 	// 实现方确实拿到了要升级的版本。
 	if u.updRel == nil || u.updRel.Version != "9.9.9" {
