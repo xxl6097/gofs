@@ -1,14 +1,14 @@
-package main
+package githubupgrade
 
 import (
 	"context"
-	"os"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -38,15 +38,15 @@ func TestVersionLess(t *testing.T) {
 		{"1.0.0", "2.0.0", true},
 	}
 	for _, tc := range cases {
-		if got := versionLess(tc.a, tc.b); got != tc.want {
-			t.Errorf("versionLess(%q, %q) = %v，期望 %v", tc.a, tc.b, got, tc.want)
+		if got := VersionLess(tc.a, tc.b); got != tc.want {
+			t.Errorf("VersionLess(%q, %q) = %v，期望 %v", tc.a, tc.b, got, tc.want)
 		}
 	}
 }
 
 // TestPickAsset 确认按 GOOS/GOARCH 挑资产，而不是拿到第一个就下。
 func TestPickAsset(t *testing.T) {
-	g := &githubUpgrader{}
+	g := &Upgrader{}
 	rel := ghRelease{Assets: []ghAsset{
 		{Name: "gofs-linux-amd64"},
 		{Name: "gofs-darwin-arm64"},
@@ -74,7 +74,7 @@ func TestPickAsset(t *testing.T) {
 //
 // binary 是「新版本二进制」的内容；checksum 是写进 checksums.txt 的摘要，
 // 测试可以故意写错来验证「摘要不匹配就中止」。
-func fakeGitHub(t *testing.T, version string, binary []byte, checksum string) (*githubUpgrader, func()) {
+func fakeGitHub(t *testing.T, version string, binary []byte, checksum string) (*Upgrader, func()) {
 	t.Helper()
 
 	assetName := fmt.Sprintf("gofs-%s-%s", runtime.GOOS, runtime.GOARCH)
@@ -106,12 +106,13 @@ func fakeGitHub(t *testing.T, version string, binary []byte, checksum string) (*
 	})
 
 	srv = httptest.NewServer(mux)
-	g := &githubUpgrader{owner: "o", repo: "r", client: srv.Client()}
+	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
+		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
 	// 让被测代码走假服务。
-	oldAPI, oldDL := apiBase, dlBase
-	apiBase = srv.URL
+	oldAPI := apiBase
+	u.apiBase = srv.URL
 	return g, func() {
-		apiBase, dlBase = oldAPI, oldDL
+		apiBase = oldAPI
 		srv.Close()
 	}
 }
@@ -208,7 +209,8 @@ func TestUpgradeDryRunStopsBeforeReplacing(t *testing.T) {
 //
 // 「校验不了就放行」等于没有校验 —— 这条路径必须走不通。
 func TestUpgradeRefusesWithoutChecksums(t *testing.T) {
-	g := &githubUpgrader{client: http.DefaultClient}
+	g := &Upgrader{client: http.DefaultClient, assetName: defaultAssetName("gofs"),
+		checksumsName: DefaultChecksumsName}
 	_, err := g.fetchChecksum(context.Background(), ghRelease{
 		Assets: []ghAsset{{Name: "gofs-linux-amd64"}},
 	}, "gofs-linux-amd64")
@@ -230,7 +232,8 @@ func TestFetchChecksumParsesSha256SumOutput(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	g := &githubUpgrader{client: srv.Client()}
+	g := &Upgrader{client: srv.Client(), assetName: defaultAssetName("gofs"),
+		checksumsName: DefaultChecksumsName}
 	got, err := g.fetchChecksum(context.Background(), ghRelease{
 		Assets: []ghAsset{{Name: "checksums.txt", URL: srv.URL}},
 	}, "gofs-linux-amd64")
@@ -250,10 +253,11 @@ func TestCheckReportsMissingRelease(t *testing.T) {
 	defer srv.Close()
 
 	old := apiBase
-	apiBase = srv.URL
+	u.apiBase = srv.URL
 	defer func() { apiBase = old }()
 
-	g := &githubUpgrader{owner: "o", repo: "r", client: srv.Client()}
+	g := &Upgrader{owner: "o", repo: "r", client: srv.Client(), apiBase: srv.URL,
+		assetName: defaultAssetName("gofs"), checksumsName: DefaultChecksumsName}
 	_, err := g.Check(context.Background())
 	if err == nil {
 		t.Fatal("404 却当成成功")
