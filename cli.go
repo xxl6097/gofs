@@ -96,7 +96,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 	return srv.Wait()
 }
 
-func RunCfg(ctx context.Context, cfg *Config, stdout, stderr io.Writer) error {
+func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, stdout, stderr io.Writer) error {
 	//srv, err := New(WithRoot(cfg.ServePath),
 	//	WithPort(cfg.Port),
 	//	WithAuth(cfg.AuthRules...),
@@ -104,7 +104,8 @@ func RunCfg(ctx context.Context, cfg *Config, stdout, stderr io.Writer) error {
 	//	WithTune(func(c *Config) { // 逃生舱：改任意字段
 	//		c.MaxConcurrent = 128
 	//	}))
-	srv, err := New(WithConfig(cfg))
+	srv, err := New(WithConfig(cfg),
+		WithUpgrader(uploader))
 	if err != nil {
 		return err
 	}
