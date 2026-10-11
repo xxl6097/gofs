@@ -114,11 +114,8 @@ type githubUpgrader struct {
 	client             *http.Client
 }
 
-// apiBase 与 dlBase 抽出来是为了能在测试里指向本地服务。
-var (
-	apiBase = "https://api.github.com"
-	dlBase  = "https://github.com"
-)
+// apiBase 抽出来是为了能在测试里指向本地服务。
+var apiBase = "https://api.github.com"
 
 type ghAsset struct {
 	Name string `json:"name"`
