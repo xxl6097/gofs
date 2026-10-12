@@ -1,10 +1,17 @@
-/* gofs 服务设置面板：切换服务根目录、调整单文件上传上限。
+/* gofs 设置面板：常规（服务根目录 / 上传上限 / 编辑上限）、上传密钥、
+ * 用户与权限、版本与升级，四块做成标签页。
  *
- * 这两项原本只能由启动参数决定，改一次就得重启进程。放到页面上之后，
- * 换个数据目录、临时放宽上传上限都不需要中断服务。
+ * 为什么合成一个入口：这四块都是管理员/高权限操作，平铺在工具栏上既占位
+ * 又零散；而且「版本与升级」挤在设置页底部会把弹窗拉得很长。分标签之后
+ * 每块只在自己那一页出现，底部按钮也跟着当前页变（常规是「取消/保存」，
+ * 其余是「关闭」，用户页多一个「新建用户」）。
  *
- * 权限：只有对服务根拥有读写权限的账号能看到入口（服务端 requireAdmin
- * 也会再校验一次，界面隐藏只是不让无关的人误点）。 */
+ * 密钥与用户的内容来自 keys.js / users.js 的 keysPanel()/usersPanel()，
+ * 这里只负责标签外壳与底部按钮 —— 那两个文件不再自己开弹窗。
+ *
+ * 权限：标签按子功能可用性显示。只要任一项可用就能打开本弹窗 ——
+ * 一个只对 /docs 可写的账号能管密钥，但看不到「常规」（那需要服务根权限，
+ * 服务端 requireAdmin 也会再校验一次，界面隐藏只是不让无关的人误点）。 */
 (function () {
   'use strict';
 
@@ -172,312 +179,114 @@
     return input;
   }
 
-  // openSettings 打开设置面板。每次打开都重新拉一次当前值，
-  // 避免面板里显示的还是上一次的旧数据。
-  async function openSettings() {
-    var body = document.createElement('div');
-    body.className = 'settings-panel';
+  // ---------------------------------------------------------------- 数据
+
+  // fetchSettings 读取当前服务设置。需要管理员权限，所以只有「常规」
+  // 面板会调它 —— 那个面板只对管理员出现，非管理员不会白白撞一次 403。
+  async function fetchSettings() {
+    var res = await G.apiFetch(EP, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+    return res.json();
+  }
+
+  // ---------------------------------------------------------------- 各标签
+
+  // buildGeneralTab 造「常规」页：服务根目录 / 上传上限 / 编辑上限。
+  //
+  // 同步返回、内部异步读取：先摆一个「正在读取…」占位，好让弹窗的底部
+  // 按钮（取消 / 保存）立刻到位，不用等网络往返。
+  function buildGeneralTab(ctx) {
+    var el = document.createElement('div');
+
     var loading = document.createElement('div');
     loading.className = 'hint-box';
     loading.textContent = '正在读取当前设置…';
-    body.appendChild(loading);
+    el.appendChild(loading);
 
     var errBox = document.createElement('div');
     errBox.className = 'hint-box danger';
     errBox.hidden = true;
 
-    var m = G.openModal({
-      title: '服务设置',
-      body: body,
-      wide: true,
-      footer: G.modalFoot([
-        { label: '取消', onClick: function () { m.close(); } },
-        {
-          label: '保存',
-          cls: 'primary',
-          id: 'settings-save',
-          onClick: function () { save(); }
-        }
-      ])
-    });
-
     var cur = null;
-
-    try {
-      var res = await G.apiFetch(EP, { headers: { 'Accept': 'application/json' } });
-      if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
-      cur = await res.json();
-    } catch (e) {
-      loading.textContent = '读取设置失败：' + e.message;
-      return;
-    }
-
-    body.textContent = '';
-
-    // ---- 服务根目录 ----
-
-    var rootField = makeField('服务根目录');
-    var rootRow = document.createElement('div');
-    rootRow.className = 'row';
-    var rootInput = textInput(cur.root || '');
-    rootInput.placeholder = cur.root || '/srv/data';
-    if (!cur.root_switchable) rootInput.disabled = true;
-    rootRow.appendChild(rootInput);
-    rootField.appendChild(rootRow);
-    addHint(rootField, cur.root_switchable
-      ? '当前根目录：' + (cur.root || '（未知）') +
-        '　·　可切换的范围：' + (cur.allow_roots || []).join('、') +
-        '　·　填相对路径表示「从当前根再往下走」'
-      : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
-    body.appendChild(rootField);
-
-    // ---- 单文件上传上限 ----
-
-    // ---- 单文件上传上限 ----
-    var uploadField = makeSizeField({
-      label: '单文件上传上限',
-      value: cur.upload_max_size,
-      def: cur.upload_max_size_default,
-      current: function () { return cur.upload_max_size; },
-      placeholder: '例如 10',
-      unlimitedHint: '不限制单文件大小 —— 只要磁盘放得下就能传。',
-      limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。'
-    });
-    body.appendChild(uploadField.field);
-
-    // ---- 在线编辑大小上限 ----
-    //
-    // 超过这个大小的文件不提供「编辑」入口，服务端也会拒绝读写 ——
-    // 编辑器要把整个文件读进内存，放开等于给一个几百 MB 的文件留个口子。
-    var editField = makeSizeField({
-      label: '在线编辑大小上限',
-      value: cur.edit_max_size,
-      def: cur.edit_max_size_default,
-      current: function () { return cur.edit_max_size; },
-      placeholder: '例如 2',
-      // 编辑上限没有「不限制」：打开文件要把整份内容读进内存，
-      // 放开等于给一个几 GB 的「文本」文件留个口子。服务端也只收正整数。
-      allowUnlimited: false,
-      limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。'
-    });
-    body.appendChild(editField.field);
-
-    // ---- 版本与升级 ----
-    //
-    // 只在服务端注入了 Upgrader 时才显示这一块：没有实现却给一个
-    // 点了必然 404 的按钮，比不显示更糟。
-    if (G.data.allow_upgrade) {
-      body.appendChild(buildUpgradeBox());
-    }
-
-    body.appendChild(errBox);
-
-    // buildUpgradeBox 造出「版本与升级」那一块。
-    //
-    // 三态：初始（有「检查更新」）→ 已是最新 / 有新版本 → 升级中。
-    // 「检查」与「升级」都只由管理员触发；服务端还会再校验一次权限。
-    function buildUpgradeBox() {
-      var box = document.createElement('div');
-      box.className = 'field upgrade-box';
-
-      var lb = document.createElement('label');
-      lb.textContent = '版本与升级';
-      box.appendChild(lb);
-
-      var row = document.createElement('div');
-      row.className = 'row';
-      row.style.alignItems = 'center';
-
-      var ver = document.createElement('span');
-      ver.className = 'upgrade-ver';
-      ver.textContent = '当前版本 ' + (G.data.version || '未知');
-      row.appendChild(ver);
-
-      var checkBtn = G.btn('检查更新', '', function () { check(); });
-      row.appendChild(checkBtn);
-      box.appendChild(row);
-
-      var hint = document.createElement('div');
-      hint.className = 'hint';
-      hint.textContent = '升级由本部署自行实现的更新源提供；升级完成后需要重启服务生效。';
-      box.appendChild(hint);
-
-      var result = document.createElement('div');
-      result.className = 'upgrade-result';
-      box.appendChild(result);
-
-      function setBusy(on, text) {
-        checkBtn.disabled = on;
-        checkBtn.textContent = on ? (text || '检查中…') : '检查更新';
-      }
-
-      async function check() {
-        setBusy(true);
-        result.textContent = '正在检查…';
-        result.className = 'upgrade-result';
-        try {
-          var res = await G.apiFetch(EP_UPGRADE);
-          var data = await res.json();
-          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-          if (!data.updateable) {
-            result.className = 'upgrade-result ok';
-            result.textContent = '已是最新版本（' + data.current + '）。';
-            return;
-          }
-          renderRelease(data.release);
-        } catch (e) {
-          result.className = 'upgrade-result err';
-          result.textContent = '检查更新失败：' + e.message;
-        } finally {
-          setBusy(false);
-        }
-      }
-
-      function renderRelease(rel) {
-        result.className = 'upgrade-result';
-        result.textContent = '';
-
-        var head = document.createElement('div');
-        head.className = 'upgrade-head';
-        head.textContent = '发现新版本 ' + rel.version +
-          (rel.published_at ? '（' + rel.published_at + '）' : '');
-        result.appendChild(head);
-
-        if (rel.notes) {
-          var notes = document.createElement('div');
-          notes.className = 'upgrade-notes';
-          // 发布说明按纯文本展示：它是远端内容，不当作标记解析。
-          notes.textContent = rel.notes;
-          result.appendChild(notes);
-        }
-
-        var actions = document.createElement('div');
-        actions.className = 'row';
-        actions.style.marginTop = '8px';
-
-        if (rel.page_url) {
-          var a = document.createElement('a');
-          a.className = 'btn btn-sm';
-          a.href = rel.page_url;
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.textContent = '查看发布页';
-          actions.appendChild(a);
-        }
-
-        var upBtn = G.btn('立即升级', 'primary', function () { upgrade(rel, upBtn); });
-        actions.appendChild(upBtn);
-        result.appendChild(actions);
-
-        var prog = document.createElement('div');
-        prog.className = 'upgrade-progress';
-        prog.hidden = true;
-        result.appendChild(prog);
-        upBtn._prog = prog;
-      }
-
-      function upgrade(rel, btn) {
-        // 升级会替换正在运行的二进制，属于不可逆动作 —— 先确认。
-        G.confirm({
-          title: '确认升级到 ' + rel.version + '？',
-          message: '服务会下载并替换当前的程序文件。',
-          detail: '升级过程中请不要关闭本页面；完成后需要重启服务才会生效。',
-          okLabel: '开始升级',
-          danger: true
-        }).then(function (ok) {
-          if (!ok) return;
-          runUpgrade(rel, btn);
-        });
-      }
-
-      function runUpgrade(rel, btn) {
-        var prog = btn._prog;
-        btn.disabled = true;
-        prog.hidden = false;
-
-        // 用流式读取而不是 EventSource：事件源没法带 Authorization 头，
-        // 而这里有鉴权。逐块解析 SSE 帧即可。
-        G.apiFetch(EP_UPGRADE, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ release: rel })
-        }).then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          readSSE(res.body, function (name, payload) {
-            if (name === 'progress') {
-              var pct = payload.total > 0
-                ? '（' + Math.round((payload.loaded / payload.total) * 100) + '%）' : '';
-              prog.className = 'upgrade-progress';
-              prog.textContent = stageText(payload.stage) + ' ' +
-                (payload.message || '') + pct;
-            } else if (name === 'error') {
-              prog.className = 'upgrade-progress err';
-              prog.textContent = '升级失败：' + payload.message;
-              btn.disabled = false;
-            } else if (name === 'done') {
-              prog.className = 'upgrade-progress ok';
-              prog.textContent = payload.message || '升级完成';
-              btn.textContent = '已升级';
-            }
-          });
-        }).catch(function (e) {
-          prog.className = 'upgrade-progress err';
-          prog.textContent = '升级失败：' + e.message;
-          btn.disabled = false;
-        });
-      }
-
-      return box;
-    }
-
-    function stageText(stage) {
-      return {
-        checking: '准备中…',
-        downloading: '下载中…',
-        verifying: '校验中…',
-        replacing: '替换中…',
-        done: '完成'
-      }[stage] || stage;
-    }
-
-    // readSSE 逐块解析 SSE 帧并回调。
-    //
-    // 自己写而不是用 EventSource，是因为 EventSource 不能自定义请求头 ——
-    // 而这条接口要带 Authorization。
-    async function readSSE(stream, onEvent) {
-      if (!stream) return;
-      var reader = stream.getReader();
-      var dec = new TextDecoder();
-      var buf = '';
-      for (;;) {
-        var step = await reader.read();
-        if (step.done) break;
-        buf += dec.decode(step.value, { stream: true });
-        var i;
-        while ((i = buf.indexOf('\n\n')) >= 0) {
-          var frame = buf.slice(0, i);
-          buf = buf.slice(i + 2);
-          var name = '', data = '';
-          frame.split('\n').forEach(function (line) {
-            if (line.indexOf('event: ') === 0) name = line.slice(7);
-            else if (line.indexOf('data: ') === 0) data += line.slice(6);
-          });
-          if (!name) continue;
-          var payload = {};
-          try { payload = JSON.parse(data); } catch (e) { /* 忽略坏帧 */ }
-          onEvent(name, payload);
-        }
-      }
-    }
-
-    // ---- 保存 ----
+    var rootInput = null;
+    var uploadField = null;
+    var editField = null;
 
     function showErr(msg) {
       errBox.hidden = false;
       errBox.textContent = msg;
     }
 
+    // fill 拿到设置之后再把表单铺出来。
+    function fill() {
+      el.textContent = '';
+
+      // ---- 服务根目录 ----
+      var rootField = makeField('服务根目录');
+      var rootRow = document.createElement('div');
+      rootRow.className = 'row';
+      rootInput = textInput(cur.root || '');
+      rootInput.placeholder = cur.root || '/srv/data';
+      if (!cur.root_switchable) rootInput.disabled = true;
+      rootRow.appendChild(rootInput);
+      rootField.appendChild(rootRow);
+      addHint(rootField, cur.root_switchable
+        ? '当前根目录：' + (cur.root || '（未知）') +
+          '　·　可切换的范围：' + (cur.allow_roots || []).join('、') +
+          '　·　填相对路径表示「从当前根再往下走」'
+        : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
+      el.appendChild(rootField);
+
+      // ---- 单文件上传上限 ----
+      uploadField = makeSizeField({
+        label: '单文件上传上限',
+        value: cur.upload_max_size,
+        def: cur.upload_max_size_default,
+        current: function () { return cur.upload_max_size; },
+        placeholder: '例如 10',
+        unlimitedHint: '不限制单文件大小 —— 只要磁盘放得下就能传。',
+        limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。'
+      });
+      el.appendChild(uploadField.field);
+
+      // ---- 在线编辑大小上限 ----
+      //
+      // 超过这个大小的文件不提供「编辑」入口，服务端也会拒绝读写 ——
+      // 编辑器要把整个文件读进内存，放开等于给一个几百 MB 的文件留个口子。
+      editField = makeSizeField({
+        label: '在线编辑大小上限',
+        value: cur.edit_max_size,
+        def: cur.edit_max_size_default,
+        current: function () { return cur.edit_max_size; },
+        placeholder: '例如 2',
+        // 编辑上限没有「不限制」：打开文件要把整份内容读进内存，
+        // 放开等于给一个几 GB 的「文本」文件留个口子。服务端也只收正整数。
+        allowUnlimited: false,
+        limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。'
+      });
+      el.appendChild(editField.field);
+
+      el.appendChild(errBox);
+    }
+
+    // dirty 表示「常规」里有还没保存的改动，切标签/关窗时据此提醒。
+    function dirty() {
+      if (!cur) return false;
+      if (cur.root_switchable && rootInput) {
+        var nextRoot = rootInput.value.trim();
+        if (nextRoot && nextRoot !== (cur.root || '')) return true;
+      }
+      if (uploadField && uploadField.read() !== cur.upload_max_size) return true;
+      if (editField && editField.read() !== cur.edit_max_size) return true;
+      return false;
+    }
+
     async function save() {
+      // 读取还没回来时字段是空的，这时候保存会把上限写成 0。
+      if (!cur) {
+        showErr('设置还没读取完，请稍候再保存。');
+        return;
+      }
       errBox.hidden = true;
 
       var patch = {};
@@ -514,7 +323,7 @@
       if (nextEdit !== cur.edit_max_size) patch.edit_max_size = nextEdit;
 
       if (!Object.keys(patch).length) {
-        m.close();
+        ctx.close();
         G.toast('info', '没有需要保存的改动');
         return;
       }
@@ -541,7 +350,7 @@
 
         var changedRoot = patch.root !== undefined;
         var mm = out.upload_max_size > 0 ? G.fmtSize(out.upload_max_size) : '不限制';
-        m.close();
+        ctx.close();
 
         if (changedRoot) {
           G.toast('ok', '服务根目录已切换到 ' + out.root, null, {
@@ -566,6 +375,391 @@
       } finally {
         if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '保存'; }
       }
+    }
+
+    fetchSettings().then(function (data) {
+      cur = data;
+      fill();
+    }).catch(function (e) {
+      loading.textContent = '读取设置失败：' + e.message;
+    });
+
+    return {
+      el: el,
+      footerItems: [
+        { label: '取消', onClick: function () { ctx.close(); } },
+        { label: '保存', cls: 'primary', id: 'settings-save', onClick: function () { save(); } }
+      ],
+      dirty: dirty
+    };
+  }
+
+  // 密钥 / 用户两页的内容由各自文件提供，这里只做适配：
+  // 它们返回 { el, buttons, refresh }，buttons 转成底部按钮描述。
+  function buildKeysTab() {
+    var p = G.keysPanel();
+    return { el: p.el, footerItems: p.buttons || [] };
+  }
+
+  function buildUsersTab() {
+    var p = G.usersPanel();
+    return { el: p.el, footerItems: p.buttons || [] };
+  }
+
+  function buildUpgradeTab() {
+    return { el: buildUpgradeBox(), footerItems: [] };
+  }
+
+  // ---------------------------------------------------------------- 版本与升级
+
+  // buildUpgradeBox 造出「版本与升级」面板。
+  //
+  // 三态：初始（有「检查更新」）→ 已是最新 / 有新版本 → 升级中。
+  // 「检查」与「升级」都只由管理员触发；服务端还会再校验一次权限。
+  function buildUpgradeBox() {
+    var box = document.createElement('div');
+    box.className = 'field upgrade-box';
+
+    var lb = document.createElement('label');
+    lb.textContent = '版本与升级';
+    box.appendChild(lb);
+
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.alignItems = 'center';
+
+    var ver = document.createElement('span');
+    ver.className = 'upgrade-ver';
+    ver.textContent = '当前版本 ' + (G.data.version || '未知');
+    row.appendChild(ver);
+
+    var checkBtn = G.btn('检查更新', '', function () { check(); });
+    row.appendChild(checkBtn);
+    box.appendChild(row);
+
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = '升级由本部署自行实现的更新源提供；升级完成后需要重启服务生效。';
+    box.appendChild(hint);
+
+    var result = document.createElement('div');
+    result.className = 'upgrade-result';
+    box.appendChild(result);
+
+    function setBusy(on, text) {
+      checkBtn.disabled = on;
+      checkBtn.textContent = on ? (text || '检查中…') : '检查更新';
+    }
+
+    async function check() {
+      setBusy(true);
+      result.textContent = '正在检查…';
+      result.className = 'upgrade-result';
+      try {
+        var res = await G.apiFetch(EP_UPGRADE);
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+        if (!data.updateable) {
+          result.className = 'upgrade-result ok';
+          result.textContent = '已是最新版本（' + data.current + '）。';
+          return;
+        }
+        renderRelease(data.release);
+      } catch (e) {
+        result.className = 'upgrade-result err';
+        result.textContent = '检查更新失败：' + e.message;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderRelease(rel) {
+      result.className = 'upgrade-result';
+      result.textContent = '';
+
+      var head = document.createElement('div');
+      head.className = 'upgrade-head';
+      head.textContent = '发现新版本 ' + rel.version +
+        (rel.published_at ? '（' + rel.published_at + '）' : '');
+      result.appendChild(head);
+
+      if (rel.notes) {
+        var notes = document.createElement('div');
+        notes.className = 'upgrade-notes';
+        // 发布说明按纯文本展示：它是远端内容，不当作标记解析。
+        notes.textContent = rel.notes;
+        result.appendChild(notes);
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'row';
+      actions.style.marginTop = '8px';
+
+      if (rel.page_url) {
+        var a = document.createElement('a');
+        a.className = 'btn btn-sm';
+        a.href = rel.page_url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = '查看发布页';
+        actions.appendChild(a);
+      }
+
+      var upBtn = G.btn('立即升级', 'primary', function () { upgrade(rel, upBtn); });
+      actions.appendChild(upBtn);
+      result.appendChild(actions);
+
+      var prog = document.createElement('div');
+      prog.className = 'upgrade-progress';
+      prog.hidden = true;
+      result.appendChild(prog);
+      upBtn._prog = prog;
+    }
+
+    function upgrade(rel, btn) {
+      // 升级会替换正在运行的二进制，属于不可逆动作 —— 先确认。
+      G.confirm({
+        title: '确认升级到 ' + rel.version + '？',
+        message: '服务会下载并替换当前的程序文件。',
+        detail: '升级过程中请不要关闭本页面；完成后需要重启服务才会生效。',
+        okLabel: '开始升级',
+        danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        runUpgrade(rel, btn);
+      });
+    }
+
+    function runUpgrade(rel, btn) {
+      var prog = btn._prog;
+      btn.disabled = true;
+      prog.hidden = false;
+
+      // 用流式读取而不是 EventSource：事件源没法带 Authorization 头，
+      // 而这里有鉴权。逐块解析 SSE 帧即可。
+      G.apiFetch(EP_UPGRADE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ release: rel })
+      }).then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        readSSE(res.body, function (name, payload) {
+          if (name === 'progress') {
+            var pct = payload.total > 0
+              ? '（' + Math.round((payload.loaded / payload.total) * 100) + '%）' : '';
+            prog.className = 'upgrade-progress';
+            prog.textContent = stageText(payload.stage) + ' ' +
+              (payload.message || '') + pct;
+          } else if (name === 'error') {
+            prog.className = 'upgrade-progress err';
+            prog.textContent = '升级失败：' + payload.message;
+            btn.disabled = false;
+          } else if (name === 'done') {
+            prog.className = 'upgrade-progress ok';
+            prog.textContent = payload.message || '升级完成';
+            btn.textContent = '已升级';
+          }
+        });
+      }).catch(function (e) {
+        prog.className = 'upgrade-progress err';
+        prog.textContent = '升级失败：' + e.message;
+        btn.disabled = false;
+      });
+    }
+
+    return box;
+  }
+
+  function stageText(stage) {
+    return {
+      checking: '准备中…',
+      downloading: '下载中…',
+      verifying: '校验中…',
+      replacing: '替换中…',
+      done: '完成'
+    }[stage] || stage;
+  }
+
+  // readSSE 逐块解析 SSE 帧并回调。
+  //
+  // 自己写而不是用 EventSource，是因为 EventSource 不能自定义请求头 ——
+  // 而这条接口要带 Authorization。
+  async function readSSE(stream, onEvent) {
+    if (!stream) return;
+    var reader = stream.getReader();
+    var dec = new TextDecoder();
+    var buf = '';
+    for (;;) {
+      var step = await reader.read();
+      if (step.done) break;
+      buf += dec.decode(step.value, { stream: true });
+      var i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        var frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        var name = '', data = '';
+        frame.split('\n').forEach(function (line) {
+          if (line.indexOf('event: ') === 0) name = line.slice(7);
+          else if (line.indexOf('data: ') === 0) data += line.slice(6);
+        });
+        if (!name) continue;
+        var payload = {};
+        try { payload = JSON.parse(data); } catch (e) { /* 忽略坏帧 */ }
+        onEvent(name, payload);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- 弹窗
+
+  // openSettings 打开设置弹窗。
+  //
+  // 标签按权限/是否启用条件显示，第一个可用的标签默认激活；每页只在
+  // 第一次切到时才构建（惰性），切回来则复用 —— 复用是必须的，否则
+  // 来回切会把「常规」里没保存的输入丢掉。
+  async function openSettings() {
+    var defs = [];
+    if (G.data.allow_settings) {
+      defs.push({ id: 'general', label: '常规', build: buildGeneralTab });
+    }
+    if (G.data.allow_keys) {
+      defs.push({ id: 'keys', label: '密钥', build: buildKeysTab });
+    }
+    if (G.data.allow_users) {
+      defs.push({ id: 'users', label: '用户与权限', build: buildUsersTab });
+    }
+    // 升级接口要管理员权限，所以没「常规」就没有「版本与升级」——
+    // 否则会给出一个点了必然 403 的标签。
+    if (G.data.allow_settings && G.data.allow_upgrade) {
+      defs.push({ id: 'upgrade', label: '版本与升级', build: buildUpgradeTab });
+    }
+    if (!defs.length) return;
+
+    var body = document.createElement('div');
+    body.className = 'settings-panel';
+
+    var tabBar = document.createElement('div');
+    tabBar.className = 'tabs';
+    tabBar.hidden = defs.length < 2; // 只有一个面板就不摆标签条
+    body.appendChild(tabBar);
+
+    var panes = document.createElement('div');
+    panes.className = 'settings-panes';
+    body.appendChild(panes);
+
+    var m = null;
+    var allowClose = false;   // 主动关闭（点按钮）时跳过「未保存」拦截
+    var activeDef = null;
+
+    function closeSelf() {
+      allowClose = true;
+      if (m) m.close();
+    }
+    var ctx = { close: closeSelf };
+
+    // 先把默认页建好，这样底部按钮一上来就是对的，不会闪一下空条。
+    // mount 建出来的页默认是 hidden 的（留给切换逻辑），默认页要当场放开，
+    // 否则弹窗一打开就是「有标签条、下面空白」。
+    var first = defs[0];
+    mount(first);
+    first.node.hidden = false;
+    activeDef = first;
+
+    defs.forEach(function (def) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tab' + (def === first ? ' active' : '');
+      b.textContent = def.label;
+      b.onclick = function () { activate(def); };
+      tabBar.appendChild(b);
+      def.btn = b;
+    });
+
+    m = G.openModal({
+      // 只有一个面板时不摆标签条，标题直接用它自己的名字，省得
+      // 一个只管密钥的账号对着「设置」猜里面是什么。
+      title: defs.length === 1 ? defs[0].label : '设置',
+      body: body,
+      full: true,
+      beforeClose: guardClose
+    });
+
+    // 自己建底部容器，并直接把按钮塞进去：openModal 会把传进去的
+    // footer 节点再包一层 .modal-foot，那样会嵌套两层。
+    var footEl = document.createElement('div');
+    footEl.className = 'modal-foot';
+    m.el.appendChild(footEl);
+    setFooter(first);
+
+    // mount 首次构建某个标签并按需挂载（已建好的直接复用）。
+    function mount(def) {
+      if (def.tab) return;
+      def.node = document.createElement('div');
+      def.node.className = 'settings-pane';
+      def.node.hidden = true;
+      panes.appendChild(def.node);
+      def.tab = def.build(ctx);
+      def.node.appendChild(def.tab.el);
+    }
+
+    async function activate(def) {
+      if (def === activeDef) return;
+      // 离开「常规」前先确认，别让未保存的改动悄悄没了。
+      if (!(await confirmLeaveDirty())) return;
+      mount(def);
+      activeDef.node.hidden = true;
+      activeDef.btn.classList.remove('active');
+      activeDef = def;
+      def.node.hidden = false;
+      def.btn.classList.add('active');
+      setFooter(def);
+      panes.scrollTop = 0;
+    }
+
+    // footItemsFor 给出某页的底部按钮：常规页自带「取消/保存」，
+    // 其余页面都是「关闭」加上该页自己的动作（用户页的「新建用户」）。
+    function footItemsFor(def) {
+      if (def.id === 'general') return def.tab.footerItems;
+      return [{ label: '关闭', onClick: function () { closeSelf(); } }]
+        .concat(def.tab.footerItems || []);
+    }
+
+    function setFooter(def) {
+      footEl.textContent = '';
+      var src = G.modalFoot(footItemsFor(def));
+      while (src.firstChild) footEl.appendChild(src.firstChild);
+    }
+
+    function hasDirtyGeneral() {
+      var d = activeDef;
+      return !!(d && d.id === 'general' && d.tab && d.tab.dirty && d.tab.dirty());
+    }
+
+    function confirmLeaveDirty() {
+      if (!hasDirtyGeneral()) return Promise.resolve(true);
+      return G.confirm({
+        title: '放弃未保存的改动？',
+        message: '「常规」里有还没保存的设置，切走或关闭都会丢掉。',
+        okLabel: '放弃',
+        danger: true
+      });
+    }
+
+    // guardClose 只在「常规」有未保存改动时拦一下 —— 点底部按钮属于
+    // 明确意图，走 closeSelf 不经过这里，不会自找麻烦地再问一次。
+    function guardClose() {
+      if (allowClose) return true;
+      // 上面还压着嵌套弹窗（密钥明文 / 新建用户）时不介入：
+      // 每个弹窗都注册了自己的 ESC 处理，这里再弹确认会张冠李戴。
+      if (document.querySelectorAll('#modal-root .modal-mask').length > 1) return true;
+      if (!hasDirtyGeneral()) return true;
+      G.confirm({
+        title: '放弃未保存的改动？',
+        message: '「常规」里有还没保存的设置。',
+        okLabel: '放弃',
+        danger: true
+      }).then(function (ok) { if (ok) closeSelf(); });
+      return false;
     }
   }
 

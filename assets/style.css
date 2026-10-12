@@ -144,6 +144,52 @@
   font-weight: 600;
 }
 
+/* 通用标签切换条（设置弹窗用）。刻意与 .office-* 分开：
+   那是文档预览专用的，且紧挨着不可外借的 .office-pane「纸张」样式，
+   混用之后 office 那边一改就会误伤设置。 */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: none;
+  margin-bottom: 14px;
+}
+.tab {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab:hover { background: var(--bg-hover); color: var(--text); }
+.tab.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 设置弹窗：标签条钉住，面板区自己滚动。
+   依赖 .modal.full .modal-body 的 flex column（见「全屏弹窗」一节）。 */
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.settings-panes {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 /* 纸张本体。 */
 .office-pane {
   flex: 1;
@@ -757,6 +803,38 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   font-style: normal;
   font-size: 11.5px;
   color: var(--text-mute);
+}
+
+/* 行内「更多」的下拉菜单。
+   必须是 position: fixed：.table-wrap 是 overflow: hidden，挂在表格里的
+   绝对定位菜单会被直接裁掉。左右/上下由 placeRowMenu() 按按钮的视口坐标算，
+   这里只管外观。z-index 60：高于表格与顶栏（40），低于弹窗（.modal-root 100）。 */
+.ops-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 172px;
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+/* 文件名做锚点：行密集时能确认操作的是哪一条。长名截断，别把菜单撑宽。 */
+.ops-menu-head {
+  padding: 4px 8px 8px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 下拉里比弹窗里紧凑一档，但仍守住 40px 的触摸下限。 */
+.ops-menu .action-item {
+  min-height: 40px;
+  padding: 8px 10px;
+  gap: 11px;
+  font-size: 14px;
 }
 
 .empty {

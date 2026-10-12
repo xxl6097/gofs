@@ -41,7 +41,15 @@
 
   // ---------------------------------------------------------------- 主界面
 
-  async function openKeys() {
+  // keysPanel 构建「上传密钥」面板，供设置弹窗挂到标签页里。
+  //
+  // 它只负责内容：弹窗外壳（标题、底部按钮、尺寸）由调用方决定，
+  // 所以这里不调 openModal。返回的 buttons 是底部按钮描述，
+  // 由调用方用 G.modalFoot 组装 —— 直接返回 .modal-foot 节点会与外层嵌套。
+  //
+  // 返回 { el, buttons, refresh }。创建成功后的一次性明文弹窗
+  // （showToken）仍是独立弹窗，叠加在设置弹窗之上。
+  function keysPanel() {
     var body = document.createElement('div');
 
     // 顶部说明
@@ -113,13 +121,6 @@
     var listBox = document.createElement('div');
     listBox.className = 'key-list';
     body.appendChild(listBox);
-
-    var m = G.openModal({
-      title: '上传密钥',
-      body: body,
-      wide: true,
-      footer: G.modalFoot([{ label: '关闭', onClick: function () { m.close(); } }])
-    });
 
     // ---- 创建 ----
 
@@ -336,8 +337,11 @@
       }
     }
 
-    await load();
+    // 初始加载（不阻塞返回：列表先显示「正在读取…」，回来再填）。
+    load();
+
+    return { el: body, buttons: [], refresh: function () { return load(); } };
   }
 
-  G.openKeys = openKeys;
+  G.keysPanel = keysPanel;
 })();

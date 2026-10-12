@@ -36,6 +36,15 @@
   // allowUsers 表示当前账号能在页面上增删改用户。服务端在下发页面/登录响应时
   // 就已经按「功能开关 + 是否启用鉴权 + 是否管理员」算好了。
   function allowUsers() { return !!DATA.allow_users; }
+  // allowAnySettings 决定「设置」入口的显隐。
+  //
+  // 密钥与用户已经并进设置弹窗，所以只要其中任何一项可用就得露出入口：
+  // allow_keys 的判定口径是「在某个目录上有写权限」，比 allow_settings 的
+  // 「服务根管理员」宽 —— 只看 allow_settings 会让一个只管 /docs 的账号
+  // 失去密钥功能。弹窗内部再按各自权限决定显示哪些标签。
+  function allowAnySettings() {
+    return allowSettings() || allowKeys() || allowUsers();
+  }
   // uploadMax 返回单文件上传上限（字节），0 表示不限制。
   function uploadMax() { return typeof DATA.upload_max_size === 'number' ? DATA.upload_max_size : 0; }
 
@@ -1423,7 +1432,7 @@
       var moreBtn = makeOpBtn('more', '更多', 'ops-more');
       moreBtn.title = '更多操作';
       moreBtn.setAttribute('aria-label', '更多操作');
-      moreBtn.onclick = function () { openRowActions(e, actions); };
+      moreBtn.onclick = function () { openRowActions(e, actions, moreBtn); };
       ops.appendChild(moreBtn);
 
       tdOps.appendChild(ops);
@@ -1500,7 +1509,20 @@
       probes.push({ key: key, ops: ops });
     });
 
-    // 先读完再写：读写交替会让每次读都触发一次强制重排。
+    // 量之前必须先把探针**铺开**。
+    //
+    // 收起状态下除「更多」以外的按钮都是 display:none，量到的宽度是 0、
+    // 会被 opsOverflows 当作「不占位」跳过 —— 于是只剩「更多」一个按钮的
+    // 宽度，必然判定「放得下」。后果就是每次 resize 都把上一轮刚收起的行
+    // 又铺开，而且铺开后不会自己收回去：一排按钮被 overflow:hidden 拦腰
+    // 截断，正是「明明放不下却不给更多」的样子。
+    //
+    // 摘掉 .ops-tight 后，下面第一次读取就会触发一次重排，拿到的才是
+    // 铺开状态下的真实需求宽度。读全在写之前，所以整段只重排一次。
+    probes.forEach(function (p) {
+      p.ops.classList.remove('ops-tight');
+    });
+
     var tight = {};
     probes.forEach(function (p) {
       tight[p.key] = opsOverflows(p.ops);
@@ -1513,25 +1535,65 @@
     });
   }
 
-  // openRowActions 是窄屏下的操作入口：把整行操作铺成一个列表。
+  // openRowActions 是行内「更多」的下拉菜单。
   //
-  // 手机上行内挤 5 个按钮会把名称列压到只剩 100px 出头，而且每个按钮
-  // 都远小于可点尺寸。收进菜单后，每一项都能做到 48px 高、占满宽度。
-  function openRowActions(entry, actions) {
-    var body = document.createElement('div');
-    body.className = 'action-sheet';
+  // 为什么是下拉而不是弹窗：这是「这一行放不下、所以把操作收起来」的出口，
+  // 用户点它是想操作**眼前这一行**。弹一个带遮罩的弹窗会把上下文打断，
+  // 还得再点一次「取消」才能回到列表；下拉贴着按钮展开，点外面就收起，
+  // 视线和手势都不用离开当前行。
+  //
+  // 为什么用 position: fixed 而不是在 td 里 absolute：.table-wrap 是
+  // overflow: hidden，挂在表格里的菜单会被直接裁掉（越靠下的行越明显）。
+  // 所以菜单挂在 body 上，按按钮的视口坐标摆位。
+  var rowMenu = null;   // 当前打开的行菜单；同一时刻只允许一个
 
+  function closeRowActions() {
+    if (!rowMenu) return;
+    rowMenu.el.remove();
+    document.removeEventListener('keydown', rowMenu.onKey);
+    document.removeEventListener('pointerdown', rowMenu.onDown, true);
+    window.removeEventListener('scroll', rowMenu.onScroll, true);
+    window.removeEventListener('resize', rowMenu.onScroll);
+    rowMenu = null;
+  }
+
+  // placeRowMenu 把菜单摆到按钮附近：默认向下、右对齐，放不下就翻到上方，
+  // 再夹进视口内。菜单必须已经插进文档，否则量不到尺寸。
+  function placeRowMenu(menu, anchor) {
+    var PAD = 8, GAP = 6;
+    var r = anchor.getBoundingClientRect();
+    var mw = menu.offsetWidth;
+    var mh = menu.offsetHeight;
+
+    var left = r.right - mw;                                   // 右对齐到按钮
+    left = Math.max(PAD, Math.min(left, window.innerWidth - mw - PAD));
+
+    var top = r.bottom + GAP;
+    if (top + mh > window.innerHeight - PAD && r.top - GAP - mh >= PAD) {
+      top = r.top - GAP - mh;                                  // 下方放不下就上翻
+    }
+    top = Math.max(PAD, Math.min(top, window.innerHeight - mh - PAD));
+
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
+
+  function openRowActions(entry, actions, anchor) {
+    // 再点同一个按钮＝收起（当开关用）。
+    var reopened = rowMenu && rowMenu.anchor === anchor;
+    closeRowActions();
+    if (reopened) return;
+
+    var menu = document.createElement('div');
+    menu.className = 'ops-menu';
+    menu.setAttribute('role', 'menu');
+
+    // 菜单贴着那一行展开，但仍留一个文件名做锚点：行密集时能确认操作对象。
     var head = document.createElement('div');
-    head.className = 'action-path';
-    head.textContent = entry.path;
-    body.appendChild(head);
-
-    var m = openModal({
-      title: entry.name,
-      body: body,
-      // 手机上习惯有一个明确的「取消」出口，而不是只能点右上角的小叉。
-      footer: modalFoot([{ label: '取消', onClick: function () { m.close(); } }])
-    });
+    head.className = 'action-path ops-menu-head';
+    head.textContent = entry.name;
+    head.title = entry.path;
+    menu.appendChild(head);
 
     actions.forEach(function (a) {
       var b = document.createElement('button');
@@ -1557,10 +1619,40 @@
           b.appendChild(em);
         }
       } else {
-        b.onclick = function () { m.close(); a.run(); };
+        b.onclick = function () { closeRowActions(); a.run(); };
       }
-      body.appendChild(b);
+      menu.appendChild(b);
     });
+
+    document.body.appendChild(menu);
+    placeRowMenu(menu, anchor);
+    if (anchor.setAttribute) anchor.setAttribute('aria-expanded', 'true');
+
+    // 三条关闭路径：点菜单外、按 Esc、页面滚动或窗口变化（那时菜单会与按钮
+    // 脱位，收起来比追着重新定位简单可靠）。
+    var onKey = function (e) { if (e.key === 'Escape') closeRowActions(); };
+    // contains 只接受 Node：页面滚动时 target 可能是 document 甚至 window，
+    // 直接传进去会抛 TypeError。所以先确认是元素，再判断归属。
+    var isEl = function (t) { return !!(t && t.nodeType === 1); };
+    var onDown = function (e) {
+      // 点按钮本身不算「点外面」—— 那条路径交给开关逻辑处理，
+      // 否则会先关掉、紧接着又被 onclick 打开，看起来像点不动。
+      var t = e.target;
+      if (isEl(t) && (menu.contains(t) || anchor.contains(t))) return;
+      closeRowActions();
+    };
+    var onScroll = function (e) {
+      // 菜单自己内部滚动不算脱位（长菜单会内部滚）。
+      var t = e.target;
+      if (isEl(t) && menu.contains(t)) return;
+      closeRowActions();
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+
+    rowMenu = { el: menu, anchor: anchor, onKey: onKey, onDown: onDown, onScroll: onScroll };
   }
 
   function renderSortHeader() {
@@ -1618,23 +1710,15 @@
     $('btn-upload-dir').hidden = !can('write');
     $('btn-mkdir').hidden = !can('write');
     $('btn-zip').hidden = !can('archive');
-    $('btn-keys').hidden = !allowKeys();
-    $('btn-users').hidden = !allowUsers();
-    $('btn-settings').hidden = !allowSettings();
+    $('btn-settings').hidden = !allowAnySettings();
     if (can('write')) {
       $('btn-upload').title = uploadLimitHint();
       // 文件夹上传的提示：说清「会保留结构」，这是它和普通上传最大的区别。
       $('btn-upload-dir').title = '上传整个文件夹（保留目录结构）　·　' +
         uploadLimitHint();
     }
-    if (!$('btn-keys').hidden) {
-      $('btn-keys').title = '上传密钥：给脚本一个只能上传、可设有效期、可随时撤销的凭证';
-    }
-    if (!$('btn-users').hidden) {
-      $('btn-users').title = '用户与权限：新建账号、按路径分配只读 / 读写权限';
-    }
     if (!$('btn-settings').hidden) {
-      $('btn-settings').title = '服务设置：切换服务根目录、调整单文件上传上限';
+      $('btn-settings').title = '设置：服务根目录与各项上限、上传密钥、用户与权限、版本升级';
     }
     updateAuthChip();
     $('btn-refresh').title = DATA.auth_on ? '刷新（当前：' + (DATA.user || '匿名') + '）' : '刷新';
@@ -1790,6 +1874,8 @@
       $('search-input').value = '';
       // 换了目录，顶栏的「更多」下拉不该跨页留着。
       if (G.closeMore) G.closeMore();
+      // 行菜单挂在 body 上、锚定的是上一页某一行，换目录后必须收掉。
+      closeRowActions();
       if (push !== false && DATA.perms.read) {
         // 地址栏更新是「锦上添花」，不能让它拖垮导航：目录已经取回来了，
         // 万一 pushState 因为任何原因失败（URL 构造问题、跨源限制、
@@ -3484,7 +3570,6 @@
       renderDropZone();
     });
 
-    $('btn-users').onclick = function () { G.openUsers(); };
     $('btn-mkdir').onclick = openMkdirDialog;
     $('btn-refresh').onclick = function () { navigate(state.path, false); };
 
@@ -3527,7 +3612,6 @@
       });
     };
 
-    $('btn-keys').onclick = function () { G.openKeys(); };
     $('btn-settings').onclick = function () { G.openSettings(); };
 
     $('btn-delete-sel').onclick = function () {
@@ -3735,6 +3819,8 @@
   G.can = can;
   G.allowKeys = allowKeys;
   G.allowUsers = allowUsers;
+  G.allowSettings = allowSettings;
+  G.closeRowActions = closeRowActions;
   G.isNarrow = isNarrow;
   G.canEdit = canEdit;
   G.canPreview = canPreview;

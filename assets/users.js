@@ -278,7 +278,15 @@
 
   // ---------------------------------------------------------------- 主界面
 
-  async function openUsers() {
+  // usersPanel 构建「用户与权限」面板，供设置弹窗挂到标签页里。
+  //
+  // 只负责内容，弹窗外壳由调用方决定，所以这里不调 openModal。
+  // 返回 { el, buttons, refresh }：buttons 是底部按钮描述（新建用户），
+  // 由调用方用 G.modalFoot 组装，避免 .modal-foot 嵌套。
+  //
+  // 新建/编辑用户仍是独立的 openEditor 弹窗，叠加在设置弹窗之上；
+  // 保存成功后通过 refresh 重建本面板的列表。
+  function usersPanel() {
     var body = document.createElement('div');
 
     var intro = document.createElement('div');
@@ -298,20 +306,6 @@
 
     var anonBox = document.createElement('div');
     body.appendChild(anonBox);
-
-    var modal = G.openModal({
-      title: '用户与权限',
-      body: body,
-      wide: true,
-      footer: G.modalFoot([
-        { label: '关闭', onClick: function () { modal.close(); } },
-        {
-          label: '新建用户',
-          cls: 'primary',
-          onClick: function () { openEditor(null, render); }
-        }
-      ])
-    });
 
     async function render(data) {
       if (!data) {
@@ -433,8 +427,20 @@
       }
     }
 
-    await render();
+    var refresh = function () { return render(); };
+    // 初始加载（不阻塞返回：列表先显示「正在读取…」，回来再填）。
+    refresh();
+
+    return {
+      el: body,
+      buttons: [{
+        label: '新建用户',
+        cls: 'primary',
+        onClick: function () { openEditor(null, refresh); }
+      }],
+      refresh: refresh
+    };
   }
 
-  G.openUsers = openUsers;
+  G.usersPanel = usersPanel;
 })();
