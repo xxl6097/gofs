@@ -617,13 +617,17 @@ table.listing {
 .col-check { width: 42px; }
 .col-size { width: 110px; }
 .col-time { width: 150px; }
-/* 操作列必须放得下最多 5 个带文字的按钮 —— 压缩包那一行是
-   下载 / 解压 / 内容 / 重命名 / 删除，实测需要 318px，加左右内边距共 342px。
+/* 操作列必须放得下**最多 8 个**按钮 —— 压缩包 + 完整权限那一行是
+   下载 / 解压 / 内容 / 链接 / 分享 / 移动 / 重命名 / 删除。
+   ⚠️ 这个数字随功能增加而变过：早先按 5 个按钮（318px）定的 352px，
+   后来补上「链接 / 分享 / 移动」之后就不够了，于是每一行都收起成「更多」——
+   即使名字列还空着大半个表格。现在按 Chrome 实测值定：
+   带文字 504px、纯图标 268px，各留 4px 余量，加左右内边距 24px。
    给不够时按钮不会缩（见 .op-btn 的 flex: none），只会折行；
    折行也放不下时由 .ops 的 flex-wrap 兜底，绝不会压到「修改时间」列上。
    注意：th 与 td 都要带 col-* 类。只隐藏 th 会让表头列数与内容列数不一致，
    table-layout: fixed 下列宽分配会整体错位（实测能把操作列挤到只剩 34px）。 */
-.col-ops { width: 352px; }
+.col-ops { width: 532px; }
 .col-name { width: auto; }
 
 .listing td {
@@ -1892,10 +1896,12 @@ html.booting body::after {
 }
 
 @media (max-width: 1280px) {
-  /* 中等宽度放不下带文字的按钮（最宽的一行要 318px）。
-     收成纯图标后每个按钮只需约 33px，把宽度还给文件名。 */
+  /* 中等宽度放不下带文字的按钮（最宽的一行要 504px）。
+     收成纯图标后每个按钮约 33px，最宽的一行（8 个）实测 268px ——
+     加左右内边距与 4px 余量即 296px。按 5 个按钮定的 196px 会让
+     每一行都放不下、全都收进「更多」。 */
   .op-btn span { display: none; }
-  .col-ops { width: 196px; }
+  .col-ops { width: 296px; }
   .col-time { width: 140px; }
 }
 
@@ -1916,11 +1922,19 @@ html.booting body::after {
   .search input { width: 130px; }
   .search input:focus { width: 170px; }
   .col-time { display: none; }
-  /* 已经没有时间列了，图标按钮仍要留够位置（5 个约需 166px）。 */
-  .col-ops { width: 196px; }
+  /* 已经没有时间列了，图标按钮仍要留够位置（最宽的 8 个实测 268px）。 */
+  .col-ops { width: 296px; }
   .op-btn span { display: none; }
   .btn span { display: none; }
   .btn.primary span { display: inline; }
+}
+
+/* 再窄一档，296px 会开始吃掉文件名（实测 561px 时名字只剩 0px）。
+   这里收回到 224px：常见的 6 个按钮（目录行）仍放得下、不出现「更多」，
+   只有最宽的 8 个（压缩包 + 完整权限）才收 —— 那时是真的没地方了。
+   ≤560px 那条规则在文件更靠后的位置，会覆盖这里。 */
+@media (max-width: 640px) {
+  .col-ops { width: 224px; }
 }
 
 /* ---------------- 顶栏重排 ----------------
@@ -2087,11 +2101,17 @@ html.booting body::after {
 }
 
 /* 触摸设备上图标按钮被放大到 40px 宽（见上面的 @media (hover: none)），
-   一排 5 个就需要 216px，所以中等宽度的操作列要跟着放宽并留点余量。
+   列宽要跟着放宽，否则一行放不下、每行都收进「更多」。按真实按钮数量分级：
+   8 个（压缩包 + 完整权限）需 8×40 + 7×4 = 348px，加内边距即 372px；
+   6 个（目录行）需 260px，加内边距即 284px。
    手机宽度已经改用「更多」菜单，不受这条影响（用 min-width 排除）。
-   这条放在最后，是为了覆盖上面 820px 断点里的窄值。 */
-@media (hover: none) and (min-width: 561px) and (max-width: 1280px) {
-  .col-ops { width: 252px; }
+   这两条放在最后，是为了覆盖上面 1280 / 820 / 640 断点里的窄值。 */
+@media (hover: none) and (min-width: 1001px) and (max-width: 1280px) {
+  .col-ops { width: 372px; }
+}
+/* 再窄就放不下 8 个了，列宽只保证常见的 6 个 —— 更宽的行这时是真的没地方。 */
+@media (hover: none) and (min-width: 561px) and (max-width: 1000px) {
+  .col-ops { width: 284px; }
 }
 
 /* ------------------------------------------------------- 用户与权限管理 */
