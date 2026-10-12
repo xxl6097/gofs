@@ -1,7 +1,11 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/xxl6097/gofs/internal/config"
@@ -14,16 +18,25 @@ import (
 // 在请求处理中途写它会造成数据竞争（Go 的 race detector 会直接报错）。
 // 所以这些可变的取值单独抽出来，用锁保护。
 //
-// 目前有三处：
+// 目前有四处：
+//   - 站点标题（浏览器标签页与顶栏品牌名，**会落盘**）
 //   - 单文件上传上限（登录取到管理员后可在页面上调整）
 //   - 在线编辑的大小上限（同上）
 //   - 允许切换服务根目录的范围（由启动参数推导，运行期不变）
+//
+// 为什么只有标题落盘：上限是「临时放宽」性质的运行时覆盖，重启回到启动
+// 参数声明的值才是对的（否则运维临时调大一次就再也回不去了）；标题是标识，
+// 重启后还在才符合预期。
 type runtimeSettings struct {
 	cfg *config.Config
 
 	mu            sync.RWMutex
 	uploadMaxSize int64
 	editMaxSize   int64
+	title         string
+
+	// settingsFile 是标题的持久化路径；空表示只存内存。
+	settingsFile string
 
 	// allowRoots 是「允许把服务根目录切换到哪些地方」的前缀列表。
 	//
@@ -32,13 +45,106 @@ type runtimeSettings struct {
 	allowRoots []string
 }
 
+// Title 返回当前站点标题。
+func (s *runtimeSettings) Title() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.title
+}
+
+// SetTitle 修改站点标题并落盘。
+//
+// 落盘失败不影响本次生效（内存里已经是新值），但要把错误回给调用方 ——
+// 否则管理员会以为「设好了」，重启后才发现又变回去了。
+func (s *runtimeSettings) SetTitle(v string) error {
+	s.mu.Lock()
+	s.title = v
+	s.mu.Unlock()
+	return s.saveTitle()
+}
+
+// settingsDoc 是设置文件的磁盘格式。
+//
+// 带 version 是为了以后加字段时能识别旧文件；目前只有一项。
+type settingsDoc struct {
+	Version int    `json:"version"`
+	Title   string `json:"title,omitempty"`
+}
+
+// loadTitle 读取设置文件里的标题。
+//
+// 读不到（文件不存在 / 内容损坏 / 路径为空）一律**保留启动参数给的默认值**，
+// 不报错、也不让服务起不来：一个坏掉的设置文件不该影响整个服务可用。
+func (s *runtimeSettings) loadTitle() {
+	path := s.settingsFile
+	if path == "" {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var doc settingsDoc
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return
+	}
+	if t := strings.TrimSpace(doc.Title); t != "" {
+		s.title = t
+	}
+}
+
+// saveTitle 原子写回设置文件（路径为空时只留在内存里）。
+func (s *runtimeSettings) saveTitle() error {
+	path := s.settingsFile
+	if path == "" {
+		return nil
+	}
+	raw, err := json.MarshalIndent(settingsDoc{Version: 1, Title: s.Title()}, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("创建设置目录失败: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".settings-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	abort := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		abort()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		abort()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
 // newRuntimeSettings 依据启动配置与启动根目录构造运行时设置。
 func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 	rs := &runtimeSettings{
 		cfg:           cfg,
 		uploadMaxSize: cfg.UploadMaxSize,
 		editMaxSize:   cfg.EditMaxSize,
+		title:         cfg.Title,
+		settingsFile:  cfg.SettingsFile,
 	}
+	rs.loadTitle()
 
 	// 默认可切换范围是启动根的**父目录**：
 	// 启动根是 /srv/data 时能切到 /srv/* 下的任何地方（含兄弟目录），

@@ -46,6 +46,17 @@ func DefaultUserFile() string {
 	return filepath.Join(DefaultKeyDir(), "users.json")
 }
 
+// DefaultSettingsFile 的返回值是「运行期设置」的默认持久化路径。
+//
+// 目前只存一项：站点标题。它属于标识/品牌，重启后应该还在 ——
+// 不像上传上限那种「临时放宽」，重启回到启动参数声明的值才是对的。
+func DefaultSettingsFile() string {
+	return filepath.Join(DefaultKeyDir(), "settings.json")
+}
+
+// DefaultTitle 是未指定时的站点标题。
+const DefaultTitle = "gofs"
+
 // 解压相关的硬性安全上限，可由命令行覆盖。
 const (
 	// DefaultExtractMaxTotal 单次解压允许写出的字节总量上限，默认 10 GiB。
@@ -237,6 +248,17 @@ type Config struct {
 	// 例如 gofs.WithVersion("1.4.2") 或直接写 cfg.Version = "1.4.2"。
 	Version string
 
+	// Title 为站点标题，显示在浏览器标签页与顶栏品牌名上。默认 "gofs"。
+	//
+	// 这里给的是**初始默认值**：管理员在页面上改过之后会落到 SettingsFile，
+	// 之后以文件为准（改一次就生效、且重启还在）。想改回默认就把文件删掉，
+	// 或者把 --title 换成新值再用一次「恢复默认」。
+	Title string
+
+	// SettingsFile 为运行期设置的持久化路径；为空表示只保存在内存中，
+	// 重启即回到 Title 的启动值。
+	SettingsFile string
+
 	// ShowVersion 为 true 时打印版本并退出。
 	ShowVersion bool
 
@@ -426,7 +448,9 @@ func Defaults() *Config {
 		AllowRootSwitch:    true,
 		RootAllow:          nil,
 
-		Version: DefaultVersion,
+		Version:      DefaultVersion,
+		Title:        DefaultTitle,
+		SettingsFile: DefaultSettingsFile(),
 	}
 }
 
@@ -434,6 +458,8 @@ func Defaults() *Config {
 // 只有真正设置了的变量才会生效，未设置的字段保持原值。
 func (c *Config) ApplyEnv() {
 	c.Version = envStr("GOFS_VERSION", c.Version)
+	c.Title = envStr("GOFS_TITLE", c.Title)
+	c.SettingsFile = envStr("GOFS_SETTINGS_FILE", c.SettingsFile)
 	c.ServePath = envStr("GOFS_SERVE_PATH", c.ServePath)
 	c.Bind = envStr("GOFS_BIND", c.Bind)
 	c.Port = envInt("GOFS_PORT", c.Port)
@@ -531,6 +557,9 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.StringVar(&cfg.KeyFile, "key-file", cfg.KeyFile, "上传密钥存储路径，置空则只保存在内存中")
 	fs.BoolVar(&noUserManage, "no-user-manage", false, "禁止在页面上增删改用户")
 	fs.StringVar(&cfg.UserFile, "user-file", cfg.UserFile, "用户表存储路径，置空则只保存在内存中")
+	fs.StringVar(&cfg.Title, "title", cfg.Title, "站点标题（浏览器标签页与顶栏品牌名）")
+	fs.StringVar(&cfg.SettingsFile, "settings-file", cfg.SettingsFile,
+		"运行期设置（目前只有标题）的存储路径，置空则只保存在内存中")
 	fs.BoolVar(&cfg.AllowDelete, "allow-delete", cfg.AllowDelete, "允许删除文件/目录")
 	fs.BoolVar(&cfg.AllowSearch, "allow-search", cfg.AllowSearch, "允许搜索文件/目录")
 	fs.BoolVar(&cfg.AllowArchive, "allow-archive", cfg.AllowArchive, "允许把目录打包成压缩包下载")
@@ -672,6 +701,10 @@ func (c *Config) Normalize() error {
 	// 版本号兜底：手工构造 Config（不经 Defaults）时也要有个可报告的版本。
 	if strings.TrimSpace(c.Version) == "" {
 		c.Version = DefaultVersion
+	}
+	// 标题同理：空标题会让浏览器标签页只剩一个「—」。
+	if strings.TrimSpace(c.Title) == "" {
+		c.Title = DefaultTitle
 	}
 
 	// -A 展开成各项权限的并集。
@@ -838,6 +871,10 @@ func usageText() string {
       --key-file <path>      上传密钥存储路径，默认 <用户配置目录>/gofs/keys.json；
                              置空则只保存在内存中，重启即失效
       --user-file <path>     用户表存储路径，默认 <用户配置目录>/gofs/users.json；
+                             置空则只保存在内存中，重启即失效
+      --title <text>         站点标题（浏览器标签页与顶栏品牌名），默认 gofs。
+                             管理员也能在页面的「设置 → 常规」里改，改完会落盘
+      --settings-file <path> 运行期设置的存储路径，默认 <用户配置目录>/gofs/settings.json；
                              置空则只保存在内存中，重启即失效
       --no-user-manage       禁止在页面上增删改用户（账号只能由 -a 定义）
       --allow-delete         允许删除

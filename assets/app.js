@@ -1823,11 +1823,31 @@
       : who;
   }
 
+  // siteTitle 返回站点标题：服务端下发的可配置标题，缺省时回落到 'gofs'。
+  //
+  // 空串也要回落 —— 标签页标题变成「— 」比显示 gofs 更让人困惑。
+  function siteTitle() {
+    var t = typeof DATA.title === 'string' ? DATA.title.trim() : '';
+    return t || 'gofs';
+  }
+
+  // applySiteTitle 把标题写到浏览器标签页与顶栏品牌名上。
+  //
+  // 两处必须是同一个值：分开设会让人以为配错了（而且顶栏那个才是页面上
+  // 真正「看得见的标题」）。
+  // 一律用 textContent：标题是管理员可改的自由文本，不能当 HTML 拼进去。
+  function applySiteTitle() {
+    var t = siteTitle();
+    var brand = document.querySelector('.brand span');
+    if (brand) brand.textContent = t;
+    document.title = (state.path === '/' ? '' : state.name + ' — ') + t;
+  }
+
   function render() {
     renderBreadcrumb();
     renderTable();
     renderPerms();
-    document.title = (state.path === '/' ? '' : state.name + ' — ') + 'gofs';
+    applySiteTitle();
   }
 
   // ---------------------------------------------------------------- 导航与刷新
@@ -3903,6 +3923,8 @@
   G.allowKeys = allowKeys;
   G.allowUsers = allowUsers;
   G.allowSettings = allowSettings;
+  // 设置面板改完标题后要立刻把标签页与顶栏刷新掉，不必等下一次请求。
+  G.applySiteTitle = applySiteTitle;
   G.closeRowActions = closeRowActions;
   G.isNarrow = isNarrow;
   G.canEdit = canEdit;

@@ -50,7 +50,9 @@ type permsData struct {
 
 // pageData 是注入到页面里的初始状态。
 type pageData struct {
-	Version    string          `json:"version"`
+	Version string `json:"version"`
+	// Title 为站点标题，前端用它设置浏览器标签页与顶栏品牌名。
+	Title      string          `json:"title"`
 	PathPrefix string          `json:"path_prefix"`
 	Path       string          `json:"path"`
 	Name       string          `json:"name"`
@@ -119,6 +121,7 @@ func (s *Server) buildPerms(p permResult) permsData {
 func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string, admin bool) pageData {
 	return pageData{
 		Version:          s.cfg.Version,
+		Title:            s.settings.Title(),
 		PathPrefix:       s.cfg.PathPrefix,
 		Path:             listing.Path,
 		Name:             listing.Name,
@@ -247,13 +250,16 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath string) {
 	clean := fsutil.CleanURLPath(urlPath)
 	s.writeHTML(w, pageData{
-		Version:      s.cfg.Version,
-		PathPrefix:   s.cfg.PathPrefix,
-		Path:         clean,
-		Name:         "/",
-		Listing:      &fsutil.Listing{Path: clean, Name: "/", IsDir: true, Entries: []fsutil.Entry{}},
-		Perms:        permsData{},
-		AuthOn:       true,
+		Version:    s.cfg.Version,
+		Title:      s.settings.Title(),
+		PathPrefix: s.cfg.PathPrefix,
+		Path:       clean,
+		Name:       "/",
+		Listing:    &fsutil.Listing{Path: clean, Name: "/", IsDir: true, Entries: []fsutil.Entry{}},
+		Perms:      permsData{},
+		AuthOn:     true,
+		// 标题也要带上：登录页就在品牌名旁边，漏了它会让品牌名先显示
+		// 默认的 gofs、登录之后才跳成配置值。
 		AuthRequired: true,
 		EditMaxSize:  s.settings.EditMaxSize(),
 	})

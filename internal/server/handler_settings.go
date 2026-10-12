@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -34,6 +35,10 @@ type settingsReply struct {
 	EditMaxSize int64 `json:"edit_max_size"`
 	// EditMaxSizeDefault 为启动参数里的取值，用于「恢复默认」。
 	EditMaxSizeDefault int64 `json:"edit_max_size_default"`
+	// Title 为站点标题（浏览器标签页与顶栏品牌名）。
+	Title string `json:"title"`
+	// TitleDefault 为启动参数里的取值，用于「恢复默认」。
+	TitleDefault string `json:"title_default"`
 	// UploadDateDir 为当前的上传归档目录（未开启归档时为空串）。
 	UploadDateDir string `json:"upload_date_dir,omitempty"`
 }
@@ -46,6 +51,7 @@ type settingsRequest struct {
 	Root          *string `json:"root"`
 	UploadMaxSize *int64  `json:"upload_max_size"`
 	EditMaxSize   *int64  `json:"edit_max_size"`
+	Title         *string `json:"title"`
 }
 
 // handleSettings 读取或修改服务级设置（根目录、单文件上传上限）。
@@ -76,6 +82,8 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		UploadMaxSizeUnlimited: s.settings.UploadMaxSize() == 0,
 		EditMaxSize:            s.settings.EditMaxSize(),
 		EditMaxSizeDefault:     s.cfg.EditMaxSize,
+		Title:                  s.settings.Title(),
+		TitleDefault:           s.cfg.Title,
 	}
 	if s.cfg.UploadDated() {
 		rep.UploadDateDir = s.cfg.UploadDateDir(time.Now())
@@ -105,9 +113,26 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
 		return
 	}
-	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil {
+	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil && req.Title == nil {
 		http.Error(w, "400 Bad Request: 没有需要修改的设置项", http.StatusBadRequest)
 		return
+	}
+
+	if req.Title != nil {
+		title, err := normalizeTitle(*req.Title)
+		if err != nil {
+			http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		old := s.settings.Title()
+		if err := s.settings.SetTitle(title); err != nil {
+			// 内存里已经生效，只是没落盘 —— 照实说，别让管理员以为「重启后还在」。
+			s.logger.Errorf("站点标题落盘失败: %v", err)
+			http.Error(w, "500 Internal Server Error: 标题已生效，但写入设置文件失败："+
+				err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.logger.Infof("站点标题：%q → %q", old, title)
 	}
 
 	if req.Root != nil {
@@ -152,6 +177,37 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, s.buildSettings(true))
+}
+
+// maxTitleRunes 是站点标题允许的最大字符数（按字符数，不是字节数）。
+//
+// 给 60 是因为顶栏是定高的：再长就会把工具栏挤变形，而标签页里也早就被
+// 浏览器截断了。真正想写长的应该改前端资源，而不是塞进这个字段。
+const maxTitleRunes = 60
+
+// normalizeTitle 校验并规整站点标题。
+//
+// 标题是管理员填的自由文本，前端一律用 textContent 写入（不拼 HTML），
+// 所以这里不担心注入；要挡的是两类会让界面坏掉、事后又很难查的输入：
+//   - 控制字符：浏览器标签页里会被压成一行，进日志还会破坏「一行一条」；
+//   - 过长的标题：见 maxTitleRunes。
+//
+// 空标题直接报错而不是当作「恢复默认」：静默地把标题换掉比报错更意外。
+// 想回默认值，界面上有「恢复启动时的默认值」。
+func normalizeTitle(raw string) (string, error) {
+	t := strings.TrimSpace(raw)
+	if t == "" {
+		return "", errors.New("标题不能为空（想用启动参数里的默认值，请点「恢复启动时的默认值」）")
+	}
+	for _, r := range t {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New("标题不能包含换行、制表等控制字符")
+		}
+	}
+	if n := len([]rune(t)); n > maxTitleRunes {
+		return "", fmt.Errorf("标题最长 %d 个字符（当前 %d）", maxTitleRunes, n)
+	}
+	return t, nil
 }
 
 // switchRoot 把服务根目录切换到 newRoot。

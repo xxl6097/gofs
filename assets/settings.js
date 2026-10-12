@@ -156,6 +156,61 @@
     return { field: field, read: read, refresh: refresh };
   }
 
+  // makeTextField 造一个「一行文本 + 当前生效值 + 恢复默认」的输入控件。
+  //
+  // 与 makeSizeField 同构：两者都要「当前生效 / 启动参数默认值 / 一键恢复」
+  // 这三件信息，交互保持一致，用户不必学两套。
+  //
+  // 返回 { field, read, refresh }：read() 已 trim，空串交给服务端去报错
+  // （服务端才知道规则，前端只负责别把空白当有效输入）。
+  function makeTextField(opts) {
+    var field = makeField(opts.label);
+    var row = document.createElement('div');
+    row.className = 'row';
+
+    var input = textInput(opts.value || '');
+    input.style.flex = '1';
+    input.style.minWidth = '0';
+    input.placeholder = opts.def || '';
+    // 与服务端的 maxTitleRunes 对齐：让它在前端就被拦住，
+    // 而不是写完点保存才吃一个 400。
+    if (opts.maxLength) input.maxLength = opts.maxLength;
+    row.appendChild(input);
+    field.appendChild(row);
+
+    var hint = addHint(field, '');
+
+    function refresh() {
+      hint.textContent = '';
+      hint.appendChild(document.createTextNode(opts.hintText));
+      hint.appendChild(document.createTextNode('　当前生效：'));
+      var b = document.createElement('b');
+      b.textContent = opts.current() || '（默认）';
+      hint.appendChild(b);
+      hint.appendChild(document.createTextNode('　·　启动参数默认值：' + (opts.def || '（空）')));
+
+      var quick = document.createElement('button');
+      quick.type = 'button';
+      quick.className = 'btn btn-sm';
+      quick.style.marginTop = '8px';
+      quick.textContent = '恢复启动时的默认值';
+      quick.onclick = function () {
+        input.value = opts.def || '';
+        refresh();
+      };
+      hint.appendChild(document.createElement('br'));
+      hint.appendChild(quick);
+    }
+
+    input.oninput = refresh;
+    refresh();
+    return {
+      field: field,
+      read: function () { return String(input.value).trim(); },
+      refresh: refresh
+    };
+  }
+
   function makeField(labelText) {
     var wrap = document.createElement('div');
     wrap.className = 'field';
@@ -214,6 +269,7 @@
     var rootInput = null;
     var uploadField = null;
     var editField = null;
+    var titleField = null;
 
     function showErr(msg) {
       errBox.hidden = false;
@@ -223,6 +279,20 @@
     // fill 拿到设置之后再把表单铺出来。
     function fill() {
       el.textContent = '';
+
+      // ---- 站点标题 ----
+      //
+      // 放在最前面：它是最「面向人」的一项，改完立刻能看到变化。
+      titleField = makeTextField({
+        label: '站点标题',
+        value: cur.title,
+        def: cur.title_default,
+        current: function () { return cur.title; },
+        maxLength: 60,
+        hintText: '显示在浏览器标签页与顶栏品牌名上。保存后本页立即生效；' +
+          '其它已打开的页面要刷新才看得到。'
+      });
+      el.appendChild(titleField.field);
 
       // ---- 服务根目录 ----
       var rootField = makeField('服务根目录');
@@ -275,6 +345,7 @@
     // dirty 表示「常规」里有还没保存的改动，切标签/关窗时据此提醒。
     function dirty() {
       if (!cur) return false;
+      if (titleField && titleField.read() !== (cur.title || '')) return true;
       if (cur.root_switchable && rootInput) {
         var nextRoot = rootInput.value.trim();
         if (nextRoot && nextRoot !== (cur.root || '')) return true;
@@ -293,6 +364,14 @@
       errBox.hidden = true;
 
       var patch = {};
+
+      var nextTitle = titleField.read();
+      // 空标题交给服务端去拒绝（规则在那边），但没必要白跑一趟往返。
+      if (!nextTitle) {
+        showErr('站点标题不能为空。想用启动参数里的默认值，请点「恢复启动时的默认值」。');
+        return;
+      }
+      if (nextTitle !== (cur.title || '')) patch.title = nextTitle;
 
       if (cur.root_switchable) {
         var nextRoot = rootInput.value.trim();
@@ -351,6 +430,11 @@
         G.data.upload_max_size = out.upload_max_size;
         G.data.edit_max_size = out.edit_max_size;
 
+        // 标题当场生效：标签页与顶栏品牌名都立刻换成新值，
+        // 不必等下一次请求（其它已打开的页面仍需刷新才会变）。
+        if (out.title) G.data.title = out.title;
+        if (G.applySiteTitle) G.applySiteTitle();
+
         var changedRoot = patch.root !== undefined;
         var mm = out.upload_max_size > 0 ? G.fmtSize(out.upload_max_size) : '不限制';
         ctx.close();
@@ -366,6 +450,7 @@
           // 如实说改了哪一项 —— 两项都动过时说一句「上传上限已设为 X」
           // 会让人以为另一项没生效。
           var parts = [];
+          if (patch.title !== undefined) parts.push('标题「' + out.title + '」');
           if (patch.upload_max_size !== undefined) parts.push('上传上限 ' + mm);
           if (patch.edit_max_size !== undefined) {
             parts.push('编辑上限 ' + G.fmtSize(out.edit_max_size));
