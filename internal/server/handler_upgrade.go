@@ -12,8 +12,8 @@ import (
 
 // handleUpgrade 提供「检查更新」与「执行升级」两个动作。
 //
-//	GET  /__gofs__/upgrade          检查有没有新版本
-//	POST /__gofs__/upgrade          执行升级，SSE 推送进度
+//	GET  /fs/upgrade          检查有没有新版本
+//	POST /fs/upgrade          执行升级，SSE 推送进度
 //
 // 实际的检查与升级逻辑**不在这里** —— 由调用方通过 config.Upgrader 注入。
 // 服务端只负责：鉴权、串行化、把进度推给前端。这样更新源与校验策略

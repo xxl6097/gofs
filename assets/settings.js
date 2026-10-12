@@ -11,8 +11,8 @@
   var G = window.GOFS = window.GOFS || {};
 
   var BASE = (G.data && G.data.path_prefix) || '';
-  var EP = BASE + '/__gofs__/settings';
-  var EP_UPGRADE = BASE + '/__gofs__/upgrade';
+  var EP = BASE + '/fs/settings';
+  var EP_UPGRADE = BASE + '/fs/upgrade';
 
   var UNITS = [
     // KiB 是给「在线编辑上限」用的：512 KiB 这类取值很常见，

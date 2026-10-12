@@ -250,7 +250,7 @@ func TestKeyViewReportsKind(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := do(t, s, http.MethodGet, "/__gofs__/keys", nil,
+	got := do(t, s, http.MethodGet, "/fs/keys", nil,
 		map[string]string{"Authorization": basicAuth("boss", "pw")})
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d：%s", got.code, got.body)

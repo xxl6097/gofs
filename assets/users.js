@@ -10,7 +10,7 @@
   'use strict';
 
   var G = window.GOFS;
-  var EP = G.raw('/__gofs__/users');
+  var EP = G.raw('/fs/users');
 
   var PERMS = [
     { value: 'rw', label: '可读写' },

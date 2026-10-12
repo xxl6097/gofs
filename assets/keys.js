@@ -8,7 +8,7 @@
   'use strict';
 
   var G = window.GOFS;
-  var KEYS_EP = G.raw('/__gofs__/keys');
+  var KEYS_EP = G.raw('/fs/keys');
 
   var TTL_OPTIONS = [
     { label: '1 小时', seconds: 3600 },

@@ -36,7 +36,7 @@ func makeZip(t *testing.T, root, zipRel, secret string) {
 
 // TestExtractListRequiresAuth 钉住一个曾经真实存在的鉴权绕过。
 //
-// /__gofs__/extract 是独立路由，不经过 handleRoot 的授权。
+// /fs/extract 是独立路由，不经过 handleRoot 的授权。
 // 它既能列出包内清单、又能用 &file= 取出包内单个文件 ——
 // 而它原先**一次权限校验都没有**，只受全局的 --allow-extract 约束。
 //
@@ -53,7 +53,7 @@ func TestExtractListRequiresAuth(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "boss:pw@/:rw"))
 
 	t.Run("未登录列清单被拒", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/extract?path=/private/secret.zip", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/extract?path=/private/secret.zip", nil, nil)
 		if got.code == http.StatusOK {
 			t.Fatalf("未登录竟然列出了包内清单：%s", got.body)
 		}
@@ -64,7 +64,7 @@ func TestExtractListRequiresAuth(t *testing.T) {
 
 	t.Run("未登录取包内文件被拒", func(t *testing.T) {
 		got := do(t, s, http.MethodGet,
-			"/__gofs__/extract?path=/private/secret.zip&file=secret.txt", nil, nil)
+			"/fs/extract?path=/private/secret.zip&file=secret.txt", nil, nil)
 		if strings.Contains(got.body, secret) {
 			t.Fatalf("未登录竟然读到了包内内容：%s", got.body)
 		}
@@ -76,13 +76,13 @@ func TestExtractListRequiresAuth(t *testing.T) {
 	auth := map[string]string{"Authorization": basicAuth("boss", "pw")}
 
 	t.Run("登录后可以正常用", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/extract?path=/private/secret.zip", nil, auth)
+		got := do(t, s, http.MethodGet, "/fs/extract?path=/private/secret.zip", nil, auth)
 		if got.code != http.StatusOK {
 			t.Fatalf("带凭据列清单返回 %d，期望 200：%s", got.code, got.body)
 		}
 
 		got = do(t, s, http.MethodGet,
-			"/__gofs__/extract?path=/private/secret.zip&file=secret.txt", nil, auth)
+			"/fs/extract?path=/private/secret.zip&file=secret.txt", nil, auth)
 		if got.code != http.StatusOK {
 			t.Fatalf("带凭据取包内文件返回 %d，期望 200：%s", got.code, got.body)
 		}
@@ -104,7 +104,7 @@ func TestExtractListChecksReadPermNotJustAnyPerm(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "guest:g@/docs:r"))
 
 	got := do(t, s, http.MethodGet,
-		"/__gofs__/extract?path=/private/deep/secret.zip", nil, nil)
+		"/fs/extract?path=/private/deep/secret.zip", nil, nil)
 	if got.code == http.StatusOK {
 		t.Fatalf("越权读到了：%s", got.body)
 	}

@@ -17,8 +17,8 @@
   }
 
   var BASE = DATA.path_prefix || '';
-  var ASSETS = BASE + '/__gofs__/assets/';
-  var API = BASE + '/__gofs__/extract';
+  var ASSETS = BASE + '/fs/assets/';
+  var API = BASE + '/fs/extract';
 
   // ------------------------------------------------------------ 权限与配置
   //
@@ -192,7 +192,7 @@
   // 而且登出这个动作对用户来说应该永远成功。浏览器下个请求会带上
   // 服务端回的过期 cookie，自然就清干净了。
   function dropServerSession() {
-    return fetch(BASE + '/__gofs__/auth', {
+    return fetch(BASE + '/fs/auth', {
       method: 'DELETE',
       headers: { 'X-Gofs-Ajax': '1' }
     }).catch(function () { /* 网络问题就算了，本地凭据已经清了 */ });
@@ -354,7 +354,7 @@
       setBusy(true);
       var res;
       try {
-        res = await fetch(BASE + '/__gofs__/auth?path=' + encodeURIComponent(state.path || '/'), {
+        res = await fetch(BASE + '/fs/auth?path=' + encodeURIComponent(state.path || '/'), {
           method: 'GET',
           headers: {
             'Authorization': 'Basic ' + b64encode(u + ':' + pw),
@@ -426,7 +426,7 @@
     var path = state.path || '/';
     var res;
     try {
-      res = await fetch(BASE + '/__gofs__/auth?path=' + encodeURIComponent(path), {
+      res = await fetch(BASE + '/fs/auth?path=' + encodeURIComponent(path), {
         headers: authHeaders()
       });
     } catch (e) {
@@ -2805,10 +2805,10 @@
   }
 
   // 凭证管理端点（上传密钥与分享链接共用）。
-  var API_KEYS = raw('/__gofs__/keys');
+  var API_KEYS = raw('/fs/keys');
 
   // 服务端的 Office 内容提取端点。
-  var OFFICE_EP = raw('/__gofs__/office');
+  var OFFICE_EP = raw('/fs/office');
 
   // renderOfficePreview 取回文档内容并渲染。
   //

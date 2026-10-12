@@ -901,37 +901,37 @@ func usageText() string {
   gofs -b 127.0.0.1 -p 8080 ./public   指定监听地址与端口
 
 在线解压:
-  PUT    /__gofs__/extract       请求体 {"path":"a.zip","dest":"a","overwrite":false}
+  PUT    /fs/extract       请求体 {"path":"a.zip","dest":"a","overwrite":false}
                                  返回 text/event-stream，逐条推送解压进度
-  GET    /__gofs__/extract?path=a.zip          列出压缩包内容（JSON）
-  GET    /__gofs__/extract?path=a.zip&file=x   从压缩包内流式下载单个文件
+  GET    /fs/extract?path=a.zip          列出压缩包内容（JSON）
+  GET    /fs/extract?path=a.zip&file=x   从压缩包内流式下载单个文件
 在线编辑:
-  GET    /__gofs__/text?path=a.md         读取文本内容（含语言、换行、BOM、内容摘要）
-  PUT    /__gofs__/text                   保存，请求体 {"path","content","base_hash","force"}
+  GET    /fs/text?path=a.md         读取文本内容（含语言、换行、BOM、内容摘要）
+  PUT    /fs/text                   保存，请求体 {"path","content","base_hash","force"}
                                           摘要不匹配时返回 409，避免静默覆盖他人改动
 
 上传密钥:
-  GET    /__gofs__/keys                   列出全部密钥（不含明文）
-  POST   /__gofs__/keys                   创建，请求体 {"name","scope","ttl_seconds"}
+  GET    /fs/keys                   列出全部密钥（不含明文）
+  POST   /fs/keys                   创建，请求体 {"name","scope","ttl_seconds"}
                                           响应中的 token 只返回这一次
-  DELETE /__gofs__/keys?id=<id>           撤销
+  DELETE /fs/keys?id=<id>           撤销
   使用   curl -T f.txt -H 'X-Gofs-Upload-Key: <token>' http://host/path
          或 curl -T f.txt 'http://host/path?key=<token>'
          密钥只允许上传，且只能落在 scope 限定的目录内
 
 用户管理:
-  GET    /__gofs__/users                  列出账号（启动参数定义的会标 from_startup）
-  POST   /__gofs__/users                  请求体 {"name","password","rules":[{"path","perm"}]}
-  PUT    /__gofs__/users                  同上；省略 password 表示不改密码
-  DELETE /__gofs__/users?name=<name>      删除
+  GET    /fs/users                  列出账号（启动参数定义的会标 from_startup）
+  POST   /fs/users                  请求体 {"name","password","rules":[{"path","perm"}]}
+  PUT    /fs/users                  同上；省略 password 表示不改密码
+  DELETE /fs/users?name=<name>      删除
   perm   "rw" 可读写 / "r" 只读，按最长前缀匹配，未命中的路径一律拒绝
   权限   只有「对服务根拥有读写权限」的账号能用；且服务必须已启用鉴权
          （先用 -a 配一个账号，再来页面创建其他用户）
   密码   只保存 PBKDF2-HMAC-SHA256 摘要，每用户独立随机盐，服务端拿不回明文
 
 服务设置（运行期，免重启）:
-  GET    /__gofs__/settings               读取当前设置
-  PUT    /__gofs__/settings               请求体 {"root":"/srv/data","upload_max_size":10737418240}
+  GET    /fs/settings               读取当前设置
+  PUT    /fs/settings               请求体 {"root":"/srv/data","upload_max_size":10737418240}
                                           upload_max_size 为 0 表示不限制
   权限   需要对服务根拥有读写权限（否则 403）；受 --no-root-switch /
          --root-allow 约束，可切换范围之外的路径会被拒绝（400）

@@ -673,7 +673,7 @@ func TestArchiveListAllFormats(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.wantFormat, func(t *testing.T) {
-			r := do(t, s, http.MethodGet, "/__gofs__/extract?path="+c.path, nil, nil)
+			r := do(t, s, http.MethodGet, "/fs/extract?path="+c.path, nil, nil)
 			if r.code != 200 {
 				t.Fatalf("状态码 = %d, 期望 200；body=%s", r.code, r.body)
 			}
@@ -707,7 +707,7 @@ func TestArchiveEntryDownload(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
-	r := do(t, s, http.MethodGet, "/__gofs__/extract?path=/sample.zip&file=hello.txt", nil, nil)
+	r := do(t, s, http.MethodGet, "/fs/extract?path=/sample.zip&file=hello.txt", nil, nil)
 	if r.code != 200 {
 		t.Fatalf("状态码 = %d, 期望 200；%s", r.code, r.body)
 	}
@@ -724,7 +724,7 @@ func TestArchiveUnsupportedFormat(t *testing.T) {
 	writeFile(t, filepath.Join(root, "fake.7z"), []byte("7z\xbc\xaf\x27\x1c\x00\x04"))
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
-	r := do(t, s, http.MethodGet, "/__gofs__/extract?path=/fake.7z", nil, nil)
+	r := do(t, s, http.MethodGet, "/fs/extract?path=/fake.7z", nil, nil)
 	if r.code != http.StatusUnsupportedMediaType {
 		t.Errorf("状态码 = %d, 期望 415；body=%s", r.code, r.body)
 	}
@@ -740,7 +740,7 @@ func runExtract(t *testing.T, s *Server, reqBody string) ([]struct {
 	data string
 }, resp) {
 	t.Helper()
-	r := do(t, s, http.MethodPut, "/__gofs__/extract", strings.NewReader(reqBody),
+	r := do(t, s, http.MethodPut, "/fs/extract", strings.NewReader(reqBody),
 		map[string]string{"Content-Type": "application/json"})
 	return sseEvents(t, r.body), r
 }
@@ -844,7 +844,7 @@ func TestExtractDisabled(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "--allow-upload"))
 
-	r := do(t, s, http.MethodPut, "/__gofs__/extract",
+	r := do(t, s, http.MethodPut, "/fs/extract",
 		strings.NewReader(`{"path":"/sample.zip"}`),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != http.StatusForbidden {
@@ -1352,7 +1352,7 @@ func TestHealth(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root))
 
-	r := do(t, s, http.MethodGet, "/__gofs__/health", nil, nil)
+	r := do(t, s, http.MethodGet, "/fs/health", nil, nil)
 	if r.code != 200 {
 		t.Fatalf("状态码 = %d", r.code)
 	}
@@ -1417,7 +1417,7 @@ func TestAssetsServed(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
 	for _, name := range []string{"app.js", "style.css"} {
-		r := do(t, s, http.MethodGet, "/__gofs__/assets/"+name, nil, nil)
+		r := do(t, s, http.MethodGet, "/fs/assets/"+name, nil, nil)
 		if r.code != 200 {
 			t.Errorf("%s 状态码 = %d", name, r.code)
 		}
@@ -1426,7 +1426,7 @@ func TestAssetsServed(t *testing.T) {
 		}
 	}
 	// 目录穿越尝试
-	if r := do(t, s, http.MethodGet, "/__gofs__/assets/../server.go", nil, nil); r.code == 200 {
+	if r := do(t, s, http.MethodGet, "/fs/assets/../server.go", nil, nil); r.code == 200 {
 		t.Errorf("资源目录穿越未被拦截")
 	}
 }
@@ -1459,7 +1459,7 @@ func TestPathPrefix(t *testing.T) {
 	}
 	// 页面资源前缀应带上 path-prefix
 	r := do(t, s, http.MethodGet, "/gofs/", nil, nil)
-	if !strings.Contains(r.body, "/gofs/__gofs__/assets/") {
+	if !strings.Contains(r.body, "/gofs/fs/assets/") {
 		t.Errorf("资源前缀未跟随 path-prefix")
 	}
 }
@@ -1746,7 +1746,7 @@ var ajaxHdr = map[string]string{"X-Gofs-Ajax": "1"}
 // readDoc 读取文本文件接口并解析响应。
 func readDoc(t *testing.T, s *Server, path string, headers map[string]string) (int, map[string]any, string) {
 	t.Helper()
-	r := do(t, s, http.MethodGet, "/__gofs__/text?path="+url.QueryEscape(path), nil, headers)
+	r := do(t, s, http.MethodGet, "/fs/text?path="+url.QueryEscape(path), nil, headers)
 	var d map[string]any
 	if strings.HasPrefix(r.head.Get("Content-Type"), "application/json") {
 		_ = json.Unmarshal([]byte(r.body), &d)
@@ -1836,7 +1836,7 @@ func TestTextSave(t *testing.T) {
 		"content":   "修改后的内容\n第二行\n",
 		"base_hash": baseHash,
 	})
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != 200 {
 		t.Fatalf("保存状态码 = %d；%s", r.code, r.body)
@@ -1863,7 +1863,7 @@ func TestTextSave(t *testing.T) {
 		"content":   "第三次内容\n",
 		"base_hash": newHash,
 	})
-	if r2 := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload2),
+	if r2 := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload2),
 		map[string]string{"Content-Type": "application/json"}); r2.code != 200 {
 		t.Errorf("连续保存失败: %d；%s", r2.code, r2.body)
 	}
@@ -1880,7 +1880,7 @@ func TestTextSaveConflict(t *testing.T) {
 		"content":   "v2\n",
 		"base_hash": "0000000000000000",
 	})
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != http.StatusConflict {
 		t.Fatalf("状态码 = %d, 期望 409；%s", r.code, r.body)
@@ -1901,7 +1901,7 @@ func TestTextSaveConflict(t *testing.T) {
 		"base_hash": "0000000000000000",
 		"force":     true,
 	})
-	r2 := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload2),
+	r2 := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload2),
 		map[string]string{"Content-Type": "application/json"})
 	if r2.code != 200 {
 		t.Fatalf("强制覆盖状态码 = %d；%s", r2.code, r2.body)
@@ -1932,7 +1932,7 @@ func TestTextSavePreservesCRLF(t *testing.T) {
 		"content":   "a\nb\nc\n",
 		"base_hash": d["hash"],
 	})
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != 200 {
 		t.Fatalf("保存失败: %d；%s", r.code, r.body)
@@ -1966,7 +1966,7 @@ func TestTextSavePreservesBOM(t *testing.T) {
 		"content":   "改过了\n",
 		"base_hash": d["hash"],
 	})
-	if r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	if r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"}); r.code != 200 {
 		t.Fatalf("保存失败: %d", r.code)
 	}
@@ -1989,7 +1989,7 @@ func TestTextSaveRejectsNUL(t *testing.T) {
 		"path":    "/n.txt",
 		"content": "abc\x00def",
 	})
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != http.StatusBadRequest {
 		t.Errorf("状态码 = %d, 期望 400", r.code)
@@ -2006,7 +2006,7 @@ func TestTextDisabled(t *testing.T) {
 		t.Errorf("读取状态码 = %d, 期望 403", code)
 	}
 	payload, _ := json.Marshal(map[string]any{"path": "/a.txt", "content": "y\n"})
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != http.StatusForbidden {
 		t.Errorf("保存状态码 = %d, 期望 403", r.code)
@@ -2032,7 +2032,7 @@ func TestTextReadOnlyUserCannotSave(t *testing.T) {
 		"Authorization": basicAuth("guest", "g"),
 		"Content-Type":  "application/json",
 	}
-	r := do(t, s, http.MethodPut, "/__gofs__/text", bytes.NewReader(payload), hdr2)
+	r := do(t, s, http.MethodPut, "/fs/text", bytes.NewReader(payload), hdr2)
 	if r.code != http.StatusForbidden {
 		t.Errorf("只读用户保存状态码 = %d, 期望 403", r.code)
 	}
@@ -2100,13 +2100,13 @@ func TestAuthEndpoint(t *testing.T) {
 
 	// 未启用鉴权时应当明确告诉前端不用登录
 	s2 := newTestServer(t, testConfig(t, root))
-	r0 := do(t, s2, http.MethodGet, "/__gofs__/auth", nil, nil)
+	r0 := do(t, s2, http.MethodGet, "/fs/auth", nil, nil)
 	if r0.code != 200 || !strings.Contains(r0.body, `"auth_on":false`) {
 		t.Errorf("未启用鉴权时响应异常: %d %s", r0.code, r0.body)
 	}
 
 	// 正确凭据
-	r1 := do(t, s, http.MethodGet, "/__gofs__/auth", nil, map[string]string{
+	r1 := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
 		"Authorization": basicAuth("admin", "secret"),
 	})
 	if r1.code != 200 {
@@ -2117,7 +2117,7 @@ func TestAuthEndpoint(t *testing.T) {
 	}
 
 	// 错误密码
-	r2 := do(t, s, http.MethodGet, "/__gofs__/auth", nil, map[string]string{
+	r2 := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
 		"Authorization": basicAuth("admin", "wrong"),
 	})
 	if r2.code != http.StatusUnauthorized {
@@ -2129,7 +2129,7 @@ func TestAuthEndpoint(t *testing.T) {
 	}
 
 	// 无凭据
-	if r3 := do(t, s, http.MethodGet, "/__gofs__/auth", nil, nil); r3.code != http.StatusUnauthorized {
+	if r3 := do(t, s, http.MethodGet, "/fs/auth", nil, nil); r3.code != http.StatusUnauthorized {
 		t.Errorf("无凭据状态码 = %d, 期望 401", r3.code)
 	}
 }
@@ -2141,7 +2141,7 @@ func TestAuthEndpointPathScoped(t *testing.T) {
 	hdr := map[string]string{"Authorization": basicAuth("u", "p")}
 
 	// 不带 path：按根目录算 → 只读
-	r := do(t, s, http.MethodGet, "/__gofs__/auth", nil, hdr)
+	r := do(t, s, http.MethodGet, "/fs/auth", nil, hdr)
 	if r.code != 200 {
 		t.Fatalf("状态码 = %d；%s", r.code, r.body)
 	}
@@ -2151,7 +2151,7 @@ func TestAuthEndpointPathScoped(t *testing.T) {
 
 	// 带 path=/docs：站在自己有权限的目录里应拿到完整按钮，
 	// 否则受限账号在自己目录里会被当成只读，什么操作都做不了。
-	r2 := do(t, s, http.MethodGet, "/__gofs__/auth?path=/docs", nil, hdr)
+	r2 := do(t, s, http.MethodGet, "/fs/auth?path=/docs", nil, hdr)
 	if !strings.Contains(r2.body, `"write":true`) {
 		t.Errorf("在 /docs 下应拿到写权限: %s", r2.body)
 	}
@@ -2160,12 +2160,12 @@ func TestAuthEndpointPathScoped(t *testing.T) {
 	}
 
 	// 越界路径不能借机提升权限
-	r3 := do(t, s, http.MethodGet, "/__gofs__/auth?path=/other", nil, hdr)
+	r3 := do(t, s, http.MethodGet, "/fs/auth?path=/other", nil, hdr)
 	if !strings.Contains(r3.body, `"write":false`) {
 		t.Errorf("越界路径不应有写权限: %s", r3.body)
 	}
 	// 含 .. 的路径直接忽略，按根目录算
-	r4 := do(t, s, http.MethodGet, "/__gofs__/auth?path=/../../etc", nil, hdr)
+	r4 := do(t, s, http.MethodGet, "/fs/auth?path=/../../etc", nil, hdr)
 	if r4.code != 200 || !strings.Contains(r4.body, `"write":false`) {
 		t.Errorf("含 .. 的路径不应提升权限: %d %s", r4.code, r4.body)
 	}
@@ -2178,7 +2178,7 @@ func TestAuthEndpointReturnsConfig(t *testing.T) {
 	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "-A",
 		"-a", "admin:pw@/:rw"))
 
-	r := do(t, s, http.MethodGet, "/__gofs__/auth", nil, map[string]string{
+	r := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
 		"Authorization": basicAuth("admin", "pw"),
 	})
 	if r.code != 200 {
@@ -2203,7 +2203,7 @@ func TestAuthEndpointReturnsConfig(t *testing.T) {
 
 	// 只读账号不应拿到密钥管理能力
 	s2 := newTestServer(t, testConfig(t, root, "-A", "-a", "guest:g@/"))
-	r2 := do(t, s2, http.MethodGet, "/__gofs__/auth", nil, map[string]string{
+	r2 := do(t, s2, http.MethodGet, "/fs/auth", nil, map[string]string{
 		"Authorization": basicAuth("guest", "g"),
 	})
 	if strings.Contains(r2.body, `"allow_keys":true`) {
@@ -2228,7 +2228,7 @@ func TestAuthShellRestoresIdentity(t *testing.T) {
 	}
 
 	// 2) 拿本地凭据换身份：应当拿到用户名与真实权限
-	restored := do(t, s, http.MethodGet, "/__gofs__/auth?path=/", nil, hdr)
+	restored := do(t, s, http.MethodGet, "/fs/auth?path=/", nil, hdr)
 	var d map[string]any
 	if err := json.Unmarshal([]byte(restored.body), &d); err != nil {
 		t.Fatal(err)
@@ -2249,7 +2249,7 @@ func TestAuthVerifyIgnoresPathScope(t *testing.T) {
 
 	// 登录校验只看账号密码是否有效，不要求对某个路径有权限，
 	// 否则这种受限账号会永远登不进来。
-	r := do(t, s, http.MethodGet, "/__gofs__/auth", nil, map[string]string{
+	r := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
 		"Authorization": basicAuth("dev", "pw"),
 	})
 	if r.code != 200 {
@@ -2368,7 +2368,7 @@ func createKeyAs(t *testing.T, s *Server, name, scope string, ttlSeconds int64, 
 	for k, v := range hdr {
 		headers[k] = v
 	}
-	r := do(t, s, http.MethodPost, "/__gofs__/keys", bytes.NewReader(payload), headers)
+	r := do(t, s, http.MethodPost, "/fs/keys", bytes.NewReader(payload), headers)
 	if r.code != http.StatusCreated {
 		t.Fatalf("创建密钥状态码 = %d；%s", r.code, r.body)
 	}
@@ -2395,7 +2395,7 @@ func TestKeyCreateListRevoke(t *testing.T) {
 	}
 
 	// 列表里不能出现明文
-	r := do(t, s, http.MethodGet, "/__gofs__/keys", nil, nil)
+	r := do(t, s, http.MethodGet, "/fs/keys", nil, nil)
 	if r.code != 200 {
 		t.Fatalf("列表状态码 = %d", r.code)
 	}
@@ -2410,7 +2410,7 @@ func TestKeyCreateListRevoke(t *testing.T) {
 	}
 
 	// 撤销
-	if dr := do(t, s, http.MethodDelete, "/__gofs__/keys?id="+id, nil, nil); dr.code != http.StatusNoContent {
+	if dr := do(t, s, http.MethodDelete, "/fs/keys?id="+id, nil, nil); dr.code != http.StatusNoContent {
 		t.Errorf("撤销状态码 = %d", dr.code)
 	}
 	// 撤销后无法再用
@@ -2500,16 +2500,16 @@ func TestKeyCannotBeUsedForOtherOperations(t *testing.T) {
 		t.Errorf("建目录状态码 = %d, 期望 403", r.code)
 	}
 	// 不能读在线编辑接口
-	if r := do(t, s, http.MethodGet, "/__gofs__/text?path=/notes.txt", nil, hdr); r.code != http.StatusUnauthorized {
+	if r := do(t, s, http.MethodGet, "/fs/text?path=/notes.txt", nil, hdr); r.code != http.StatusUnauthorized {
 		t.Errorf("编辑接口状态码 = %d, 期望 401", r.code)
 	}
 	// 不能管理密钥（否则等于权限提升）
-	if r := do(t, s, http.MethodGet, "/__gofs__/keys", nil, hdr); r.code != http.StatusUnauthorized {
+	if r := do(t, s, http.MethodGet, "/fs/keys", nil, hdr); r.code != http.StatusUnauthorized {
 		t.Errorf("密钥管理状态码 = %d, 期望 401", r.code)
 	}
 	// 不能解压
 	exHdr := map[string]string{"X-Gofs-Upload-Key": token, "Content-Type": "application/json"}
-	if r := do(t, s, http.MethodPut, "/__gofs__/extract",
+	if r := do(t, s, http.MethodPut, "/fs/extract",
 		strings.NewReader(`{"path":"/sample.zip"}`), exHdr); r.code == 200 {
 		t.Errorf("上传密钥不应能调用解压接口")
 	}
@@ -2550,7 +2550,7 @@ func TestKeyRequiresWritePermissionToCreate(t *testing.T) {
 
 	// 只读账号不能签发密钥
 	payload, _ := json.Marshal(map[string]any{"name": "x", "scope": "/"})
-	r := do(t, s, http.MethodPost, "/__gofs__/keys", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPost, "/fs/keys", bytes.NewReader(payload),
 		map[string]string{
 			"Authorization": basicAuth("guest", "g"),
 			"Content-Type":  "application/json",
@@ -2567,7 +2567,7 @@ func TestKeyScopeCappedByCreatorPermission(t *testing.T) {
 
 	// 账号只对 /docs 有权限，不能签发覆盖全盘的密钥
 	payload, _ := json.Marshal(map[string]any{"name": "越权", "scope": "/"})
-	r := do(t, s, http.MethodPost, "/__gofs__/keys", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPost, "/fs/keys", bytes.NewReader(payload),
 		map[string]string{
 			"Authorization": basicAuth("dev", "pw"),
 			"Content-Type":  "application/json",
@@ -2578,7 +2578,7 @@ func TestKeyScopeCappedByCreatorPermission(t *testing.T) {
 
 	// 但可以签发自己够得到的范围
 	payload2, _ := json.Marshal(map[string]any{"name": "合规", "scope": "/docs"})
-	r2 := do(t, s, http.MethodPost, "/__gofs__/keys", bytes.NewReader(payload2),
+	r2 := do(t, s, http.MethodPost, "/fs/keys", bytes.NewReader(payload2),
 		map[string]string{
 			"Authorization": basicAuth("dev", "pw"),
 			"Content-Type":  "application/json",
@@ -2621,7 +2621,7 @@ func TestKeysDisabled(t *testing.T) {
 	// 不开 -A 也不开上传 → 密钥管理关闭
 	s := newTestServer(t, testConfig(t, root))
 
-	if r := do(t, s, http.MethodGet, "/__gofs__/keys", nil, nil); r.code != http.StatusForbidden {
+	if r := do(t, s, http.MethodGet, "/fs/keys", nil, nil); r.code != http.StatusForbidden {
 		t.Errorf("状态码 = %d, 期望 403", r.code)
 	}
 	// 显式开启但未授予上传时，密钥可用但仍受 --allow-upload 约束
@@ -3030,7 +3030,7 @@ func resolved(t *testing.T, p string) string {
 // settingsOf 读取当前设置。
 func settingsOf(t *testing.T, s *Server, hdr map[string]string) map[string]any {
 	t.Helper()
-	r := do(t, s, http.MethodGet, "/__gofs__/settings", nil, hdr)
+	r := do(t, s, http.MethodGet, "/fs/settings", nil, hdr)
 	if r.code != 200 {
 		t.Fatalf("读取设置失败 %d: %s", r.code, r.body)
 	}
@@ -3048,7 +3048,7 @@ func putSettings(t *testing.T, s *Server, body string, hdr map[string]string) re
 	for k, v := range hdr {
 		h[k] = v
 	}
-	return do(t, s, http.MethodPut, "/__gofs__/settings", strings.NewReader(body), h)
+	return do(t, s, http.MethodPut, "/fs/settings", strings.NewReader(body), h)
 }
 
 func TestSettingsRevealCurrentValues(t *testing.T) {
@@ -3293,7 +3293,7 @@ func TestSettingsRequiresAdmin(t *testing.T) {
 	}
 
 	// 未带凭据 → 401（而不是 403，好让前端弹登录框）。
-	if r := do(t, s, http.MethodGet, "/__gofs__/settings", nil, nil); r.code != http.StatusUnauthorized {
+	if r := do(t, s, http.MethodGet, "/fs/settings", nil, nil); r.code != http.StatusUnauthorized {
 		t.Errorf("未登录读取状态码 = %d, 期望 401", r.code)
 	}
 }
@@ -3331,7 +3331,7 @@ func TestSettingsAuthResponseCarriesFlag(t *testing.T) {
 
 	// 登录响应要带上 allow_settings 与 upload_max_size，
 	// 否则前端登录后仍然不知道该不该显示「设置」入口。
-	r := do(t, s, http.MethodGet, "/__gofs__/auth", nil,
+	r := do(t, s, http.MethodGet, "/fs/auth", nil,
 		map[string]string{"Authorization": basicAuth("boss", "secret")})
 	if !strings.Contains(r.body, `"allow_settings":true`) {
 		t.Errorf("管理员登录响应缺少 allow_settings: %s", r.body)
@@ -3340,7 +3340,7 @@ func TestSettingsAuthResponseCarriesFlag(t *testing.T) {
 		t.Errorf("登录响应缺少 upload_max_size: %s", r.body)
 	}
 
-	r = do(t, s, http.MethodGet, "/__gofs__/auth", nil,
+	r = do(t, s, http.MethodGet, "/fs/auth", nil,
 		map[string]string{"Authorization": basicAuth("guest", "guest")})
 	if strings.Contains(r.body, `"allow_settings":true`) {
 		t.Errorf("只读账号登录响应不该给 allow_settings=true: %s", r.body)
@@ -3377,7 +3377,7 @@ func TestSettingsConcurrentSwitchRoot(t *testing.T) {
 				target = sibling
 			}
 			body := strings.NewReader(`{"root":` + jsonString(target) + `}`)
-			req := httptest.NewRequest(http.MethodPut, "/__gofs__/settings", body)
+			req := httptest.NewRequest(http.MethodPut, "/fs/settings", body)
 			req.Header.Set("Content-Type", jsonHeader)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -3398,7 +3398,7 @@ func TestSettingsConcurrentSwitchRoot(t *testing.T) {
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?json", nil))
 				rec2 := httptest.NewRecorder()
-				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/__gofs__/settings", nil))
+				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/fs/settings", nil))
 			}
 		}()
 	}

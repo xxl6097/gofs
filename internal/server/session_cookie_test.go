@@ -21,7 +21,7 @@ func newSessionServer(t *testing.T, root string, extra ...string) *Server {
 // login 走一次登录接口，返回会话 cookie。
 func login(t *testing.T, s *Server, user, pass string) *http.Cookie {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodGet, "/__gofs__/auth", nil)
+	r := httptest.NewRequest(http.MethodGet, "/fs/auth", nil)
 	r.SetBasicAuth(user, pass)
 	r.Header.Set("X-Gofs-Ajax", "1")
 	w := httptest.NewRecorder()
@@ -68,7 +68,7 @@ func TestLoginSetsSessionCookie(t *testing.T) {
 	root := t.TempDir()
 	s := newSessionServer(t, root)
 
-	r := httptest.NewRequest(http.MethodGet, "/__gofs__/auth", nil)
+	r := httptest.NewRequest(http.MethodGet, "/fs/auth", nil)
 	r.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -174,7 +174,7 @@ func TestLogoutRevokesSession(t *testing.T) {
 	}
 
 	// 登出：请求里带上要撤销的那张 cookie。
-	r := httptest.NewRequest(http.MethodDelete, "/__gofs__/auth", nil)
+	r := httptest.NewRequest(http.MethodDelete, "/fs/auth", nil)
 	r.AddCookie(c)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -219,7 +219,7 @@ func TestSessionCookiePathFollowsPrefix(t *testing.T) {
 	root := t.TempDir()
 	s := newSessionServer(t, root, "--path-prefix", "/files")
 
-	r := httptest.NewRequest(http.MethodGet, "/files/__gofs__/auth", nil)
+	r := httptest.NewRequest(http.MethodGet, "/files/fs/auth", nil)
 	r.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -243,7 +243,7 @@ func TestLoginRateLimited(t *testing.T) {
 	s := newSessionServer(t, root, "--auth-fail-limit", "3", "--auth-fail-window", "5m")
 
 	attempt := func() int {
-		r := httptest.NewRequest(http.MethodGet, "/__gofs__/auth", nil)
+		r := httptest.NewRequest(http.MethodGet, "/fs/auth", nil)
 		r.SetBasicAuth("admin", "wrong-password")
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, r)
@@ -354,7 +354,7 @@ func TestCookieAdminCanChangeSettings(t *testing.T) {
 	s := newSessionServer(t, root)
 	c := login(t, s, "admin", "secret")
 
-	r := httptest.NewRequest(http.MethodPost, "/__gofs__/settings", strings.NewReader(`{"upload_max_size":1048576}`))
+	r := httptest.NewRequest(http.MethodPost, "/fs/settings", strings.NewReader(`{"upload_max_size":1048576}`))
 	r.AddCookie(c)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Gofs-Ajax", "1")

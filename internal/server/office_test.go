@@ -56,7 +56,7 @@ func TestOfficePreviewReturnsBlocks(t *testing.T) {
 			`<w:p><w:r><w:t>正文内容</w:t></w:r></w:p>`)
 
 	s := newTestServer(t, testConfig(t, root, "-A"))
-	got := do(t, s, http.MethodGet, "/__gofs__/office?path=/报告.docx", nil, nil)
+	got := do(t, s, http.MethodGet, "/fs/office?path=/报告.docx", nil, nil)
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d，期望 200：%s", got.code, got.body)
 	}
@@ -76,7 +76,7 @@ func TestOfficePreviewReturnsBlocks(t *testing.T) {
 }
 
 // TestOfficePreviewRequiresAuth 是这次特意加的：新端点绝不能重复
-// /__gofs__/extract 那个鉴权绕过的错误。
+// /fs/extract 那个鉴权绕过的错误。
 //
 // 预览等同于读取文件内容，所以必须按路径做读权限校验。
 func TestOfficePreviewRequiresAuth(t *testing.T) {
@@ -91,7 +91,7 @@ func TestOfficePreviewRequiresAuth(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "boss:pw@/:rw"))
 
 	t.Run("未登录不能预览", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/private/秘密.docx", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/private/秘密.docx", nil, nil)
 		if got.code == http.StatusOK {
 			t.Fatalf("未登录竟然拿到了文档内容：%s", got.body)
 		}
@@ -104,7 +104,7 @@ func TestOfficePreviewRequiresAuth(t *testing.T) {
 	})
 
 	t.Run("登录后可以预览", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/private/秘密.docx", nil,
+		got := do(t, s, http.MethodGet, "/fs/office?path=/private/秘密.docx", nil,
 			map[string]string{"Authorization": basicAuth("boss", "pw")})
 		if got.code != http.StatusOK {
 			t.Fatalf("带凭据返回 %d，期望 200：%s", got.code, got.body)
@@ -125,7 +125,7 @@ func TestOfficePreviewChecksPathPerm(t *testing.T) {
 
 	// 只有 /docs 的读权限。
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "guest:g@/docs:r"))
-	got := do(t, s, http.MethodGet, "/__gofs__/office?path=/private/x.docx", nil,
+	got := do(t, s, http.MethodGet, "/fs/office?path=/private/x.docx", nil,
 		map[string]string{"Authorization": basicAuth("guest", "g")})
 	if got.code == http.StatusOK {
 		t.Fatalf("越权读到了：%s", got.body)
@@ -150,43 +150,43 @@ func TestOfficePreviewRejectsUnsupported(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
 	t.Run("普通文本", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/a.txt", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/a.txt", nil, nil)
 		if got.code != http.StatusUnsupportedMediaType {
 			t.Fatalf("返回 %d，期望 415", got.code)
 		}
 	})
 	t.Run("扩展名像 Office 但内容不是 zip", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/fake.docx", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/fake.docx", nil, nil)
 		if got.code != http.StatusUnsupportedMediaType {
 			t.Fatalf("返回 %d，期望 415：%s", got.code, got.body)
 		}
 	})
 	t.Run("目录", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/adir.docx", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/adir.docx", nil, nil)
 		if got.code != http.StatusBadRequest {
 			t.Fatalf("返回 %d，期望 400", got.code)
 		}
 	})
 	t.Run("缺 path 参数", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office", nil, nil)
 		if got.code != http.StatusBadRequest {
 			t.Fatalf("返回 %d，期望 400", got.code)
 		}
 	})
 	t.Run("路径里有 ..", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/../evil.docx", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/../evil.docx", nil, nil)
 		if got.code != http.StatusBadRequest {
 			t.Fatalf("返回 %d，期望 400", got.code)
 		}
 	})
 	t.Run("方法不对", func(t *testing.T) {
-		got := do(t, s, http.MethodPost, "/__gofs__/office?path=/a.txt", nil, nil)
+		got := do(t, s, http.MethodPost, "/fs/office?path=/a.txt", nil, nil)
 		if got.code != http.StatusMethodNotAllowed {
 			t.Fatalf("返回 %d，期望 405", got.code)
 		}
 	})
 	t.Run("文件不存在", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__gofs__/office?path=/nope.docx", nil, nil)
+		got := do(t, s, http.MethodGet, "/fs/office?path=/nope.docx", nil, nil)
 		if got.code != http.StatusNotFound {
 			t.Fatalf("返回 %d，期望 404", got.code)
 		}
@@ -211,7 +211,7 @@ func TestOfficePreviewScriptStaysData(t *testing.T) {
 		`<w:p><w:r><w:t>&lt;script&gt;alert(1)&lt;/script&gt;</w:t></w:r></w:p>`)
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
-	got := do(t, s, http.MethodGet, "/__gofs__/office?path=/x.docx", nil, nil)
+	got := do(t, s, http.MethodGet, "/fs/office?path=/x.docx", nil, nil)
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d：%s", got.code, got.body)
 	}

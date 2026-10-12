@@ -109,19 +109,19 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 // 它拒绝的请求不写访问日志 —— 服务过载时再拼命写日志只会雪上加霜。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/__gofs__/health", s.handleHealth)
-	mux.HandleFunc("/__gofs__/auth", s.handleAuth)
-	mux.HandleFunc("/__gofs__/keys", s.handleKeys)
+	mux.HandleFunc("/fs/health", s.handleHealth)
+	mux.HandleFunc("/fs/auth", s.handleAuth)
+	mux.HandleFunc("/fs/keys", s.handleKeys)
 	// 一键上传脚本：用上传密钥换一段可执行的脚本（见 up_script.go）。
 	// 走密钥而非账号密码，所以放在 keys 之外单独注册。
 	mux.HandleFunc(upScriptName, s.handleUpScript)
-	mux.HandleFunc("/__gofs__/settings", s.handleSettings)
-	mux.HandleFunc("/__gofs__/upgrade", s.handleUpgrade)
-	mux.HandleFunc("/__gofs__/users", s.handleUsers)
-	mux.HandleFunc("/__gofs__/extract", s.handleExtract)
-	mux.HandleFunc("/__gofs__/text", s.handleText)
-	mux.HandleFunc("/__gofs__/office", s.handleOffice)
-	mux.HandleFunc("/__gofs__/assets/", s.handleAsset)
+	mux.HandleFunc("/fs/settings", s.handleSettings)
+	mux.HandleFunc("/fs/upgrade", s.handleUpgrade)
+	mux.HandleFunc("/fs/users", s.handleUsers)
+	mux.HandleFunc("/fs/extract", s.handleExtract)
+	mux.HandleFunc("/fs/text", s.handleText)
+	mux.HandleFunc("/fs/office", s.handleOffice)
+	mux.HandleFunc("/fs/assets/", s.handleAsset)
 	mux.HandleFunc("/", s.handleRoot)
 
 	var h http.Handler = mux
@@ -726,9 +726,9 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 
 	q := r.URL.Query()
 
-	// 压缩包预览与解压入口统一走 /__gofs__/extract，这里只做提示。
+	// 压缩包预览与解压入口统一走 /fs/extract，这里只做提示。
 	if q.Has("extract") {
-		http.Redirect(w, r, s.cfg.PathPrefix+"/__gofs__/extract?path="+url.QueryEscape(urlPath), http.StatusTemporaryRedirect)
+		http.Redirect(w, r, s.cfg.PathPrefix+"/fs/extract?path="+url.QueryEscape(urlPath), http.StatusTemporaryRedirect)
 		return
 	}
 
@@ -866,7 +866,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 //
 // 文件服务器天然会把用户上传的 .html / .svg 原样吐回浏览器，而浏览器
 // 会把它当作**本站页面**渲染。于是一个能上传文件的人只要放一个
-// <script>fetch('/__gofs__/keys',{method:'POST'...})</script> 的页面，
+// <script>fetch('/fs/keys',{method:'POST'...})</script> 的页面，
 // 再诱导管理员打开，就能借管理员已登录的会话为所欲为。这是典型的存储型 XSS。
 //
 // 两道处理：

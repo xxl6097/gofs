@@ -18,7 +18,7 @@ func createKeyUsage(t *testing.T, s *Server, scope string) (map[string]string, s
 	payload, _ := json.Marshal(map[string]any{
 		"name": "用法示例", "scope": scope, "ttl_seconds": 0,
 	})
-	r := do(t, s, http.MethodPost, "/__gofs__/keys", bytes.NewReader(payload),
+	r := do(t, s, http.MethodPost, "/fs/keys", bytes.NewReader(payload),
 		map[string]string{"Content-Type": "application/json"})
 	if r.code != http.StatusCreated {
 		t.Fatalf("创建密钥状态码 = %d；%s", r.code, r.body)

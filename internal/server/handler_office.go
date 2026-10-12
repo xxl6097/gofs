@@ -38,7 +38,7 @@ func officePreviewable(path string) bool { return officeFormatFor(path) != "" }
 
 // handleOffice 把 Office 文档提取成结构化内容供网页预览。
 //
-//	GET /__gofs__/office?path=<文件路径>
+//	GET /fs/office?path=<文件路径>
 //
 // 返回的是**中性模型**（块、表格、文本片段）而不是 HTML：
 // 服务端不生成任何标记，前端用 DOM API 渲染。文档里的内容再刁钻，
@@ -63,7 +63,7 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 
 	// ⚠️ 预览等同于读取文件内容，必须做读权限校验。
 	// 这是一条独立路由，不经过 handleRoot 的授权 —— 少这道校验就是
-	// 任意文件内容泄漏（隔壁 /__gofs__/extract 就吃过这个亏）。
+	// 任意文件内容泄漏（隔壁 /fs/extract 就吃过这个亏）。
 	p, ok := s.authorize(w, r, clean)
 	if !ok {
 		return

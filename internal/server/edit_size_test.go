@@ -25,7 +25,7 @@ func writeSized(t *testing.T, root, rel string, n int) {
 // getSettings 读一次服务设置。
 func getSettings(t *testing.T, s *Server, hdr map[string]string) map[string]any {
 	t.Helper()
-	got := do(t, s, http.MethodGet, "/__gofs__/settings", nil, hdr)
+	got := do(t, s, http.MethodGet, "/fs/settings", nil, hdr)
 	if got.code != http.StatusOK {
 		t.Fatalf("读设置返回 %d：%s", got.code, got.body)
 	}
@@ -42,7 +42,7 @@ func TestEditMaxSizeIsReported(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A", "--edit-max-size", "1048576"))
 	auth := map[string]string{"Authorization": basicAuth("x", "y")}
 
-	got := do(t, s, http.MethodGet, "/__gofs__/settings", nil, nil)
+	got := do(t, s, http.MethodGet, "/fs/settings", nil, nil)
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d", got.code)
 	}
@@ -73,7 +73,7 @@ func TestEditMaxSizeRuntimeChange(t *testing.T) {
 	auth := map[string]string{"Authorization": basicAuth("x", "y")}
 
 	readOK := func(name string) bool {
-		got := do(t, s, http.MethodGet, "/__gofs__/text?path=/"+name, nil, auth)
+		got := do(t, s, http.MethodGet, "/fs/text?path=/"+name, nil, auth)
 		return got.code == http.StatusOK
 	}
 	if !readOK("big.txt") {
@@ -82,7 +82,7 @@ func TestEditMaxSizeRuntimeChange(t *testing.T) {
 
 	// 调到 1 KiB —— big.txt（5000 字节）就该被拒了。
 	patch, _ := json.Marshal(map[string]any{"edit_max_size": 1024})
-	got := do(t, s, http.MethodPut, "/__gofs__/settings", bytes.NewReader(patch),
+	got := do(t, s, http.MethodPut, "/fs/settings", bytes.NewReader(patch),
 		map[string]string{
 			"Authorization": basicAuth("x", "y"),
 			"Content-Type":  "application/json",
@@ -99,7 +99,7 @@ func TestEditMaxSizeRuntimeChange(t *testing.T) {
 	}
 
 	// 写也要拒：不能只挡读，改文件同样是「编辑」。
-	put := do(t, s, http.MethodPut, "/__gofs__/text?path=/big.txt",
+	put := do(t, s, http.MethodPut, "/fs/text?path=/big.txt",
 		strings.NewReader(`{"content":"x","hash":""}`),
 		map[string]string{"Authorization": basicAuth("x", "y")})
 	if put.code == http.StatusOK {
@@ -118,7 +118,7 @@ func TestEditMaxSizeRejectsNegative(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
 	body, _ := json.Marshal(map[string]any{"edit_max_size": -1})
-	got := do(t, s, http.MethodPut, "/__gofs__/settings", bytes.NewReader(body),
+	got := do(t, s, http.MethodPut, "/fs/settings", bytes.NewReader(body),
 		map[string]string{
 			"Authorization": basicAuth("x", "y"),
 			"Content-Type":  "application/json",
@@ -139,7 +139,7 @@ func TestEditMaxSizeZeroRejected(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
 	body, _ := json.Marshal(map[string]any{"edit_max_size": 0})
-	got := do(t, s, http.MethodPut, "/__gofs__/settings", bytes.NewReader(body),
+	got := do(t, s, http.MethodPut, "/fs/settings", bytes.NewReader(body),
 		map[string]string{
 			"Authorization": basicAuth("x", "y"),
 			"Content-Type":  "application/json",
@@ -157,7 +157,7 @@ func TestSettingsRejectsEmptyPatch(t *testing.T) {
 	root := t.TempDir()
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
-	got := do(t, s, http.MethodPut, "/__gofs__/settings", bytes.NewReader([]byte("{}")),
+	got := do(t, s, http.MethodPut, "/fs/settings", bytes.NewReader([]byte("{}")),
 		map[string]string{
 			"Authorization": basicAuth("x", "y"),
 			"Content-Type":  "application/json",

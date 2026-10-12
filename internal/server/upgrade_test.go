@@ -64,7 +64,7 @@ func TestUpgradeCheckReportsRelease(t *testing.T) {
 	}}
 	s := upgradeServer(t, u)
 
-	got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, adminHdr())
+	got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr())
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d：%s", got.code, got.body)
 	}
@@ -93,7 +93,7 @@ func TestUpgradeCheckReportsRelease(t *testing.T) {
 func TestUpgradeCheckUpToDate(t *testing.T) {
 	s := upgradeServer(t, &fakeUpgrader{rel: nil})
 
-	got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, adminHdr())
+	got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr())
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d", got.code)
 	}
@@ -107,7 +107,7 @@ func TestUpgradeCheckUpToDate(t *testing.T) {
 func TestUpgradeCheckSurfacesError(t *testing.T) {
 	s := upgradeServer(t, &fakeUpgrader{cerr: errors.New("连不上更新源：dial tcp timeout")})
 
-	got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, adminHdr())
+	got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr())
 	if got.code != http.StatusBadGateway {
 		t.Fatalf("返回 %d，期望 502", got.code)
 	}
@@ -127,7 +127,7 @@ func TestUpgradeRunStreamsProgress(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"release": map[string]any{"version": "9.9.9"},
 	})
-	got := do(t, s, http.MethodPost, "/__gofs__/upgrade", bytes.NewReader(body), adminHdr())
+	got := do(t, s, http.MethodPost, "/fs/upgrade", bytes.NewReader(body), adminHdr())
 	if got.code != http.StatusOK {
 		t.Fatalf("返回 %d：%s", got.code, got.body)
 	}
@@ -152,7 +152,7 @@ func TestUpgradeRunReportsFailure(t *testing.T) {
 	s := upgradeServer(t, u)
 
 	body, _ := json.Marshal(map[string]any{"release": map[string]any{"version": "9.9.9"}})
-	got := do(t, s, http.MethodPost, "/__gofs__/upgrade", bytes.NewReader(body), adminHdr())
+	got := do(t, s, http.MethodPost, "/fs/upgrade", bytes.NewReader(body), adminHdr())
 	if !strings.Contains(got.body, "event: error") {
 		t.Fatalf("失败没有报给前端：%s", got.body)
 	}
@@ -170,7 +170,7 @@ func TestUpgradeRunReportsFailure(t *testing.T) {
 func TestUpgradeRequiresReleaseVersion(t *testing.T) {
 	s := upgradeServer(t, &fakeUpgrader{})
 
-	got := do(t, s, http.MethodPost, "/__gofs__/upgrade",
+	got := do(t, s, http.MethodPost, "/fs/upgrade",
 		strings.NewReader(`{"release":{"version":""}}`), adminHdr())
 	if got.code != http.StatusBadRequest {
 		t.Fatalf("返回 %d，期望 400：%s", got.code, got.body)
@@ -189,22 +189,22 @@ func TestUpgradeAdminOnly(t *testing.T) {
 	s := newTestServer(t, cfg)
 
 	t.Run("匿名", func(t *testing.T) {
-		if got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, nil); got.code != http.StatusUnauthorized {
+		if got := do(t, s, http.MethodGet, "/fs/upgrade", nil, nil); got.code != http.StatusUnauthorized {
 			t.Fatalf("匿名返回 %d，期望 401", got.code)
 		}
 	})
 	t.Run("只读账号", func(t *testing.T) {
 		h := map[string]string{"Authorization": basicAuth("guest", "g")}
-		if got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, h); got.code == http.StatusOK {
+		if got := do(t, s, http.MethodGet, "/fs/upgrade", nil, h); got.code == http.StatusOK {
 			t.Fatalf("只读账号竟然能检查更新：%s", got.body)
 		}
-		if got := do(t, s, http.MethodPost, "/__gofs__/upgrade",
+		if got := do(t, s, http.MethodPost, "/fs/upgrade",
 			strings.NewReader(`{"release":{"version":"9.9.9"}}`), h); got.code == http.StatusOK {
 			t.Fatalf("只读账号竟然能升级：%s", got.body)
 		}
 	})
 	t.Run("管理员", func(t *testing.T) {
-		if got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, adminHdr()); got.code != http.StatusOK {
+		if got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr()); got.code != http.StatusOK {
 			t.Fatalf("管理员返回 %d：%s", got.code, got.body)
 		}
 	})
@@ -216,7 +216,7 @@ func TestUpgradeDisabledWithoutUpgrader(t *testing.T) {
 	root := t.TempDir()
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "boss:pw@/:rw"))
 
-	if got := do(t, s, http.MethodGet, "/__gofs__/upgrade", nil, adminHdr()); got.code != http.StatusNotFound {
+	if got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr()); got.code != http.StatusNotFound {
 		t.Fatalf("返回 %d，期望 404：%s", got.code, got.body)
 	}
 }

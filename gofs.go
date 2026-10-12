@@ -98,7 +98,7 @@ func WithUpgrader(u Upgrader) Option {
 
 // WithVersion 指定本服务对外报告的版本号。
 //
-// 用于页面标题、/__gofs__/health 与升级比较；不指定时用 Version（默认 0.1.0）。
+// 用于页面标题、/fs/health 与升级比较；不指定时用 Version（默认 0.1.0）。
 // 升级实现（如 githubupgrade）需要知道当前版本才能判断「有没有新版」，
 // 所以让它与这里的值保持一致。
 func WithVersion(v string) Option {

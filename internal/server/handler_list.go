@@ -186,7 +186,7 @@ func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
 	}
 	out := bytes.Replace(s.ui.index, []byte("__GOFS_DATA__"), raw, 1)
 
-	prefix := s.cfg.PathPrefix + "/__gofs__/assets/"
+	prefix := s.cfg.PathPrefix + "/fs/assets/"
 	out = bytes.ReplaceAll(out, []byte("__GOFS_ASSETS__"), []byte(prefix))
 	out = bytes.ReplaceAll(out, []byte("__GOFS_BASE__"), []byte(s.cfg.PathPrefix))
 
@@ -256,7 +256,7 @@ func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath 
 
 // handleAsset 返回内嵌或自定义的前端静态资源。
 func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/__gofs__/assets/")
+	name := strings.TrimPrefix(r.URL.Path, "/fs/assets/")
 	if name == "" || strings.Contains(name, "..") {
 		http.NotFound(w, r)
 		return

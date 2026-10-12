@@ -75,7 +75,7 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 // resolveArchive 解析并校验压缩包路径，返回 Reader 供调用方使用。
 //
 // ⚠️ 这里必须做**读权限**校验，不能只靠调用方记得做。
-// /__gofs__/extract 是一条独立路由，不经过 handleRoot 的授权，而它既能
+// /fs/extract 是一条独立路由，不经过 handleRoot 的授权，而它既能
 // 列出包内清单、又能取出包内单个文件 —— 少这一道，任何能连上服务的人
 // 都能读到服务目录里任意压缩包的内容，绕过全部路径级权限。
 // （历史教训：这一道原本是没有的，见 TestExtractListRequiresAuth。）

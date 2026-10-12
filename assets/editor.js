@@ -9,7 +9,7 @@
   'use strict';
 
   var G = window.GOFS;
-  var TEXT_EP = G.raw('/__gofs__/text');
+  var TEXT_EP = G.raw('/fs/text');
 
   // 超过这个行数就不渲染行号，避免大文件把 DOM 撑爆。
   var MAX_GUTTER_LINES = 5000;

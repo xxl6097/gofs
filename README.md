@@ -237,7 +237,7 @@ curl -X MOVE -u user:pass \
 
 ```bash
 # 服务端返回的是中性模型，不是 HTML
-curl -u user:pass "http://host/__gofs__/office?path=/报告.docx"
+curl -u user:pass "http://host/fs/office?path=/报告.docx"
 {"format":"docx","parts":[{"blocks":[{"type":"heading","level":1,
  "runs":[{"t":"季度经营报告"}]}, ...]}]}
 ```
@@ -275,7 +275,7 @@ OOXML 是用户上传的内容，里面的数字全都不可信：
 SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第三方 XML 库的
 一个附带好处，有测试钉着。
 
-⚠️ 预览等同于读取文件内容，所以 `/__gofs__/office` 会按路径做**读权限**校验。
+⚠️ 预览等同于读取文件内容，所以 `/fs/office` 会按路径做**读权限**校验。
 
 ## 在线预览
 
@@ -337,11 +337,11 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 | Secure | 仅在 HTTPS 下附加，纯 HTTP 部署照常工作 |
 | 路径 | 跟随 `--path-prefix`，前缀部署下依然生效 |
 
-登录接口（`GET/POST /__gofs__/auth`）与其它接口一样受认证失败限速约束
+登录接口（`GET/POST /fs/auth`）与其它接口一样受认证失败限速约束
 （`--auth-fail-limit` / `--auth-fail-window`）—— 它会发一张 30 天有效的通行证，
 不限速等于把口令交给字典攻击。
 
-登出走 `DELETE /__gofs__/auth`：cookie 是 HttpOnly 的，JS 删不掉，
+登出走 `DELETE /fs/auth`：cookie 是 HttpOnly 的，JS 删不掉，
 必须由服务端撤销会话再清 cookie，否则「退出登录」只是把界面上的名字抹掉。
 
 服务端支持 `?user=&pass=` 传凭据，也能让媒体标签直连。
@@ -411,15 +411,15 @@ UTF-16 编码的文件直接拒绝编辑（客户端无法正确处理）。
 
 ```bash
 # 读取
-curl -u admin:123 'http://127.0.0.1:5000/__gofs__/text?path=/README.md'
+curl -u admin:123 'http://127.0.0.1:5000/fs/text?path=/README.md'
 
 # 保存（base_hash 来自读取响应）
-curl -u admin:123 -X PUT http://127.0.0.1:5000/__gofs__/text \
+curl -u admin:123 -X PUT http://127.0.0.1:5000/fs/text \
   -H 'Content-Type: application/json' \
   -d '{"path":"/README.md","content":"# 新内容\n","base_hash":"3bca2438f174ef9a"}'
 
 # 冲突时强制覆盖
-curl -u admin:123 -X PUT http://127.0.0.1:5000/__gofs__/text \
+curl -u admin:123 -X PUT http://127.0.0.1:5000/fs/text \
   -H 'Content-Type: application/json' \
   -d '{"path":"/README.md","content":"...","base_hash":"...","force":true}'
 ```
@@ -596,10 +596,10 @@ $ ./gofs-up.sh src lone.txt batch
 ### API
 
 ```bash
-GET    /__gofs__/keys                 列出全部密钥（不含明文）
-POST   /__gofs__/keys                 创建，body {"name","scope","ttl_seconds"}
+GET    /fs/keys                 列出全部密钥（不含明文）
+POST   /fs/keys                 创建，body {"name","scope","ttl_seconds"}
                                       响应中的 token 只返回这一次
-DELETE /__gofs__/keys?id=<id>         撤销
+DELETE /fs/keys?id=<id>         撤销
 ```
 
 ## 认证
@@ -632,7 +632,7 @@ DELETE /__gofs__/keys?id=<id>         撤销
 
 1. 页面加载时立刻从 `sessionStorage` / `localStorage` 读出凭据，
    **先用里面的用户名把界面填上**（否则会闪出「匿名」，登出按钮也会消失）；
-2. 调一次 `GET /__gofs__/auth?path=<当前路径>`，用本地凭据换回真实的身份、
+2. 调一次 `GET /fs/auth?path=<当前路径>`，用本地凭据换回真实的身份、
    权限与配置，然后用这些重新渲染；
 3. 如果这一步返回 `401`，说明凭据已失效 —— 清掉本地存储并弹出登录框。
 
@@ -641,7 +641,7 @@ DELETE /__gofs__/keys?id=<id>         撤销
 
 ### 受限账号在子目录里也能拿到完整按钮
 
-`/__gofs__/auth` 支持 `?path=` 参数，按指定路径计算权限。
+`/fs/auth` 支持 `?path=` 参数，按指定路径计算权限。
 一个只被授予 `/docs:rw` 的账号，站在 `/docs` 里应该看到完整的操作按钮，
 而不是被当成只读——不传 `path` 时才按根目录计算。
 路径里含 `..` 会被直接忽略，不会借机提升权限。
@@ -707,22 +707,22 @@ HTTP Basic 意味着**每个请求都要验一次密码**，而 PBKDF2 是按「
 
 ```bash
 # 列出账号（管理员）
-curl -u admin:secret http://127.0.0.1:5000/__gofs__/users
+curl -u admin:secret http://127.0.0.1:5000/fs/users
 
 # 新建：alice 在 /docs 可读写、其他位置只读
 curl -u admin:secret -X POST -H 'Content-Type: application/json' \
   -d '{"name":"alice","password":"alice123","rules":[
         {"path":"/docs","perm":"rw"},{"path":"/","perm":"r"}]}' \
-  http://127.0.0.1:5000/__gofs__/users
+  http://127.0.0.1:5000/fs/users
 
 # 改权限（省略 password 就是不改密码）
 curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
   -d '{"name":"alice","rules":[{"path":"/docs","perm":"r"}]}' \
-  http://127.0.0.1:5000/__gofs__/users
+  http://127.0.0.1:5000/fs/users
 
 # 删除
 curl -u admin:secret -X DELETE \
-  'http://127.0.0.1:5000/__gofs__/users?name=alice'
+  'http://127.0.0.1:5000/fs/users?name=alice'
 ```
 
 `perm` 取 `"rw"`（可读写）或 `"r"`（只读）。响应始终是更新后的完整列表，
@@ -788,7 +788,7 @@ gofs --no-root-switch -A /srv/data           # 完全禁止运行期切换
 
 ### 权限
 
-`PUT /__gofs__/settings` 要求请求者在**服务根 `/`** 上具有读写权限：
+`PUT /fs/settings` 要求请求者在**服务根 `/`** 上具有读写权限：
 
 - 没有任何凭据 → `401`
 - 有凭据但没有根目录读写权限 → `403`
@@ -798,15 +798,15 @@ gofs --no-root-switch -A /srv/data           # 完全禁止运行期切换
 
 ```bash
 # 读取当前设置
-curl -u admin:secret http://127.0.0.1:5000/__gofs__/settings
+curl -u admin:secret http://127.0.0.1:5000/fs/settings
 
 # 切换根目录
 curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
-     -d '{"root":"/srv/other"}' http://127.0.0.1:5000/__gofs__/settings
+     -d '{"root":"/srv/other"}' http://127.0.0.1:5000/fs/settings
 
 # 上传上限改成 2 GiB（0 表示不限制）
 curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
-     -d '{"upload_max_size":2147483648}' http://127.0.0.1:5000/__gofs__/settings
+     -d '{"upload_max_size":2147483648}' http://127.0.0.1:5000/fs/settings
 ```
 
 响应体：
@@ -1023,7 +1023,7 @@ X-Gofs-Archive-Skipped: 2              # 被跳过的选中项数（仅 picked �
 **列出压缩包内容**
 
 ```bash
-curl 'http://127.0.0.1:5000/__gofs__/extract?path=/backup.zip'
+curl 'http://127.0.0.1:5000/fs/extract?path=/backup.zip'
 ```
 
 响应：
@@ -1043,13 +1043,13 @@ curl 'http://127.0.0.1:5000/__gofs__/extract?path=/backup.zip'
 **取出包内单个文件（流式，不解压落盘）**
 
 ```bash
-curl -O 'http://127.0.0.1:5000/__gofs__/extract?path=/backup.zip&file=a.txt'
+curl -O 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&file=a.txt'
 ```
 
 **执行解压（SSE 进度流）**
 
 ```bash
-curl -N -X PUT http://127.0.0.1:5000/__gofs__/extract \
+curl -N -X PUT http://127.0.0.1:5000/fs/extract \
   -H 'Content-Type: application/json' \
   -d '{"path":"/backup.zip","dest":"/restored","overwrite":false}'
 ```
@@ -1072,7 +1072,7 @@ data: {"report":{"files":1203,"dirs":64,"bytes":104857600,"skipped":2,"warnings"
 也支持用查询参数调用，方便一行 curl：
 
 ```bash
-curl -N -X PUT 'http://127.0.0.1:5000/__gofs__/extract?path=/backup.zip&dest=/restored&overwrite'
+curl -N -X PUT 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored&overwrite'
 ```
 
 ### 安全设计
@@ -1189,7 +1189,7 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 
 **存储型 XSS。** 文件服务器天然会把上传的 `.html` / `.svg` 原样吐回浏览器，
 而浏览器会把它当作**本站页面**渲染 —— 一个能上传文件的人只要放一个
-`<script>fetch('/__gofs__/keys',{method:'POST'…})</script>` 再诱导管理员打开，
+`<script>fetch('/fs/keys',{method:'POST'…})</script>` 再诱导管理员打开，
 就能借管理员的登录态为所欲为。所以：
 
 - 所有文件响应带 `X-Content-Type-Options: nosniff`（禁止按内容猜类型）；
@@ -1434,7 +1434,7 @@ https://your-host/docs/报告.docx
 
 - 超限时「编辑」按钮**仍然显示但不可点**，并附一句原因（「超过 2.0 MiB」）——
   比直接隐藏更好，用户能知道为什么。
-- 上限**服务端也强制**（`/__gofs__/text` 的读写都查），不是只靠前端藏按钮；
+- 上限**服务端也强制**（`/fs/text` 的读写都查），不是只靠前端藏按钮；
   否则绕过去就能改一个几百 MB 的文件。
 - 这一项**没有「不限制」**：打开文件要把整份内容读进内存，放开等于留个口子。
   启动参数 `--edit-max-size` 一直也是「必须为正整数」，两边语义必须一致。
