@@ -289,7 +289,10 @@
 
 .upgrade-head { font-weight: 600; }
 
-/* 发布说明是远端内容，按纯文本展示，长行自动折行、过长可滚。 */
+/* 发布说明是远端内容，渲染成 Markdown 预览：排版复用编辑器的 .ed-markdown
+   （见「文本编辑器」那一节），这里只管盒子的底色、限高与滚动。
+   ⚠️ 不要加 white-space: pre-wrap —— renderMarkdown 返回的 HTML 是
+   块与块之间用换行拼起来的，pre-wrap 会把每个换行都画成一个空行。 */
 .upgrade-notes {
   margin-top: 6px;
   padding: 8px 10px;
@@ -300,9 +303,10 @@
   border-radius: var(--radius-sm);
   color: var(--text-dim);
   font-size: 12.5px;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* 没有渲染器时的纯文本兜底：这时才需要自己保留换行。 */
+.upgrade-notes.is-plain { white-space: pre-wrap; }
 
 .upgrade-progress {
   margin-top: 8px;

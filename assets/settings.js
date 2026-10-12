@@ -486,8 +486,21 @@
       if (rel.notes) {
         var notes = document.createElement('div');
         notes.className = 'upgrade-notes';
-        // 发布说明按纯文本展示：它是远端内容，不当作标记解析。
-        notes.textContent = rel.notes;
+        // 发布说明通常是 Markdown（GitHub 的 release body 就是），
+        // 渲染成预览，而不是把 `##`、`-`、`[x](y)` 这些标记原样摊给人看。
+        //
+        // 安全性由 renderMarkdown 负责（编辑器那套，见 editor.js）：
+        // 它先把 HTML 转义、再只认自己支持的那几种子集，链接与图片地址
+        // 还要过 safeURL（挡掉 javascript: / data:）。它本来就在渲染
+        // 用户文件，用在这里同样成立 —— 所以不必坚持「远端内容只当纯文本」。
+        if (G.renderMarkdown) {
+          notes.classList.add('ed-markdown');
+          notes.innerHTML = G.renderMarkdown(rel.notes);
+        } else {
+          // editor.js 没加载时的兜底：至少把换行留住。
+          notes.classList.add('is-plain');
+          notes.textContent = rel.notes;
+        }
         result.appendChild(notes);
       }
 

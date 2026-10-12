@@ -9,7 +9,11 @@ import "context"
 type Release struct {
 	// Version 为新版本号，例如 "0.2.0"。用于与当前版本比较。
 	Version string `json:"version"`
-	// Notes 为发布说明，纯文本或 Markdown，界面直接展示。
+	// Notes 为发布说明，纯文本或 Markdown。
+	//
+	// 界面把它**当 Markdown 渲染**（编辑器的精简渲染器，先转义 HTML，
+	// 只认自己支持的子集，链接过 safeURL），所以 `##`、`-`、`[文字](网址)`
+	// 这类标记会变成标题 / 列表 / 超链接，而不是原样显示。
 	Notes string `json:"notes,omitempty"`
 	// PublishedAt 为发布时间，RFC3339，可空。
 	PublishedAt string `json:"published_at,omitempty"`
