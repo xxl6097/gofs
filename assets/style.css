@@ -536,6 +536,45 @@ svg {
 .more-wrap, .more-panel { display: contents; }
 .more-toggle { display: none; }
 
+/* ---- 顶栏下拉：上传（文件/文件夹）、新建（文件/文件夹） ----
+   桌面端是浮层；手机端「新建」位于「更多」面板里，由文件末尾的 820px
+   断点把同一个浮层改成就地展开（accordion），不弹第二层。 */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 45;
+  display: none;
+  min-width: 172px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow);
+}
+.menu-pop.open { display: block; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover:not(:disabled) { background: var(--bg-active); }
+.menu-item svg { width: 17px; height: 17px; color: var(--text-dim); flex: none; }
+/* 触发按钮上的小箭头：有它才看得出「这里会展开」。 */
+.menu-wrap .caret { width: 12px; height: 12px; opacity: .65; margin-left: 1px; }
+
 /* ---------------------------------------------------------------- 主体 */
 
 .content {
@@ -2040,6 +2079,24 @@ html.booting body::after {
   /* 这里原本要显式恢复 [hidden]（上面的 display: flex 会盖掉 UA 规则）。
      现在顶部有一条全局的 `[hidden] { display: none !important }`，
      这一条就不需要了。 */
+
+  /* 「新建」的子项在面板里**就地展开**，不弹第二层浮层 ——
+     手机上嵌套菜单层次混乱，而且浮层容易超出屏幕。
+     同一个 .menu-pop 在这里退化成一段内联列表，JS 不用分叉。 */
+  .more-panel .menu-wrap { display: block; position: static; }
+  .more-panel .menu-wrap .caret { margin-left: auto; }
+  .more-panel .menu-pop {
+    position: static;
+    min-width: 0;
+    margin: 2px 0 4px;
+    padding: 0 0 0 14px;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+  }
+  .more-panel .menu-pop.open { display: block; }
+  /* 子项比父项矮一档、左边缩进，一眼看出是从属关系。 */
+  .more-panel .menu-item { min-height: 44px; font-size: 13.5px; }
 }
 
 @media (max-width: 560px) {

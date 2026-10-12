@@ -3,9 +3,12 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/xxl6097/gofs/internal/config"
 )
@@ -70,21 +73,48 @@ func (s *Server) upgradeCheck(w http.ResponseWriter, r *http.Request) {
 //
 // 两个管理员同时点「升级」会并发地写同一个二进制 —— 那是把文件写坏
 // 最直接的方式。用一把进程内的锁串行化，第二个请求直接拒绝。
-var upgradeLocks sync.Map // *Server -> *sync.Mutex
+var upgradeLocks sync.Map // *Server -> *upgradeState
 
-func (s *Server) upgradeLock() *sync.Mutex {
-	v, _ := upgradeLocks.LoadOrStore(s, &sync.Mutex{})
-	return v.(*sync.Mutex)
+// upgradeState 是那把锁，外加「当前这次是什么时候开始的」。
+//
+// 为什么要记开始时刻：被拒的那个请求只拿到 409 是没法排查的 ——
+// 「另一个人刚点了」和「上一次卡住了、锁一直没还」看起来一模一样，
+// 但处理方式完全不同（等一会儿 vs 重启服务）。把已运行时长说出来，
+// 管理员一眼就能分辨。
+type upgradeState struct {
+	mu      sync.Mutex
+	startNs atomic.Int64 // 当前持锁者的开始时刻（UnixNano）；0 表示没有在跑
+}
+
+func (st *upgradeState) startedAt() time.Time {
+	if n := st.startNs.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
+func (s *Server) upgradeLock() *upgradeState {
+	v, _ := upgradeLocks.LoadOrStore(s, &upgradeState{})
+	return v.(*upgradeState)
 }
 
 // upgradeRun 执行升级，并通过 SSE 推送进度。
 func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
-	mu := s.upgradeLock()
-	if !mu.TryLock() {
-		http.Error(w, "409 Conflict: 已经有一次升级在进行中", http.StatusConflict)
+	st := s.upgradeLock()
+	if !st.mu.TryLock() {
+		msg := "409 Conflict: 已经有一次升级在进行中"
+		if since := st.startedAt(); !since.IsZero() {
+			msg += fmt.Sprintf("（开始于 %s，已运行 %s）",
+				since.Format("15:04:05"), time.Since(since).Round(time.Second))
+		}
+		http.Error(w, msg, http.StatusConflict)
 		return
 	}
-	defer mu.Unlock()
+	st.startNs.Store(time.Now().UnixNano())
+	defer func() {
+		st.startNs.Store(0)
+		st.mu.Unlock()
+	}()
 
 	// 先取一次目标版本：调用方从请求体里带上 Check 返回的那个版本，
 	// 避免「检查完到点升级之间版本又变了」造成的困惑。

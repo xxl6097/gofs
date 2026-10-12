@@ -1706,16 +1706,18 @@
   }
 
   function renderPerms() {
+    // 上传 / 新建都是「触发按钮 + 下拉」。权限只挂在触发按钮上，
+    // 菜单项跟着它一起显隐 —— 不必再单独隐藏每一项。
     $('btn-upload').hidden = !can('write');
-    $('btn-upload-dir').hidden = !can('write');
     $('btn-mkdir').hidden = !can('write');
     $('btn-zip').hidden = !can('archive');
     $('btn-settings').hidden = !allowAnySettings();
     if (can('write')) {
-      $('btn-upload').title = uploadLimitHint();
+      $('btn-upload').title = '上传：文件，或整个文件夹　·　' + uploadLimitHint();
       // 文件夹上传的提示：说清「会保留结构」，这是它和普通上传最大的区别。
       $('btn-upload-dir').title = '上传整个文件夹（保留目录结构）　·　' +
         uploadLimitHint();
+      $('btn-mkdir').title = '新建：空文件，或目录';
     }
     if (!$('btn-settings').hidden) {
       $('btn-settings').title = '设置：服务根目录与各项上限、上传密钥、用户与权限、版本升级';
@@ -1876,6 +1878,8 @@
       if (G.closeMore) G.closeMore();
       // 行菜单挂在 body 上、锚定的是上一页某一行，换目录后必须收掉。
       closeRowActions();
+      // 顶栏的上传 / 新建下拉同理：换目录后它们还开着就是残影。
+      if (G.closeTopMenus) G.closeTopMenus();
       if (push !== false && DATA.perms.read) {
         // 地址栏更新是「锦上添花」，不能让它拖垮导航：目录已经取回来了，
         // 万一 pushState 因为任何原因失败（URL 构造问题、跨源限制、
@@ -2404,26 +2408,38 @@
     navigate(state.path, false);
   }
 
-  // ---------------------------------------------------------------- 新建目录
+  // ------------------------------------------------------------ 新建文件 / 目录
 
-  function openMkdirDialog() {
+  // openCreateDialog 弹出「新建文件」或「新建目录」。
+  //
+  // 两者的表单与校验完全一样，只是落地的请求不同：
+  //   目录 MKCOL；文件 PUT 一个空 body。
+  //
+  // ⚠️ 文件那条要带 `?dated=0`：不带的话服务端会按 --upload-date-layout
+  // 把「传到服务根目录的文件」归档进 2026/10/12/，而新建的文件应该就落在
+  // 当前目录 —— 用户填了名字却在日期子目录里找，属于意外。
+  function openCreateDialog(kind) {
+    var isFile = kind === 'file';
+    var noun = isFile ? '文件' : '目录';
+
     var input = document.createElement('input');
     input.type = 'text';
-    input.placeholder = '新目录名称';
+    input.placeholder = '新' + noun + '名称';
 
     var field = document.createElement('div');
     field.className = 'field';
     var lb = document.createElement('label');
-    lb.textContent = '目录名称';
+    lb.textContent = noun + '名称';
     field.appendChild(lb);
     field.appendChild(input);
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '将创建在：' + (state.path === '/' ? '/' : state.path + '/');
+    hint.textContent = '将创建在：' + (state.path === '/' ? '/' : state.path + '/') +
+      (isFile ? '（内容为空）' : '');
     field.appendChild(hint);
 
     var m = openModal({
-      title: '新建目录',
+      title: '新建' + noun,
       body: field,
       footer: modalFoot([
         { label: '取消', onClick: function () { m.close(); } },
@@ -2433,17 +2449,27 @@
 
     async function submit() {
       var name = input.value.trim();
-      if (!name) { toast('warn', '请输入目录名称'); return; }
+      if (!name) { toast('warn', '请输入' + noun + '名称'); return; }
       if (name.indexOf('/') >= 0) { toast('warn', '名称不能包含 /'); return; }
+
+      var target = fileURL(joinPath(state.path, name));
       try {
-        var res = await apiFetch(fileURL(joinPath(state.path, name)), { method: 'MKCOL' });
-        if (res.status === 201) {
+        if (isFile) {
+          // 先探一下重名：PUT 是覆盖写，直接发过去会把同名文件清空 ——
+          // 「新建」绝不该悄悄毁掉已有内容。
+          var head = await apiFetch(target, { method: 'HEAD' });
+          if (head.ok) { toast('warn', '已存在同名的文件或目录'); return; }
+        }
+        var res = isFile
+          ? await apiFetch(target + '?dated=0', { method: 'PUT' })
+          : await apiFetch(target, { method: 'MKCOL' });
+        if (res.ok) {
           toast('ok', '已创建 ' + name);
           m.close();
           navigate(state.path, false);
-        } else {
-          throw new Error(await res.text());
+          return;
         }
+        throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
       } catch (err) {
         toast('err', '创建失败：' + err.message);
       }
@@ -3506,9 +3532,6 @@
     $('file-input').onchange = onPicked;
     $('dir-input').onchange = onPicked;
 
-    $('btn-upload').onclick = function () { $('file-input').click(); };
-    $('btn-upload-dir').onclick = function () { $('dir-input').click(); };
-
     // ---- 顶栏「更多」折叠菜单（仅手机端可见） ----
     //
     // 桌面端 .more-wrap/.more-panel 是 display: contents，菜单项本来就摆在
@@ -3538,10 +3561,15 @@
       };
     }
     // 点菜单项后立刻收起：否则改完设置回到页面，菜单还挂在那儿。
+    //
+    // ⚠️ 子菜单的**触发按钮**要排除在外：它是用来就地展开（手机端）或弹浮层
+    // （桌面端）的，收起「更多」的话，展开出来的两项会跟着一起消失。
     if (morePanel) {
       morePanel.addEventListener('click', function (e) {
         var b = e.target.closest ? e.target.closest('button') : null;
-        if (b && !b.hidden) closeMore();
+        if (!b || b.hidden) return;
+        if (b.closest('.menu-wrap')) return;
+        closeMore();
       });
     }
     document.addEventListener('click', function (e) {
@@ -3570,7 +3598,62 @@
       renderDropZone();
     });
 
-    $('btn-mkdir').onclick = openMkdirDialog;
+    // ---- 顶栏下拉：上传（文件 / 文件夹）与新建（文件 / 文件夹） ----
+    //
+    // 同一时刻只开一个；点外面、按 Esc、选中任意一项都收起。
+    // 手机端「新建」在「更多」面板里，CSS 会把同一个浮层改成就地展开
+    // （见 .more-panel .menu-pop），JS 这边不用分叉。
+    var openMenu = null;
+
+    function closeMenu() {
+      if (!openMenu) return;
+      openMenu.pop.classList.remove('open');
+      if (openMenu.trigger) openMenu.trigger.setAttribute('aria-expanded', 'false');
+      openMenu = null;
+    }
+
+    function toggleMenu(wrapID, popID, triggerID) {
+      var wrap = $(wrapID), pop = $(popID), trigger = $(triggerID);
+      if (!wrap || !pop) return;
+      var wasOpen = openMenu && openMenu.pop === pop;
+      closeMenu();
+      if (wasOpen) return;   // 再点一次＝收起
+      pop.classList.add('open');
+      if (trigger) trigger.setAttribute('aria-expanded', 'true');
+      openMenu = { wrap: wrap, pop: pop, trigger: trigger };
+    }
+
+    document.addEventListener('click', function (e) {
+      if (openMenu && openMenu.wrap.contains(e.target)) return;
+      closeMenu();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeMenu();
+    });
+    G.closeTopMenus = closeMenu;
+
+    $('btn-upload').onclick = function (e) {
+      e.stopPropagation();   // 别让上面的 document 监听立刻把它关掉
+      toggleMenu('upload-wrap', 'upload-menu', 'btn-upload');
+    };
+    $('btn-upload-file').onclick = function () { closeMenu(); $('file-input').click(); };
+    $('btn-upload-dir').onclick = function () { closeMenu(); $('dir-input').click(); };
+
+    $('btn-mkdir').onclick = function (e) {
+      e.stopPropagation();
+      toggleMenu('mkdir-wrap', 'mkdir-menu', 'btn-mkdir');
+    };
+    $('btn-new-file').onclick = function () {
+      closeMenu();
+      closeMore();            // 手机端上面还压着「更多」面板
+      openCreateDialog('file');
+    };
+    $('btn-new-dir').onclick = function () {
+      closeMenu();
+      closeMore();
+      openCreateDialog('dir');
+    };
+
     $('btn-refresh').onclick = function () { navigate(state.path, false); };
 
     // 打包下载：默认打包整个目录；一旦勾选了条目，就只打包所选。

@@ -555,7 +555,14 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ release: rel })
       }).then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        if (!res.ok) {
+          // 把服务端的说明原样带出来。只看状态码的话，管理员拿到的是
+          // 「升级失败：HTTP 409」—— 而 409 的含义（已经有一次升级在跑）
+          // 恰恰是唯一能解释问题的信息，不能丢。
+          return res.text().then(function (body) {
+            throw new Error((body || '').trim() || ('HTTP ' + res.status));
+          });
+        }
         readSSE(res.body, function (name, payload) {
           if (name === 'progress') {
             var pct = payload.total > 0
