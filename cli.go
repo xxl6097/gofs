@@ -96,7 +96,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 	return srv.Wait()
 }
 
-func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, stdout, stderr io.Writer) error {
+func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, restarter Restarter, stdout, stderr io.Writer) error {
 	//srv, err := New(WithRoot(cfg.ServePath),
 	//	WithPort(cfg.Port),
 	//	WithAuth(cfg.AuthRules...),
@@ -105,7 +105,8 @@ func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, stdout, stderr 
 	//		c.MaxConcurrent = 128
 	//	}))
 	srv, err := New(WithConfig(cfg),
-		WithUpgrader(uploader))
+		WithUpgrader(uploader),
+		WithRestarter(restarter))
 	if err != nil {
 		return err
 	}

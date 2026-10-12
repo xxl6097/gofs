@@ -1460,11 +1460,36 @@ go build -o /tmp/gofs-demo ./examples/upgrade
 - **替换前先把原文件改成 `.old`**，`rename` 失败还能放回去；
 - **按 `GOOS/GOARCH` 挑资产**，拿不到对应平台就报错，而不是随便下一个。
 
-示例自己也带测试（`examples/upgrade/main_test.go`），用假的 GitHub 服务把
+实现本身带测试（`githubupgrade/githubupgrade_test.go`），用假的 GitHub 服务把
 「摘要不匹配必须中止」「dry-run 不碰自己」「没有校验和就拒绝」这几条钉住了。
 
 注意**不要用 `go run` 跑它**：`go run` 编译到临时目录，`os.Executable()`
 拿到的是那个临时文件，替换它没有意义。
+
+#### 重启示例
+
+`examples/restart/` 是重启那一半的对应示例，两种方式都能直接跑：
+
+```bash
+go build -o /tmp/gofs-restart-demo ./examples/restart
+/tmp/gofs-restart-demo -root ./data -port 8080
+
+# 默认 -mode exec：原地重新执行自己（不需要 supervisor）
+# -mode signal：优雅退出，交给 systemd / supervisor / 容器编排拉起
+/tmp/gofs-restart-demo -mode signal ...
+```
+
+`exec` 那条实测可用：点一次「重启」，启动横幅会再打印一次（说明进程镜像
+真的被换掉重跑了），端口立刻重新绑定，服务目录与启动参数原样保留。两点容易
+误判：**TCP 连接会被掐断**（curl 拿到 000）—— 前端把「连接断开」当重启的
+正常表现，转而轮询 `/fs/health`；**PID 不变** —— execve 换的是进程镜像不是
+进程本身，别拿 pid 判断重启有没有生效。
+
+`-mode signal` 在没有 supervisor 的环境里只会让服务停下来（示例进程没有
+托管者），所以默认不开；它演示的是「退出交给外部拉起」，好处是走 gofs 的
+优雅关闭流程。
+
+同样**不要用 `go run`**：`os.Executable()` 会拿到临时文件，重执行它没有意义。
 
 ## 界面细节
 
@@ -1783,6 +1808,8 @@ gofs/
 │       ├── handler_list.go      目录渲染、搜索、内嵌资源
 │       ├── handler_archive.go   打包为 zip（全部 / 所选）
 │       ├── handler_extract.go   在线解压（SSE）
+│       ├── handler_upgrade.go   检查更新与执行升级（SSE 进度、单次串行）
+│       ├── handler_restart.go   重启服务（实际重启交给注入的 Restarter）
 │       ├── log.go               日志
 │       └── server_test.go       集成测试
 ├── assets/                      内嵌前端（原生 HTML/CSS/JS，无框架）
@@ -1790,9 +1817,12 @@ gofs/
 │   ├── style.css
 │   ├── app.js                   目录浏览、上传、认证、Toast、弹窗
 │   ├── editor.js                文本编辑器与四种预览
-│   ├── settings.js              设置弹窗（标签外壳：常规 / 密钥 / 用户 / 升级）
+│   ├── settings.js              设置弹窗（标签外壳：常规 / 密钥 / 用户 / 升级与重启）
 │   ├── users.js                 用户与权限面板（由设置弹窗挂载）
 │   └── keys.js                  上传密钥面板（由设置弹窗挂载）
+├── examples/
+│   ├── upgrade/                 可运行的 GitHub Releases 升级实现
+│   └── restart/                 可运行的重启实现（exec / signal 两种）
 └── scripts/
     ├── gen_testdata.py          生成测试用压缩包
     ├── test-ui.mjs              jsdom 真实页面交互测试
