@@ -233,12 +233,18 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 // 与 requireAdmin 共用同一套判定，区别只在于不写响应：页面渲染时需要的
 // 是「要不要显示设置入口」，而不是当场拒绝。两处共用可以避免权限逻辑漂移
 // （改了拦截规则却忘了同步显示规则，会出现「按钮在但点了 403」）。
+//
+// 判定走 permOf（因而认得会话 cookie），**不能**只看 Basic 头：
+// 页面导航是浏览器直接发起的，既不会自动带 Authorization 头，JS 也加不上，
+// 登录态只能靠 cookie 传过来。只看 Basic 头的话，用 cookie 登录的管理员
+// 刷新页面后会被判成非管理员 —— 表现就是「设置」按钮莫名消失，
+// 而其它按钮都正常（它们走 XHR，permOf 本来就认 cookie）。
 func (s *Server) isAdminRequest(r *http.Request) bool {
 	if !s.auth.Enabled() {
 		return true
 	}
-	user, pass, ok := credentials(r)
-	return s.auth.Lookup("/", user, pass, ok) == auth.PermReadWrite
+	perm, _, _ := s.permOf(r, "/")
+	return perm == auth.PermReadWrite
 }
 
 // requireAdmin 要求请求来自「对服务根拥有读写权限」的账号。

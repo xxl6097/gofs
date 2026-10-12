@@ -316,6 +316,58 @@ func TestCookieAuthorizesWrite(t *testing.T) {
 	}
 }
 
+// TestCookieAdminSeesSettingsButton 钉住一个曾经真实存在的 bug：
+// 靠 cookie 登录的管理员，刷新页面后「设置」入口会消失。
+//
+// 页面导航由浏览器直接发起，不带 Authorization 头（JS 也加不上），
+// 身份只能通过 cookie 传过来。若 allow_settings 只看 Basic 头，
+// 页面就会被渲染成「已登录但非管理员」—— 于是按钮没了，
+// 而列表、上传等走 XHR 的功能都正常，只有这一处看着像坏了。
+func TestCookieAdminSeesSettingsButton(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("准备文件: %v", err)
+	}
+	s := newSessionServer(t, root)
+	c := login(t, s, "admin", "secret")
+
+	// 只带 cookie，不带任何 Authorization 头，模拟浏览器刷新页面。
+	got := withCookie(t, s, http.MethodGet, "/", c, nil)
+	if got.code != http.StatusOK {
+		t.Fatalf("带 cookie 打开页面返回 %d，期望 200", got.code)
+	}
+	if !strings.Contains(got.body, `"allow_settings":true`) {
+		t.Errorf("cookie 管理员刷新页面后没拿到 allow_settings=true：%s", got.body)
+	}
+	// 页面也不该被当成未登录（否则前端会弹登录框）。
+	if strings.Contains(got.body, `"auth_required":true`) {
+		t.Errorf("cookie 有效却被当成需要登录：%s", got.body)
+	}
+}
+
+// TestCookieAdminCanChangeSettings 确认「看得到按钮」与「点得动」一致。
+//
+// 显示规则与拦截规则必须同源：曾经 isAdminRequest 忽略 cookie，
+// 于是 cookie 管理员不但看不到按钮，真去调设置接口也会被 403。
+func TestCookieAdminCanChangeSettings(t *testing.T) {
+	root := t.TempDir()
+	s := newSessionServer(t, root)
+	c := login(t, s, "admin", "secret")
+
+	r := httptest.NewRequest(http.MethodPost, "/__gofs__/settings", strings.NewReader(`{"upload_max_size":1048576}`))
+	r.AddCookie(c)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Gofs-Ajax", "1")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("cookie 管理员改设置返回 %d，期望 200：%s", res.StatusCode, b)
+	}
+}
+
 // TestSessionSurvivesAcrossRequests 确认同一张 cookie 能被反复使用
 // （而不是一次性的），否则页面里每个媒体请求都会失败。
 func TestSessionSurvivesAcrossRequests(t *testing.T) {
