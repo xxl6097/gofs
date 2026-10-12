@@ -22,6 +22,7 @@
 package gofs
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -61,11 +62,12 @@ func ParseArgs(args []string, stdout io.Writer) (*Config, error) {
 	return config.Parse(args, stdout)
 }
 
-// Release / UpgradeProgress / Upgrader 描述在线升级的扩展点。
+// Release / UpgradeProgress / Upgrader / Restarter 描述在线升级与重启的扩展点。
 //
-// 同样是 internal 类型的别名：gofs **不内置**任何更新实现 ——
-// 更新源（GitHub Releases / 自建接口 / 内网制品库）与校验策略
-// （摘要、签名、来源白名单）应该由部署方决定，不该由库替他们拍板。
+// 同样是 internal 类型的别名：gofs **不内置**任何更新或重启实现 ——
+// 更新源（GitHub Releases / 自建接口 / 内网制品库）、校验策略
+// （摘要、签名、来源白名单）、以及「怎么重启」（重执行 / 通知编排器 /
+// 退出交给 supervisor）都应该由部署方决定，不该由库替他们拍板。
 //
 //	// 实现 Upgrader 之后注入即可，页面上会出现「检查更新」入口。
 //	srv, _ := gofs.New(gofs.WithRoot("."), gofs.WithUpgrader(myUpgrader{}))
@@ -78,6 +80,10 @@ type (
 	//
 	// 未注入时相关接口返回 404，界面上也不显示那一块。
 	Upgrader = config.Upgrader
+	// Restarter 由调用方实现「怎么重启自己」。
+	//
+	// 未注入时相关接口返回 404，界面上也不显示「重启」按钮。
+	Restarter = config.Restarter
 )
 
 // 升级阶段常量，供实现方在 Progress 里使用。
@@ -95,6 +101,26 @@ const (
 func WithUpgrader(u Upgrader) Option {
 	return func(c *Config) { c.Upgrader = u }
 }
+
+// WithRestarter 注入「重启服务」的实现。
+//
+// 不注入（默认）＝ 这个部署不提供重启：界面上不显示「重启」按钮，
+// /fs/restart 返回 404。与 WithUpgrader 相互独立。
+//
+// 典型写法是原地重执行自己，或给自己发 SIGTERM 交给 supervisor：
+//
+//	gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
+//		return syscall.Exec(os.Executable(), os.Args, os.Environ())
+//	}))
+func WithRestarter(r Restarter) Option {
+	return func(c *Config) { c.Restarter = r }
+}
+
+// RestarterFunc 让普通函数满足 Restarter，省掉一个只为实现接口而存在的类型。
+type RestarterFunc func(ctx context.Context) error
+
+// Restart 实现 Restarter。
+func (f RestarterFunc) Restart(ctx context.Context) error { return f(ctx) }
 
 // WithVersion 指定本服务对外报告的版本号。
 //

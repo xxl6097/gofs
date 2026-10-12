@@ -246,6 +246,13 @@ type Config struct {
 	// 页面上也不显示那一块。库自己不内置任何实现 —— 更新源与校验策略
 	// 应该由部署方决定（见 Upgrader 的注释）。
 	Upgrader Upgrader
+
+	// Restarter 为「重启服务」的实现，由调用方注入。
+	//
+	// 为 nil 表示这个部署不提供重启：相关接口返回「未启用」，界面上也不
+	// 显示「重启」按钮。与 Upgrader 相互独立 —— 只升级不重启、或只重启
+	// 不升级的部署都很常见（见 Restarter 的注释）。
+	Restarter Restarter
 }
 
 // DefaultVersion 是未显式配置时的版本号。

@@ -762,14 +762,14 @@ curl -u admin:secret -X DELETE \
 以前「换数据目录」「放宽上传上限」都得改启动参数再重启进程。现在登录后点顶栏的
 **「设置」**，这些事都能在页面上直接改，**立刻生效、不用重启**。
 
-设置是个**标签页**弹窗，密钥、用户与权限、版本与升级都收在里面，按权限显示：
+设置是个**标签页**弹窗，密钥、用户与权限、升级与重启都收在里面，按权限显示：
 
 | 标签 | 内容 |
 | --- | --- |
 | 常规 | 服务根目录、单文件上传上限、在线编辑大小上限 |
 | 密钥 | 上传密钥与分享链接的管理（需 `--allow-keys` 且在某目录上有写权限） |
 | 用户与权限 | 增删改账号、按路径分配只读/读写（需 `--allow-user-manage` 且为管理员） |
-| 版本与升级 | 检查并执行升级（需注入了 Upgrader 且为管理员） |
+| 升级与重启 | 检查并执行升级、重启服务（需注入了 Upgrader 或 Restarter 且为管理员） |
 
 底部按钮跟着当前标签走：常规是「取消 / 保存」，用户与权限是「关闭 / 新建用户」，
 其余是「关闭」。常规页有未保存改动时，切标签或关窗会先确认一次。
@@ -1359,12 +1359,13 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 这不是为了记住登录：目录分享打开的是页面，而页面里的列表、预览都是前端
 再发 XHR 拉的，那些请求不带 `?share=` —— 没有这个 cookie 就会全部 401。
 
-## 在线检测升级（扩展点）
+## 在线检测升级与重启（扩展点）
 
-页面上有「版本与升级」：点「检查更新」→ 有新版就显示版本号、发布说明与发布页
-→ 确认后「立即升级」→ 进度实时推送（下载 / 校验 / 替换）→ 提示重启生效。
+页面上有「升级与重启」：点「检查更新」→ 有新版就显示版本号、发布说明与发布页
+→ 确认后「立即升级」→ 进度实时推送（下载 / 校验 / 替换）→ 重启后生效。
 
-**但 gofs 自己不实现「怎么查、怎么装」** —— 它只定义接口，实现由部署方给：
+**但 gofs 自己不实现「怎么查、怎么装」，也不实现「怎么重启自己」** ——
+它只定义接口，实现由部署方给：
 
 ```go
 type Upgrader interface {
@@ -1372,12 +1373,42 @@ type Upgrader interface {
     Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
 }
 
+type Restarter interface {
+    Restart(ctx context.Context) error
+}
+
 srv, _ := gofs.New(
     gofs.WithRoot("./data"),
-    gofs.WithVersion("1.4.2"),         // 服务对外报告的版本
-    gofs.WithUpgrader(myUpgrader{}),   // 不注入＝不提供在线升级
+    gofs.WithVersion("1.4.2"),            // 服务对外报告的版本
+    gofs.WithUpgrader(myUpgrader{}),      // 不注入＝不提供在线升级
+    gofs.WithRestarter(myRestarter{}),    // 不注入＝不显示「重启」按钮
 )
 ```
+
+两个接口**相互独立**：只升级不重启、只重启不升级都很常见。标签页在任一注入时
+出现，页内再各显各的块。
+
+重启的常见实现（`RestarterFunc` 可以省掉一个只为实现接口而存在的类型）：
+
+```go
+// ① 原地重执行自己（注意：这时 HTTP 响应多半发不出去）
+gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
+    return syscall.Exec(os.Executable(), os.Args, os.Environ())
+}))
+
+// ② 优雅退出，交给 systemd / supervisor / 容器编排拉起
+gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
+    return syscall.Kill(os.Getpid(), syscall.SIGTERM)
+}))
+```
+
+⚠️ 前端的等待逻辑据此设计：**「连接被掐断」被当成重启的正常表现**，
+不是失败 —— 实现方如果是原地重执行，进程镜像在写出响应之前就被换掉了，
+客户端只会看到连接中断。所以页面在发出请求后会轮询 `/fs/health`
+（该接口不需要鉴权）等服务回来，最长 60 秒。能拿到完整响应才说明重启
+没发生（403/404/500），那时才按失败处理并把服务端的说明原样显示。
+
+重启会清空内存里的会话表，**重启后需要重新登录**（界面上有这句话）。
 
 为什么做成接口而不是内置一种实现：
 
@@ -1403,6 +1434,8 @@ srv, _ := gofs.New(
   「开始于 15:32:10，已运行 6m3s」—— 光有状态码分不清「别人刚点了一下」
   和「上一次卡住了、锁一直没还」，而这两种情况的处理方式完全不同。
   前端会把这段说明原样显示出来，不要退化成「升级失败：HTTP 409」。
+- **重启同样是管理员专属**（`POST /fs/restart`）。它会掐断所有进行中的上传
+  与下载，未注入 `Restarter` 时接口返回 404、界面上也不显示那个按钮。
 
 ### 完整示例
 

@@ -70,7 +70,7 @@
     if (typeof info.allow_users === 'boolean') DATA.allow_users = info.allow_users;
     if (typeof info.upload_max_size === 'number') DATA.upload_max_size = info.upload_max_size;
     if (typeof info.edit_max_size === 'number') DATA.edit_max_size = info.edit_max_size;
-    // 同上：「版本与升级」的开关只在登录响应里补齐，
+    // 同上：「升级与重启」的开关只在登录响应里补齐，
     // 未登录外壳里是空的（renderAuthGate 不下发任何数据）。
     if (typeof info.allow_upgrade === 'boolean') DATA.allow_upgrade = info.allow_upgrade;
     if (info.user !== undefined) DATA.user = info.user;

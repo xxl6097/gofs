@@ -278,7 +278,7 @@
   .office-table th, .office-table td { max-width: 220px; }
 }
 
-/* ================================================================ 版本与升级 */
+/* ============================================================ 升级与重启 */
 
 .upgrade-box { border-top: 1px solid var(--border); padding-top: 14px; }
 .upgrade-ver { color: var(--text-dim); font-size: 13px; margin-right: auto; }

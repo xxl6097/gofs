@@ -122,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(upScriptName, s.handleUpScript)
 	mux.HandleFunc("/fs/settings", s.handleSettings)
 	mux.HandleFunc("/fs/upgrade", s.handleUpgrade)
+	mux.HandleFunc("/fs/restart", s.handleRestart)
 	mux.HandleFunc("/fs/users", s.handleUsers)
 	mux.HandleFunc("/fs/extract", s.handleExtract)
 	mux.HandleFunc("/fs/text", s.handleText)

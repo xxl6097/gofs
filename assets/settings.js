@@ -1,8 +1,8 @@
 /* gofs 设置面板：常规（服务根目录 / 上传上限 / 编辑上限）、上传密钥、
- * 用户与权限、版本与升级，四块做成标签页。
+ * 用户与权限、升级与重启，四块做成标签页。
  *
  * 为什么合成一个入口：这四块都是管理员/高权限操作，平铺在工具栏上既占位
- * 又零散；而且「版本与升级」挤在设置页底部会把弹窗拉得很长。分标签之后
+ * 又零散；而且升级与重启挤在设置页底部会把弹窗拉得很长。分标签之后
  * 每块只在自己那一页出现，底部按钮也跟着当前页变（常规是「取消/保存」，
  * 其余是「关闭」，用户页多一个「新建用户」）。
  *
@@ -20,6 +20,9 @@
   var BASE = (G.data && G.data.path_prefix) || '';
   var EP = BASE + '/fs/settings';
   var EP_UPGRADE = BASE + '/fs/upgrade';
+  var EP_RESTART = BASE + '/fs/restart';
+  // 重启期间要靠它判断「服务回来没有」。这个接口不需要鉴权，是故意挑的。
+  var EP_HEALTH = BASE + '/fs/health';
 
   var UNITS = [
     // KiB 是给「在线编辑上限」用的：512 KiB 这类取值很常见，
@@ -407,7 +410,12 @@
   }
 
   function buildUpgradeTab() {
-    return { el: buildUpgradeBox(), footerItems: [] };
+    var el = document.createElement('div');
+    // 两块互相独立：注入了 Upgrader 才有「检查更新」，注入了 Restarter
+    // 才有「重启」。两个都没注入的话这个标签压根不会出现。
+    if (G.data.allow_upgrade) el.appendChild(buildUpgradeBox());
+    if (G.data.allow_restart) el.appendChild(buildRestartBox());
+    return { el: el, footerItems: [] };
   }
 
   // ---------------------------------------------------------------- 版本与升级
@@ -421,7 +429,7 @@
     box.className = 'field upgrade-box';
 
     var lb = document.createElement('label');
-    lb.textContent = '版本与升级';
+    lb.textContent = '升级';
     box.appendChild(lb);
 
     var row = document.createElement('div');
@@ -590,6 +598,99 @@
     return box;
   }
 
+  // buildRestartBox 造出「重启服务」那一块。
+  //
+  // 怎么重启由服务端的 Restarter 实现决定（原地重执行 / 通知编排器 /
+  // 退出交给 supervisor），前端只负责「发出请求 + 等它回来」。
+  //
+  // 为什么靠轮询 /fs/health 而不是看响应：实现方如果是原地重执行自己，
+  // 进程镜像在写出响应之前就被换掉了，客户端看到的就是连接中断 ——
+  // 那是重启的正常表现，不是失败。所以「连不上」不能当错误，只能等。
+  function buildRestartBox() {
+    var box = document.createElement('div');
+    box.className = 'field upgrade-box';
+
+    var lb = document.createElement('label');
+    lb.textContent = '重启服务';
+    box.appendChild(lb);
+
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.alignItems = 'center';
+    var btn = G.btn('重启', 'danger', function () { askRestart(); });
+    row.appendChild(btn);
+    box.appendChild(row);
+
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = '重启方式由本部署自行实现；正在进行的上传与下载会中断。';
+    box.appendChild(hint);
+
+    var result = document.createElement('div');
+    result.className = 'upgrade-progress';
+    result.hidden = true;
+    box.appendChild(result);
+
+    function say(text, cls) {
+      result.hidden = false;
+      result.className = 'upgrade-progress' + (cls ? ' ' + cls : '');
+      result.textContent = text;
+    }
+
+    function askRestart() {
+      G.confirm({
+        title: '确认重启服务？',
+        message: '正在进行的上传与下载会中断。',
+        // 会话表在内存里，重启会把它清空 —— 不说清楚的话，
+        // 刷新出来的登录框会让人以为「重启把配置搞坏了」。
+        detail: '重启期间页面会短暂断开，服务恢复后本页自动刷新。' +
+          '重启后需要重新登录（会话是内存态的）。',
+        okLabel: '重启',
+        danger: true
+      }).then(function (ok) { if (ok) run(); });
+    }
+
+    async function run() {
+      btn.disabled = true;
+      say('正在重启…');
+      try {
+        var res = await G.apiFetch(EP_RESTART, { method: 'POST' });
+        if (!res.ok) {
+          // 这里能拿到完整响应，说明重启**没有**发生（403/404/500），
+          // 那就是真的失败，把服务端的说明原样显示。
+          var body = (await res.text()).trim();
+          say('重启失败：' + (body || ('HTTP ' + res.status)), 'err');
+          btn.disabled = false;
+          return;
+        }
+      } catch (e) {
+        // 连接被掐断 —— 进程多半已经没了，这恰恰说明重启生效了。
+        // 不当错误处理，直接进等待。
+      }
+      await waitForBack();
+    }
+
+    async function waitForBack() {
+      // 最多等 60 秒。用裸 fetch 而不是 apiFetch：这个接口不需要鉴权，
+      // 而 apiFetch 遇到 401 会把用户弹到登录框 —— 重启期间正需要避开它。
+      for (var i = 0; i < 60; i++) {
+        await new Promise(function (r) { setTimeout(r, 1000); });
+        try {
+          var res = await fetch(EP_HEALTH, { cache: 'no-store' });
+          if (res.ok) {
+            say('服务已重启，正在刷新页面…', 'ok');
+            setTimeout(function () { location.reload(); }, 800);
+            return;
+          }
+        } catch (e) { /* 还没起来，继续等 */ }
+      }
+      say('等了 60 秒服务仍未恢复，请手动刷新页面确认。', 'err');
+      btn.disabled = false;
+    }
+
+    return box;
+  }
+
   function stageText(stage) {
     return {
       checking: '准备中…',
@@ -648,10 +749,16 @@
     if (G.data.allow_users) {
       defs.push({ id: 'users', label: '用户与权限', build: buildUsersTab });
     }
-    // 升级接口要管理员权限，所以没「常规」就没有「版本与升级」——
+    // 升级与重启接口都要管理员权限，所以没「常规」就没有这一页 ——
     // 否则会给出一个点了必然 403 的标签。
-    if (G.data.allow_settings && G.data.allow_upgrade) {
-      defs.push({ id: 'upgrade', label: '版本与升级', build: buildUpgradeTab });
+    // 两者只要注入了一个就显示：只重启不升级（或反之）的部署很常见，
+    // 页内再各自判断显示哪一块。
+    var canUp = !!G.data.allow_upgrade, canRestart = !!G.data.allow_restart;
+    if (G.data.allow_settings && (canUp || canRestart)) {
+      // 标签名跟着实际有的能力走 —— 只注入了 Upgrader 却写着「重启」，
+      // 点进去找不到那个按钮，比不写更让人困惑。
+      var label = canUp && canRestart ? '升级与重启' : (canUp ? '升级' : '重启');
+      defs.push({ id: 'upgrade', label: label, build: buildUpgradeTab });
     }
     if (!defs.length) return;
 

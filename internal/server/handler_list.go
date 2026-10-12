@@ -81,6 +81,9 @@ type pageData struct {
 	// AllowUpgrade 表示服务端注入了 Upgrader，页面上才显示「检查更新」。
 	// 未注入时整块都不显示 —— 免得给一个点了必然 404 的按钮。
 	AllowUpgrade bool `json:"allow_upgrade"`
+	// AllowRestart 表示服务端注入了 Restarter，页面上才显示「重启」。
+	// 与 AllowUpgrade 相互独立：只重启不升级的部署很常见。
+	AllowRestart bool `json:"allow_restart"`
 	// AllowUsers 表示当前用户可以在页面上管理用户（增删改）。
 	AllowUsers bool `json:"allow_users"`
 }
@@ -123,6 +126,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		Listing:          listing,
 		Perms:            s.buildPerms(p),
 		AllowUpgrade:     s.cfg.Upgrader != nil,
+		AllowRestart:     s.cfg.Restarter != nil,
 		User:             p.User,
 		Anonymous:        !p.Authenticated,
 		AuthOn:           s.auth.Enabled(),

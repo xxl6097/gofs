@@ -42,6 +42,8 @@ func main() {
 	port := flag.Int("port", 8000, "监听端口")
 	version := flag.String("version", gofs.Version, "本程序的版本号（用于与 release 比较，须与实际构建一致）")
 	dryRun := flag.Bool("dry-run", false, "只检查并下载校验，不替换自己")
+	enableRestart := flag.Bool("enable-restart", false,
+		"注入一个「重启」实现（给自己发 SIGTERM），页面上会出现「重启」按钮")
 	flag.Parse()
 
 	// 版本号要传给两处：升级器据此判断有没有新版，服务用它做展示。
@@ -61,7 +63,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv, err := gofs.New(
+	opts := []gofs.Option{
 		gofs.WithRoot(*root),
 		gofs.WithBind("127.0.0.1"),
 		gofs.WithPort(*port),
@@ -71,9 +73,23 @@ func main() {
 		// 密钥与用户表放内存，别碰开发者本机的真实配置。
 		gofs.WithKeyFile(""),
 		gofs.WithUserFile(""),
-		// ★ 关键的一行：注入之后页面上才会出现「版本与升级」。
+		// ★ 关键的一行：注入之后页面上才会出现「检查更新」。
 		gofs.WithUpgrader(up),
-	)
+	}
+	// 重启实现同样由上层给，而且**不注入就不显示按钮** —— 这里用条件注入
+	// 演示这一点（而不是注入一个总是报错的实现，那样按钮会一直在）。
+	//
+	// 演示的是最常见的一种：给自己发 SIGTERM，走完优雅关闭后交给
+	// systemd / supervisor / 容器编排拉起来。⚠️ 这个示例进程没有
+	// supervisor，点了之后它就是真的退出了，所以默认不开。
+	if *enableRestart {
+		opts = append(opts, gofs.WithRestarter(gofs.RestarterFunc(
+			func(context.Context) error {
+				return syscall.Kill(os.Getpid(), syscall.SIGTERM)
+			})))
+	}
+
+	srv, err := gofs.New(opts...)
 	if err != nil {
 		log.Fatalf("构造服务失败: %v", err)
 	}
@@ -84,7 +100,7 @@ func main() {
 	}
 	srv.Banner(os.Stdout)
 	fmt.Printf("\n打开 %s ，用 admin / admin123 登录，\n", srv.URL())
-	fmt.Printf("在「设置 → 版本与升级」里点「检查更新」。%s\n\n", dryRunNote(*dryRun))
+	fmt.Printf("在「设置 → 升级与重启」里点「检查更新」。%s\n\n", dryRunNote(*dryRun))
 
 	if err := srv.Run(ctx); err != nil {
 		log.Fatalf("运行失败: %v", err)
