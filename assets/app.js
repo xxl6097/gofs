@@ -73,6 +73,9 @@
     // 同上：「升级与重启」的开关只在登录响应里补齐，
     // 未登录外壳里是空的（renderAuthGate 不下发任何数据）。
     if (typeof info.allow_upgrade === 'boolean') DATA.allow_upgrade = info.allow_upgrade;
+    // 多站点模式：站点集合是运行期可变的，登录响应里已经带了这个标记，
+    // 前端一直没接 —— 不接的话从登录框进来的页面要等下次请求才知道模式。
+    if (typeof info.multi_root === 'boolean') DATA.multi_root = info.multi_root;
     if (info.user !== undefined) DATA.user = info.user;
     if (typeof info.auth_on === 'boolean') DATA.auth_on = info.auth_on;
   }
@@ -1340,6 +1343,13 @@
         tag.className = 'tag zip';
         tag.textContent = '可解压';
         cell.appendChild(tag);
+      } else if (e.site) {
+        // 挂载站点打一个标：它看着像子目录，其实指向另一处磁盘位置，
+        // 而且下面的移动/重命名/删除对它都不适用（服务端会 403）。
+        var st = document.createElement('span');
+        st.className = 'tag site';
+        st.textContent = '站点';
+        cell.appendChild(st);
       } else if (e.is_dir) {
         var dt = document.createElement('span');
         dt.className = 'tag';
@@ -1401,13 +1411,16 @@
       if (can('write')) {
         actions.push({ kind: 'share', label: '分享', run: function () { openShareDialog(e); } });
       }
-      if (can('write')) {
+      // 站点条目不参与移动/重命名/删除：它代表的是**另一个挂载根**，
+      // 服务端按解析后的绝对路径判定并 403（见 Roots.IsRoot），
+      // 与其让按钮点了报错，不如先不显示。
+      if (can('write') && !e.site) {
         // 移动排在重命名前面：改个名字用它自己的输入框就够，
         // 挪窝才是需要挑目标的那件事。
         actions.push({ kind: 'move', label: '移动', run: function () { openMoveDialog([e]); } });
         actions.push({ kind: 'rename', label: '重命名', run: function () { openRenameDialog(e); } });
       }
-      if (can('delete')) {
+      if (can('delete') && !e.site) {
         actions.push({ kind: 'trash', label: '删除', cls: 'danger', run: function () { doDelete([e]); } });
       }
 

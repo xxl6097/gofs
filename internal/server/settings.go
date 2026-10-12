@@ -45,6 +45,14 @@ type runtimeSettings struct {
 	// 由启动时的根目录推导而来，**之后不再变化**：如果跟着当前根一起变，
 	// 那切到子目录之后就再也切不回来了（范围会跟着收窄）。
 	allowRoots []string
+
+	// siteRoots 是**显式**配置的路径前缀（--root-allow / RootAllow），
+	// 不包含上面那个推导出来的父目录。
+	//
+	// 单独留一份是因为「加站点」与「换根」的默认值不同：换根默认限在启动
+	// 主目录的兄弟目录内；加站点默认不限（见 AllowsSite）。要区分「用户显式
+	// 写了白名单」与「我们替他推出来的默认范围」，就必须把它单独存着。
+	siteRoots []string
 }
 
 // Title 返回当前站点标题。
@@ -197,8 +205,39 @@ func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 			continue
 		}
 		rs.allowRoots = append(rs.allowRoots, abs)
+		rs.siteRoots = append(rs.siteRoots, abs)
 	}
 	return rs
+}
+
+// AllowsSite 判断某个目录能否被新增为站点。
+//
+// 与 AllowsRoot（运行期换根）**默认值刻意不同**：
+//
+//   - 换根默认限在启动主目录的兄弟目录内 —— 那是个「在目录树里跳来跳去」
+//     的动作，收窄一点更安全；
+//   - 加站点**默认不限制**（门槛是「你是管理员」）。运维明确想再加一个
+//     目录时，「先改启动参数重启」正是这个功能要免掉的事。
+//
+// 两者都认可**显式**配置的白名单：一旦写了 --root-allow / RootAllow，
+// 加站点也按它收窄 —— 想收紧的部署有这个开关，不想管的人不必配。
+func (s *runtimeSettings) AllowsSite(abs string) bool {
+	if len(s.siteRoots) == 0 {
+		return true
+	}
+	for _, base := range s.siteRoots {
+		if fsutil.IsWithin(base, abs) {
+			return true
+		}
+	}
+	return false
+}
+
+// SiteRoots 返回显式配置的白名单（供界面提示与错误信息用；空表示不限制）。
+func (s *runtimeSettings) SiteRoots() []string {
+	out := make([]string, len(s.siteRoots))
+	copy(out, s.siteRoots)
+	return out
 }
 
 // UploadMaxSize 返回当前生效的单文件上传上限，0 表示不限制。

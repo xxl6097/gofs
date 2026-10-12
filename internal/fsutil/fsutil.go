@@ -244,6 +244,12 @@ type Entry struct {
 	Editable bool `json:"editable"`
 	// Lang 为语言标识（markdown / json / python …），前端据此选择预览方式。
 	Lang string `json:"lang,omitempty"`
+	// Site 表示这不是本目录里的真实条目，而是挂在根上的另一个站点。
+	//
+	// 前端据此打个标记并**隐藏会破坏它的操作**（移动 / 重命名 / 删除）——
+	// 那种请求服务端也会以 403 拒绝（见 server 的根保护），但让按钮先别出现
+	// 比点下去报错友好得多。
+	Site bool `json:"site,omitempty"`
 }
 
 // Listing 表示一次目录列举的结果。
@@ -338,15 +344,23 @@ func ReadDir(res relator, dir string, hidden []string, maxEntries int) (*Listing
 		}
 	}
 
-	sort.SliceStable(list.Entries, func(i, j int) bool {
-		a, b := list.Entries[i], list.Entries[j]
+	SortEntries(list.Entries)
+	list.Total = len(list.Entries)
+	return list, nil
+}
+
+// SortEntries 按 Listing 的约定给条目排序：目录在前，再按名字（忽略大小写）。
+//
+// 单独导出是因为「把挂载站点并进根目录列表」也要用同一套顺序 ——
+// 各写一份迟早会出现「服务端 ?json 与页面看到的顺序不一样」。
+func SortEntries(entries []Entry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
 		if a.IsDir != b.IsDir {
 			return a.IsDir
 		}
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
-	list.Total = len(list.Entries)
-	return list, nil
 }
 
 // baseName 在根目录时返回合适的展示名。

@@ -35,8 +35,12 @@ import (
 // 同时把密钥文件指向空串（仅内存），避免测试污染用户的 ~/.config/gofs/keys.json。
 func testConfig(t *testing.T, root string, extra ...string) *config.Config {
 	t.Helper()
+	// ⚠️ 三个存储文件都要显式置空：不置空的话测试会把站点、标题这些东西
+	// 写进**开发者真实的配置目录**，后面的测试再读回来 —— 表现成「单根却
+	// 成了多站点」这种毫无头绪的失败。真实目录是哪由 os.UserConfigDir()
+	// 决定，测试不该碰它。
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
-		"--no-upload-dated", "--key-file", ""}
+		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", ""}
 	args = append(args, extra...)
 	args = append(args, root)
 	cfg, err := config.Parse(args, io.Discard)
@@ -50,7 +54,8 @@ func testConfig(t *testing.T, root string, extra ...string) *config.Config {
 func testConfigDated(t *testing.T, root, layout string, extra ...string) *config.Config {
 	t.Helper()
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
-		"--upload-date-layout", layout, "--key-file", ""}
+		"--upload-date-layout", layout,
+		"--key-file", "", "--user-file", "", "--settings-file", ""}
 	args = append(args, extra...)
 	args = append(args, root)
 	cfg, err := config.Parse(args, io.Discard)

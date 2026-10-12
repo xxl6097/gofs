@@ -42,17 +42,27 @@ type settingsReply struct {
 	// MultiRoot 表示当前挂了多个服务目录（此时 URL 带标签前缀，
 	// 且 RootSwitchable 恒为 false）。
 	MultiRoot bool `json:"multi_root"`
-	// Roots 为各挂载点，仅在 MultiRoot 时下发（供界面展示「挂了哪些目录」）。
+	// Roots 为全部挂载点（[0] 是主目录），供界面展示与增删站点。
 	Roots []rootInfo `json:"roots,omitempty"`
+	// SiteRoots 为显式配置的白名单前缀；空数组表示不限制目录。
+	SiteRoots []string `json:"site_roots,omitempty"`
+	// SitesEditable 表示当前是否允许在页面上增删站点。
+	// 与根目录可切换同属一个开关家族（--no-root-switch）；主目录是单文件
+	// 模式时也不允许 —— 那时整台服务只暴露一个文件，加站点没有意义。
+	SitesEditable bool `json:"sites_editable"`
 	// UploadDateDir 为当前的上传归档目录（未开启归档时为空串）。
 	UploadDateDir string `json:"upload_date_dir,omitempty"`
 }
 
-// rootInfo 描述一个挂载点：标签即 URL 首段。
+// rootInfo 描述一个挂载点。主目录的 URL 是 "/"，附加站点是 "/<标签>"。
 type rootInfo struct {
 	Label string `json:"label"`
 	Root  string `json:"root"`
 	URL   string `json:"url"`
+	// Primary 标记这是主服务目录（服务在 /，不可移除）。
+	Primary bool `json:"primary,omitempty"`
+	// Removable 表示界面上可以移除这一项（主目录恒为 false）。
+	Removable bool `json:"removable"`
 }
 
 // settingsRequest 是修改服务设置的请求体。
@@ -64,6 +74,16 @@ type settingsRequest struct {
 	UploadMaxSize *int64  `json:"upload_max_size"`
 	EditMaxSize   *int64  `json:"edit_max_size"`
 	Title         *string `json:"title"`
+	// AddSite / RemoveSite 是**即时生效**的站点增删：它们直接改服务端状态
+	// 并落盘，不走「取消 / 保存」那套（那样还得做待定操作与回滚）。
+	AddSite    *siteAddRequest `json:"add_site"`
+	RemoveSite *string         `json:"remove_site"`
+}
+
+// siteAddRequest 是新增站点的请求体。Label 可留空，按目录名自动分配。
+type siteAddRequest struct {
+	Path  string `json:"path"`
+	Label string `json:"label"`
 }
 
 // handleSettings 读取或修改服务级设置（根目录、单文件上传上限）。
@@ -105,16 +125,22 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		return rep
 	}
 	rep.Root = s.res.Root()
-	// 多根时不允许运行期换根（换掉哪一个？其余的呢？），界面上据此
-	// 把那一项变成只读的挂载列表。
+	// 有附加站点时不允许运行期换主根（换掉哪一个？其余的呢？）——
+	// 与站点增删是两件事：站点随时可增删，主根要换得先把站点清掉。
 	rep.RootSwitchable = s.cfg.AllowRootSwitch && !s.MultiRoot()
 	rep.MultiRoot = s.MultiRoot()
-	if s.MultiRoot() {
-		for _, m := range s.Mounts() {
-			rep.Roots = append(rep.Roots, rootInfo{
-				Label: m.Label, Root: m.Res.Root(), URL: "/" + m.Label,
-			})
+	rep.SitesEditable = s.cfg.AllowRootSwitch && s.res.SingleFile() == ""
+	rep.SiteRoots = s.settings.SiteRoots()
+	for _, m := range s.Mounts() {
+		url := "/" + m.Label
+		if m.Label == s.res.Primary().Label {
+			url = "/"
 		}
+		rep.Roots = append(rep.Roots, rootInfo{
+			Label: m.Label, Root: m.Res.Root(), URL: url,
+			Primary:   m.Label == s.res.Primary().Label,
+			Removable: m.Label != s.res.Primary().Label,
+		})
 	}
 	rep.AllowRoots = s.settings.AllowRoots()
 	return rep
@@ -135,9 +161,27 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
 		return
 	}
-	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil && req.Title == nil {
+	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil &&
+		req.Title == nil && req.AddSite == nil && req.RemoveSite == nil {
 		http.Error(w, "400 Bad Request: 没有需要修改的设置项", http.StatusBadRequest)
 		return
+	}
+
+	// ---- 站点增删（即时生效，独立于下面的「取消 / 保存」）----
+	if req.AddSite != nil {
+		m, err := s.addSite(req.AddSite.Path, req.AddSite.Label)
+		if err != nil {
+			s.writeErrForSite(w, err)
+			return
+		}
+		s.logger.Infof("新增站点：/%s → %s", m.Label, m.Res.Root())
+	}
+	if req.RemoveSite != nil {
+		if err := s.removeSite(*req.RemoveSite); err != nil {
+			s.writeErrForSite(w, err)
+			return
+		}
+		s.logger.Infof("移除站点：/%s", *req.RemoveSite)
 	}
 
 	if req.Title != nil {
@@ -237,6 +281,112 @@ func normalizeTitle(raw string) (string, error) {
 		return "", fmt.Errorf("标题最长 %d 个字符（当前 %d）", maxTitleRunes, n)
 	}
 	return t, nil
+}
+
+// addSite 新增一个附加站点。
+//
+// 安全边界复用「可切换范围」（--root-allow / 启动根的父目录）—— 把机器上
+// 任意目录通过网页暴露出去是权限最高的操作之一，不能只靠「你是管理员」。
+func (s *Server) addSite(path, wantLabel string) (fsutil.Mount, error) {
+	if !s.cfg.AllowRootSwitch {
+		return fsutil.Mount{}, errSiteDisabled
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fsutil.Mount{}, errors.New("目录不能为空")
+	}
+	if strings.ContainsRune(path, 0) {
+		return fsutil.Mount{}, errors.New("目录含有非法字符")
+	}
+	// ⚠️ 先规范化（解析软链）再查白名单：否则在白名单内放一个指向 /etc 的
+	// 软链就能绕过边界 —— 与 switchRoot 同一套顺序。
+	abs, err := fsutil.NormalizePath(path)
+	if err != nil {
+		return fsutil.Mount{}, err
+	}
+	// 默认不限目录（门槛是「你是管理员」）；只有部署方**显式**写了
+	// --root-allow / RootAllow 时，才按那份白名单收窄。
+	if !s.settings.AllowsSite(abs) {
+		return fsutil.Mount{}, errors.New("目标目录超出白名单；当前白名单：" +
+			strings.Join(s.settings.SiteRoots(), "、") +
+			"（由 --root-allow / RootAllow 指定；去掉它即不再限制目录）")
+	}
+	info, err := os.Stat(abs)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fsutil.Mount{}, errors.New("目录不存在：" + abs)
+	}
+	if err != nil {
+		return fsutil.Mount{}, err
+	}
+	if !info.IsDir() {
+		return fsutil.Mount{}, errors.New("目标不是目录：" + abs)
+	}
+
+	// 串行化增删，避免两个请求同时改挂载表再各写一次设置文件。
+	s.sitesMu.Lock()
+	defer s.sitesMu.Unlock()
+
+	m, err := s.res.AddSite(abs, wantLabel)
+	if err != nil {
+		return fsutil.Mount{}, err
+	}
+	// 先改内存再落盘：落盘失败时站点**已经生效**，照实告诉调用方，
+	// 别让人以为「没加成」而反复重试（与 SetTitle 同一口径）。
+	if err := s.persistSites(); err != nil {
+		s.logger.Errorf("站点已生效但落盘失败: %v", err)
+		return m, fmt.Errorf("站点已生效，但写入设置文件失败：%w", err)
+	}
+	return m, nil
+}
+
+// removeSite 移除一个附加站点。
+func (s *Server) removeSite(label string) error {
+	if !s.cfg.AllowRootSwitch {
+		return errSiteDisabled
+	}
+	s.sitesMu.Lock()
+	defer s.sitesMu.Unlock()
+
+	if err := s.res.RemoveSite(label); err != nil {
+		return err
+	}
+	if err := s.persistSites(); err != nil {
+		s.logger.Errorf("站点已移除但落盘失败: %v", err)
+		return fmt.Errorf("站点已移除，但写入设置文件失败：%w", err)
+	}
+	return nil
+}
+
+// persistSites 把当前的附加站点写进设置文件。
+func (s *Server) persistSites() error {
+	mounts := s.Mounts()
+	recs := make([]siteRecord, 0, len(mounts))
+	for i := 1; i < len(mounts); i++ { // 跳过主目录：它由命令行决定
+		recs = append(recs, siteRecord{
+			Path:  mounts[i].Res.Root(),
+			Label: mounts[i].Label,
+		})
+	}
+	return s.settings.SetSites(recs)
+}
+
+// errSiteDisabled 表示本服务不允许运行期改动服务目录。
+var errSiteDisabled = errors.New("本服务已通过 --no-root-switch 禁止运行期改动服务目录")
+
+// writeErrForSite 把站点增删的错误映射成合适的状态码。
+//
+// 「没有这个站点」是 404（资源不存在），其余（不在白名单、不存在、不是目录、
+// 重复、嵌套、被开关禁掉）都是 400/403 —— 关键是**把原因原样带给管理员**，
+// 否则他只能看到一个「失败」。
+func (s *Server) writeErrForSite(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errSiteDisabled):
+		http.Error(w, "403 Forbidden: "+err.Error(), http.StatusForbidden)
+	case errors.Is(err, fsutil.ErrUnknownSite):
+		http.Error(w, "404 Not Found: "+err.Error(), http.StatusNotFound)
+	default:
+		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+	}
 }
 
 // switchRoot 把服务根目录切换到 newRoot。

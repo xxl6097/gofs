@@ -381,13 +381,13 @@ func (r *Roots) AddSite(path, wantLabel string) (Mount, error) {
 		}
 	}
 
-	var label string
-	if c := sanitizeLabel(wantLabel); c != "" && !r.usedLabels[c] {
-		label = c
-		r.usedLabels[c] = true
-	} else {
-		label = r.allocLabel(labelFor(Mount{Res: res}))
+	// 指定了标签就尽量尊重它：被占了加后缀（自定义-2），而不是悄悄换成
+	// 目录名 —— 用户填了名字却拿到另一个，比报错还难理解。
+	base := sanitizeLabel(wantLabel)
+	if base == "" {
+		base = labelFor(Mount{Res: res})
 	}
+	label := r.allocLabel(base)
 
 	r.mounts = append(r.mounts, Mount{Label: label, Res: res})
 	r.rebuildByLabel()

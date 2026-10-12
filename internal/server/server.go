@@ -124,8 +124,9 @@ func (s *Server) restoreSites() {
 			continue
 		}
 		// 边界启动时也要再算一遍：设置文件可能被手工改过，也可能是靠
-		// 上次更宽的 --root-allow 加进来的。
-		if !s.settings.AllowsRoot(abs) {
+		// 上次更宽的白名单加进来的。用的是**站点**的那套判定，别跟
+		// 「换根」的默认范围混了。
+		if !s.settings.AllowsSite(abs) {
 			s.logger.Errorf("站点 %q 不在允许范围内，已跳过（可用 --root-allow 放开）", rec.Path)
 			continue
 		}
@@ -824,7 +825,45 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 		s.writeErr(w, err)
 		return
 	}
+	s.mergeSiteEntries(listing, r, urlPath)
 	s.writeListing(w, r, listing, urlPath, p)
+}
+
+// mergeSiteEntries 把附加站点作为条目并进**主目录**的列表。
+//
+// 站点挂在根这一层，所以只在 `/` 上并 —— 子目录里再列一遍没有意义
+// （那些路径本来也不是站点）。
+//
+// 为什么可以并进来：条目 `/backup` 会让 `DELETE /backup?recursive` 解析到
+// 站点根目录，但删除/移动的根保护已经按**解析后的绝对路径**判定
+// （见 Roots.IsRoot），所以那条路是 403，不会真把站点删掉。前端还会对
+// Site 条目隐藏那几个按钮。
+//
+// 这里过滤掉「看不到的站点」，是**防御性**的：按当前的权限模型（规则是最长
+// 前缀匹配，没有 deny），能列出主目录的账号必然对 `/` 有读权限，而每个站点
+// 路径都在 `/` 之下 —— 所以此刻它其实拦不到什么。留着是因为这一层一旦成立
+// 就直接生效：将来若允许站点挂在别的前缀下，或权限模型支持「只授某个站点」，
+// 不改成「看不到的站点连名字都不露」就等于把机器上挂了什么泄出去。
+func (s *Server) mergeSiteEntries(listing *fsutil.Listing, r *http.Request, urlPath string) {
+	if !s.MultiRoot() || fsutil.CleanURLPath(urlPath) != "/" {
+		return
+	}
+	for _, m := range s.Mounts()[1:] {
+		sitePath := "/" + m.Label
+		if s.checkPerm(r, sitePath) == auth.PermNone {
+			continue
+		}
+		e := fsutil.Entry{Path: sitePath, Name: m.Label, IsDir: true, Site: true}
+		if fi, err := os.Stat(m.Res.Root()); err == nil {
+			e.Mtime = fi.ModTime().Format(time.RFC3339)
+		}
+		listing.Entries = append(listing.Entries, e)
+		listing.DirCount++
+	}
+	// 并完重新排一次序：否则站点会一律坠在真实条目后面，
+	// 而页面（客户端也会排序）与 ?json / wget 拿到的顺序就对不上了。
+	fsutil.SortEntries(listing.Entries)
+	listing.Total = len(listing.Entries)
 }
 
 // writeListing 输出一次目录列举的结果。

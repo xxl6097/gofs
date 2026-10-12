@@ -84,8 +84,35 @@ func (s *Server) Config() *Config { return s.cfg }
 // 多根时返回第一个根 —— 多根没有「唯一根」这回事。
 func (s *Server) Root() string { return s.inner.Root() }
 
-// MountLabels 返回各挂载点的 URL 标签，顺序与启动时给的目录一致。
-// 单根时长度为 1，且不参与路由（那时 URL 里没有前缀）。
+// MountInfo 描述一个挂载点，供 banner 之类的展示用途。
+type MountInfo struct {
+	// Label 是展示名（主目录为目录名，附加站点即 URL 首段）。
+	Label string
+	// Root 是磁盘上的绝对路径。
+	Root string
+	// URLPath 是访问地址：主目录 "/"，附加站点 "/<标签>"。
+	URLPath string
+	// Primary 标记主服务目录。
+	Primary bool
+}
+
+// Mounts 返回全部挂载点（[0] 是主目录）。
+//
+// 站点是运行期可增删的，所以每次调用都取当下的快照 —— 不要在启动时缓存它。
+func (s *Server) Mounts() []MountInfo {
+	ms := s.inner.Mounts()
+	out := make([]MountInfo, 0, len(ms))
+	for i, m := range ms {
+		url := "/" + m.Label
+		if i == 0 {
+			url = "/"
+		}
+		out = append(out, MountInfo{Label: m.Label, Root: m.Res.Root(), URLPath: url, Primary: i == 0})
+	}
+	return out
+}
+
+// MountLabels 返回附加站点的 URL 标签（主目录服务在 /，没有前缀）。
 func (s *Server) MountLabels() []string { return s.inner.MountLabels() }
 
 // MultiRoot 表示当前是否挂了多个服务目录（此时 URL 带标签前缀）。

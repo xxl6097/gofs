@@ -3,7 +3,6 @@ package gofs
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 )
 
 // Banner 把启动信息写入 w，让使用者一眼看清关键配置。
@@ -20,10 +19,9 @@ func (s *Server) Banner(w io.Writer) {
 		addr += " (unix socket)"
 	}
 
-	roots := cfg.ServePaths
-	if len(roots) == 0 {
-		roots = []string{cfg.ServePath}
-	}
+	// 直接列**实时的**挂载点，而不是 cfg.ServePaths：后者只有命令行给的那些，
+	// 运行期新增（或从设置文件恢复）的站点会漏印甚至错位。
+	roots := s.Mounts()
 
 	perm := func(name string, on bool) string {
 		if on {
@@ -33,20 +31,25 @@ func (s *Server) Banner(w io.Writer) {
 	}
 	fmt.Fprintf(w, "gofs %s\n", cfg.Version)
 	fmt.Fprintf(w, "  监听      : %s://%s\n", s.Scheme(), addr)
-	// 多根时逐行列出，并把挂载标签印出来 —— 那才是浏览器里要敲的地址段。
-	labels := s.MountLabels()
-	for i, root := range roots {
-		label := "服务目录"
+	// 主目录服务在 /，附加站点挂在 /<标签>/ —— 那才是浏览器里要敲的地址段。
+	for i, m := range roots {
+		name := "服务目录"
 		if i > 0 {
-			label = ""
+			name = ""
 		}
-		if abs, err := filepath.Abs(root); err == nil {
-			root = abs
+		line := m.Root
+		if s.MultiRoot() {
+			suffix := m.URLPath + "/"
+			if m.Primary {
+				suffix = "/"
+			}
+			line += "   →  " + suffix
 		}
-		if s.MultiRoot() && i < len(labels) {
-			root += "   →  /" + labels[i] + "/"
-		}
-		fmt.Fprintf(w, "  %-9s : %s\n", label, root)
+		fmt.Fprintf(w, "  %-9s : %s\n", name, line)
+	}
+	if len(roots) == 0 {
+		// 兜底：理论上至少有一个（BuildRoots 不允许空），别让 banner 整个空掉。
+		fmt.Fprintf(w, "  %-9s : %s\n", "服务目录", cfg.ServePath)
 	}
 	if cfg.PathPrefix != "" {
 		fmt.Fprintf(w, "  路径前缀  : %s\n", cfg.PathPrefix)

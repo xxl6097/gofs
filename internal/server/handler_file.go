@@ -332,7 +332,10 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, urlPath, a
 	if !s.requireWrite(w, p) {
 		return
 	}
-	if isRootPath(urlPath) {
+	if isRootPath(urlPath) || s.res.IsRoot(abs) {
+		// ⚠️ 必须判 abs，不能只看 URL：附加站点挂在 /<标签> 下，
+		// `DELETE /<标签>?recursive` 解析出来正是那个站点的根目录 ——
+		// 只认 urlPath 是不是 "/" 会把它整个删掉。
 		http.Error(w, "403 Forbidden: 不允许删除服务根目录", http.StatusForbidden)
 		return
 	}
@@ -424,6 +427,13 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 	src, err := s.res.Resolve(urlPath)
 	if err != nil {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+	// 同 handleDelete：移动/重命名也不能拿附加站点的根开刀。
+	// 在这里判是因为 src 刚解析出来 —— 上面的 isRootPath 只看得到 URL，
+	// 而 `MOVE /<标签>` 的 src 正是那个站点的根目录。
+	if s.res.IsRoot(src) {
+		http.Error(w, "403 Forbidden: 不允许移动服务根目录", http.StatusForbidden)
 		return
 	}
 	dst, err := s.res.Resolve(destPath)

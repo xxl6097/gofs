@@ -711,6 +711,10 @@ table.listing {
   flex: none;
 }
 .name-cell .tag.zip { background: rgba(180, 83, 9, .14); color: var(--zip); }
+.name-cell .tag.site {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 .size-cell, .time-cell {
   color: var(--text-dim);
@@ -1082,6 +1086,17 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   color: var(--accent);
   font-family: var(--mono);
 }
+/* 附加站点的「新增」表单：路径 + 标签 + 按钮一行。 */
+.site-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.site-add .key-input { flex: 1 1 200px; min-width: 0; }
+.site-add .btn { flex: none; }
+.site-list { margin-top: 2px; }
+
 .mount-line span {
   color: var(--text-dim);
   overflow-wrap: anywhere;

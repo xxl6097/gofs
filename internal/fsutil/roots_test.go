@@ -27,6 +27,29 @@ func mustRoots(t *testing.T, paths ...string) *Roots {
 	return r
 }
 
+// realPath 把路径解析成真实路径，口径与服务端 normalizeRoot 一致。
+//
+// macOS 上 /var 是指向 /private/var 的软链，t.TempDir() 给的是前者、
+// 解析器存的是后者；不换算就会满屏「期望 X，实际 /private/X」。
+func realPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// siteByLabel 按标签取挂载点（断言路由到哪个根时用）。
+func siteByLabel(t *testing.T, r *Roots, label string) Mount {
+	t.Helper()
+	for _, m := range r.Mounts() {
+		if m.Label == label {
+			return m
+		}
+	}
+	t.Fatalf("没有标签为 %q 的挂载点", label)
+	return Mount{}
+}
+
 // under 用挂载点自己的 Root() 拼路径。
 //
 // ⚠️ 不能拿建目录时的原路径去比：Resolver 会把根解析成真实路径
@@ -55,11 +78,13 @@ func TestBuildRootsPrimaryServesAtRoot(t *testing.T) {
 		t.Fatal("有附加站点，HasExtras 却是 false")
 	}
 
+	p := r.Primary()
+	site := siteByLabel(t, r, "backup")
 	for _, tc := range []struct{ url, want string }{
-		{"/notes.txt", filepath.Join(main, "notes.txt")}, // 主目录：无前缀
-		{"/", main}, // 主目录本身
-		{"/backup/b.txt", filepath.Join(backup, "b.txt")}, // 附加站点：带标签
-		{"/backup", backup}, // 附加站点本身
+		{"/notes.txt", under(p, "notes.txt")},   // 主目录：无前缀
+		{"/", p.Res.Root()},                     // 主目录本身
+		{"/backup/b.txt", under(site, "b.txt")}, // 附加站点：带标签
+		{"/backup", site.Res.Root()},            // 附加站点本身
 	} {
 		got, err := r.Resolve(tc.url)
 		if err != nil {
@@ -76,7 +101,7 @@ func TestBuildRootsPrimaryServesAtRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve 出错: %v", err)
 	}
-	if got != filepath.Join(backup, "shadow.txt") {
+	if got != under(site, "shadow.txt") {
 		t.Errorf("站点没遮蔽主目录的同名子目录：%q", got)
 	}
 }
@@ -85,12 +110,12 @@ func TestBuildRootsPrimaryServesAtRoot(t *testing.T) {
 // 它就是主目录下的普通路径（混合形状的必然结果）。
 func TestResolveUnknownPrefixIsPrimaryRelative(t *testing.T) {
 	base := t.TempDir()
-	main := mkRoot(t, base, "data")
-	r := mustRoots(t, main, mkRoot(t, base, "backup"))
+	r := mustRoots(t, mkRoot(t, base, "data"), mkRoot(t, base, "backup"))
+	p := r.Primary()
 
 	for _, tc := range []struct{ url, want string }{
-		{"/nope", filepath.Join(main, "nope")},
-		{"/nope/x", filepath.Join(main, "nope", "x")},
+		{"/nope", under(p, "nope")},
+		{"/nope/x", under(p, "nope/x")},
 	} {
 		got, err := r.Resolve(tc.url)
 		if err != nil {
@@ -106,15 +131,14 @@ func TestResolveUnknownPrefixIsPrimaryRelative(t *testing.T) {
 // TestResolveCleansParentSegments 确认 `..` 只被消解、不会越出主目录。
 func TestResolveCleansParentSegments(t *testing.T) {
 	base := t.TempDir()
-	main := mkRoot(t, base, "data")
-	r := mustRoots(t, main)
+	r := mustRoots(t, mkRoot(t, base, "data"))
 
 	got, err := r.Resolve("/../etc/passwd")
 	if err != nil {
 		t.Fatalf("Resolve 出错: %v", err)
 	}
 	// 归一化后是 /etc/passwd，落在主目录之内 —— 与不支持多站点时一致。
-	if want := filepath.Join(main, "etc", "passwd"); got != want {
+	if want := under(r.Primary(), "etc/passwd"); got != want {
 		t.Errorf("Resolve = %q，期望 %q", got, want)
 	}
 }
@@ -122,16 +146,16 @@ func TestResolveCleansParentSegments(t *testing.T) {
 // TestRelMapsPrimaryAndExtras 覆盖反向映射的两种前缀。
 func TestRelMapsPrimaryAndExtras(t *testing.T) {
 	base := t.TempDir()
-	main := mkRoot(t, base, "data")
-	backup := mkRoot(t, base, "backup")
-	r := mustRoots(t, main, backup)
+	r := mustRoots(t, mkRoot(t, base, "data"), mkRoot(t, base, "backup"))
+	p := r.Primary()
+	site := siteByLabel(t, r, "backup")
 
 	for _, tc := range []struct{ abs, want string }{
-		{filepath.Join(main, "a.txt"), "/a.txt"}, // 主目录：无前缀
-		{filepath.Join(main, "sub", "b.txt"), "/sub/b.txt"},
-		{main, "/"},
-		{filepath.Join(backup, "x.txt"), "/backup/x.txt"}, // 附加站点：带标签
-		{backup, "/backup"},
+		{under(p, "a.txt"), "/a.txt"}, // 主目录：无前缀
+		{under(p, "sub/b.txt"), "/sub/b.txt"},
+		{p.Res.Root(), "/"},
+		{under(site, "x.txt"), "/backup/x.txt"}, // 附加站点：带标签
+		{site.Res.Root(), "/backup"},
 	} {
 		got, err := r.Rel(tc.abs)
 		if err != nil {
@@ -159,14 +183,16 @@ func TestSetRootMovesPrimary(t *testing.T) {
 	if err := r.SetRoot(second); err != nil {
 		t.Fatalf("SetRoot: %v", err)
 	}
-	if got := r.Root(); got != second {
-		t.Errorf("Root() = %q，期望 %q", got, second)
+	// 用换根后 Primary() 给的真实路径比（macOS 上 /var 是软链）。
+	p := r.Primary()
+	if got := r.Root(); got != p.Res.Root() {
+		t.Errorf("Root() = %q，期望 %q", got, p.Res.Root())
 	}
 	got, err := r.Resolve("/x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(second, "x"); got != want {
+	if want := under(p, "x"); got != want {
 		t.Errorf("换根后 Resolve = %q，期望 %q", got, want)
 	}
 }
@@ -252,7 +278,7 @@ func TestAddSite(t *testing.T) {
 	if m.Label != "backup" {
 		t.Errorf("标签 = %q，期望 backup", m.Label)
 	}
-	if got, _ := r.Resolve("/backup/a.txt"); got != filepath.Join(site, "a.txt") {
+	if got, _ := r.Resolve("/backup/a.txt"); got != under(m, "a.txt") {
 		t.Errorf("新增站点没接上路由：%q", got)
 	}
 
@@ -260,8 +286,9 @@ func TestAddSite(t *testing.T) {
 	if _, err := r.AddSite(site, ""); !errors.Is(err, ErrDuplicateSite) {
 		t.Errorf("重复目录的错 = %v，期望 ErrDuplicateSite", err)
 	}
-	// 嵌套（两个方向）：拒绝。
-	if _, err := r.AddSite(filepath.Join(site, "sub"), ""); !errors.Is(err, ErrNestedRoot) {
+	// 嵌套（两个方向）：拒绝（子目录要先建出来，否则先撞上「不存在」）。
+	nested := mkRoot(t, site, "sub")
+	if _, err := r.AddSite(nested, ""); !errors.Is(err, ErrNestedRoot) {
 		t.Errorf("嵌套（在站点之下）的错 = %v，期望 ErrNestedRoot", err)
 	}
 	sub := mkRoot(t, main, "sub")
@@ -269,7 +296,7 @@ func TestAddSite(t *testing.T) {
 		t.Errorf("嵌套（在主目录之下）的错 = %v，期望 ErrNestedRoot", err)
 	}
 
-	// 指定标签可用就用；与已有标签冲突则自动加后缀。
+	// 指定标签可用就用；被占了就加后缀（而不是悄悄换成目录名）。
 	other := mkRoot(t, base, "other")
 	m2, err := r.AddSite(other, "自定义")
 	if err != nil {
@@ -284,7 +311,7 @@ func TestAddSite(t *testing.T) {
 		t.Errorf("标签冲突应加后缀，实际 %q", m3.Label)
 	}
 	// 已有的标签不能被后来的站点抢走（书签稳定）。
-	if got, _ := r.Resolve("/自定义/a.txt"); got != filepath.Join(other, "a.txt") {
+	if got, _ := r.Resolve("/自定义/a.txt"); got != under(m2, "a.txt") {
 		t.Errorf("先来的站点被抢了标签：%q", got)
 	}
 }
@@ -296,6 +323,7 @@ func TestRemoveSite(t *testing.T) {
 	a := mkRoot(t, base, "aaa")
 	b := mkRoot(t, base, "bbb")
 	r := mustRoots(t, main, a, b)
+	p := r.Primary()
 
 	if err := r.RemoveSite("nope"); !errors.Is(err, ErrUnknownSite) {
 		t.Errorf("未知标签的错 = %v，期望 ErrUnknownSite", err)
@@ -311,11 +339,11 @@ func TestRemoveSite(t *testing.T) {
 	if got := r.Labels(); len(got) != 1 || got[0] != "bbb" {
 		t.Fatalf("标签 = %v，期望 [bbb]", got)
 	}
-	if got, _ := r.Resolve("/bbb/x"); got != filepath.Join(b, "x") {
+	if got, _ := r.Resolve("/bbb/x"); got != filepath.Join(realPath(b), "x") {
 		t.Errorf("幸存站点路由错了：%q", got)
 	}
 	// 已移除的标签：/aaa 退回主目录下的普通路径（不再是站点）。
-	if got, err := r.Resolve("/aaa/x"); err != nil || got != filepath.Join(main, "aaa", "x") {
+	if got, err := r.Resolve("/aaa/x"); err != nil || got != under(p, "aaa/x") {
 		t.Errorf("移除后 Resolve = %q, %v；期望退回主目录", got, err)
 	}
 
@@ -360,14 +388,16 @@ func TestIsRoot(t *testing.T) {
 	main := mkRoot(t, base, "main")
 	site := mkRoot(t, base, "site")
 	r := mustRoots(t, main, site)
+	p := r.Primary()
+	sm := siteByLabel(t, r, "site")
 
-	if !r.IsRoot(main) || !r.IsRoot(site) {
+	if !r.IsRoot(p.Res.Root()) || !r.IsRoot(sm.Res.Root()) {
 		t.Error("挂载根本身应当被认出来")
 	}
-	if r.IsRoot(filepath.Join(main, "sub")) {
+	if r.IsRoot(filepath.Join(p.Res.Root(), "sub")) {
 		t.Error("根下面的普通目录不该算根")
 	}
-	if r.IsRoot(base) {
+	if r.IsRoot(realPath(base)) {
 		t.Error("父目录不该算根")
 	}
 }
@@ -386,6 +416,8 @@ func TestRootsConcurrentAddRemoveAndRead(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	// stop 由「增删者」跑完后关闭；读者靠它退出。**不能**先 wg.Wait()
+	// 再关 —— 读者还在等 stop，那就死锁了。
 	stop := make(chan struct{})
 
 	// 读者
@@ -411,6 +443,7 @@ func TestRootsConcurrentAddRemoveAndRead(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(stop)
 		for i, d := range dirs {
 			m, err := r.AddSite(d, "")
 			if err != nil {
@@ -423,7 +456,6 @@ func TestRootsConcurrentAddRemoveAndRead(t *testing.T) {
 	}()
 
 	wg.Wait()
-	close(stop)
 }
 
 // writeFile 是本包测试里的小工具。

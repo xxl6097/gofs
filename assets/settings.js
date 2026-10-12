@@ -249,6 +249,152 @@
 
   // ---------------------------------------------------------------- 各标签
 
+  // buildSitesField 造「附加站点」那一块：列出已挂的，允许增删。
+  //
+  // 增删是**即时动作** —— 直接改服务端状态并返回新列表，不并入「取消/保存」。
+  // 塞进 patch/dirty 那套就得做待定操作与回滚，而站点本来就没有「草稿」概念。
+  //
+  // onChanged 由调用方给：增删可能改变「主目录能否切换」（有站点时不能），
+  // 主目录那一栏得跟着重画。
+  function buildSitesField(onChanged) {
+    var field = makeField('附加站点');
+
+    var listBox = document.createElement('div');
+    listBox.className = 'site-list';
+    field.appendChild(listBox);
+
+    // 独立的错误行：这里的失败（不在允许范围、目录不存在、互相嵌套…）
+    // 与「保存」那套是两回事，混用一个 errBox 会互相盖掉。
+    var siteErr = document.createElement('div');
+    siteErr.className = 'hint-box danger';
+    siteErr.hidden = true;
+    field.appendChild(siteErr);
+
+    // 提示只建一次、只改文字：每次重画都 addHint 会堆出一摞。
+    var siteHint = addHint(field, '');
+
+    // 新增表单也建一次，靠 editable 控制显隐（避免每次重画重建 DOM）。
+    var form = document.createElement('div');
+    form.className = 'site-add';
+    var pathInput = textInput('');
+    pathInput.placeholder = '要新增的目录绝对路径，如 /srv/backup';
+    pathInput.className = 'key-input';
+    var labelInput = textInput('');
+    labelInput.placeholder = '标签（可留空，默认用目录名）';
+    labelInput.className = 'key-input';
+    var addBtn = G.btn('新增站点', 'primary', function () { submit(); });
+    form.appendChild(pathInput);
+    form.appendChild(labelInput);
+    form.appendChild(addBtn);
+    field.appendChild(form);
+
+    function fail(msg) {
+      siteErr.hidden = false;
+      siteErr.textContent = msg;
+    }
+
+    function act(body) {
+      siteErr.hidden = true;
+      return G.apiFetch(EP, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        return res.text().then(function (text) {
+          var t = (text || '').trim();
+          if (!res.ok) throw new Error(t || ('HTTP ' + res.status));
+          return JSON.parse(t);
+        });
+      });
+    }
+
+    function reload() {
+      return G.apiFetch(EP, { headers: { 'Accept': 'application/json' } })
+        .then(function (res) { return res.json(); });
+    }
+
+    function submit() {
+      var p = pathInput.value.trim();
+      if (!p) { fail('请填写目录路径'); return; }
+      addBtn.disabled = true;
+      addBtn.textContent = '新增中…';
+      act({ add_site: { path: p, label: labelInput.value.trim() } })
+        .then(function (data) {
+          pathInput.value = '';
+          labelInput.value = '';
+          render(data);
+        })
+        .catch(function (e) { fail('新增失败：' + e.message); })
+        .then(function () {
+          addBtn.disabled = false;
+          addBtn.textContent = '新增站点';
+        });
+    }
+
+    function remove(label) {
+      G.confirm({
+        title: '移除站点 ' + label + '？',
+        message: '只是不再对外提供这个目录，磁盘上的文件不受影响。',
+        okLabel: '移除',
+        danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        act({ remove_site: label }).then(render).catch(function (e) {
+          fail('移除失败：' + e.message);
+        });
+      });
+    }
+
+    // render 以服务端返回的设置为准重画 —— 不在本地猜结果。
+    function render(data) {
+      listBox.textContent = '';
+      var extras = (data.roots || []).filter(function (r) { return !r.primary; });
+      var editable = !!data.sites_editable;
+
+      if (!extras.length) {
+        var empty = document.createElement('div');
+        empty.className = 'hint';
+        empty.textContent = '还没有附加站点：每个目录挂在 /<标签>/ 下，与主目录互不影响。';
+        listBox.appendChild(empty);
+      }
+
+      extras.forEach(function (r) {
+        var line = document.createElement('div');
+        line.className = 'mount-line';
+        var code = document.createElement('code');
+        code.textContent = r.url + '/';
+        line.appendChild(code);
+        var span = document.createElement('span');
+        span.textContent = r.root;
+        line.appendChild(span);
+        if (editable) {
+          var rm = G.btn('移除', 'danger', function () { remove(r.label); });
+          rm.classList.add('btn-sm');
+          line.appendChild(rm);
+        }
+        listBox.appendChild(line);
+      });
+
+      form.hidden = !editable;
+      // 可挂范围：没配白名单就是不限制（门槛是管理员），配了才显示出来。
+      var roots = data.site_roots || [];
+      siteHint.textContent = editable
+        ? '新增的目录挂在 /<标签>/ 下，**立即生效**（不必点保存）。' +
+          (roots.length ? '可挂范围：' + roots.join('、') : '可挂任意已存在的目录') +
+          '　·　注意：标签会遮蔽主目录下的同名子目录。'
+        : '本服务已通过 --no-root-switch 禁止运行期改动服务目录。';
+
+      if (onChanged) onChanged(data);
+    }
+
+    reload().then(render).catch(function (e) {
+      fail('读取站点列表失败：' + e.message);
+    });
+
+    // refresh 供外部（保存成功后）重新拉取。
+    return { field: field, refresh: function () { return reload().then(render); } };
+  }
+
   // buildGeneralTab 造「常规」页：服务根目录 / 上传上限 / 编辑上限。
   //
   // 同步返回、内部异步读取：先摆一个「正在读取…」占位，好让弹窗的底部
@@ -267,6 +413,7 @@
 
     var cur = null;
     var rootInput = null;
+    var rootCurRoot = '';
     var uploadField = null;
     var editField = null;
     var titleField = null;
@@ -294,44 +441,46 @@
       });
       el.appendChild(titleField.field);
 
-      // ---- 服务根目录 ----
+      // ---- 服务根目录（主目录）----
       //
-      // 多根模式下没有「唯一根」这回事：URL 里每个根都挂在 /<标签>/ 下，
-      // 也没有「切换到哪一个」的定义。所以这里不摆输入框，改成只读的挂载
-      // 列表 —— 管理员仍然需要知道这台机器上挂了哪些目录。
-      var rootField = makeField(cur.multi_root ? '服务目录（多根）' : '服务根目录');
-      if (cur.multi_root) {
-        var listBox = document.createElement('div');
-        (cur.roots || []).forEach(function (r) {
-          var line = document.createElement('div');
-          line.className = 'mount-line';
-          var code = document.createElement('code');
-          code.textContent = r.url + '/';
-          line.appendChild(code);
-          var span = document.createElement('span');
-          span.textContent = r.root;
-          line.appendChild(span);
-          listBox.appendChild(line);
-        });
-        rootField.appendChild(listBox);
-        addHint(rootField, '每个服务目录挂在各自的地址前缀下，运行期不可切换。' +
-          '想换目录请改启动参数后重启（去掉多余的目录就回到单根模式，那时可以切换）。');
-      } else {
-        var rootRow = document.createElement('div');
-        rootRow.className = 'row';
-        rootInput = textInput(cur.root || '');
-        rootInput.placeholder = cur.root || '/srv/data';
-        if (!cur.root_switchable) rootInput.disabled = true;
-        rootRow.appendChild(rootInput);
-        rootField.appendChild(rootRow);
-        addHint(rootField, cur.root_switchable
-          ? '当前根目录：' + (cur.root || '（未知）') +
-            '　·　可切换的范围：' + (cur.allow_roots || []).join('、') +
+      // 主目录永远服务在 `/`；附加站点挂在 /<标签>/ 下，是**运行期**可增删的，
+      // 而且增删不动主目录的地址（否则加个站点就让所有书签失效）。
+      //
+      // 这一栏的文字与禁用状态随「有没有附加站点」变（有站点时不能换主根），
+      // 所以抽成 syncRootField，增删站点后重画一次。
+      var rootField = makeField('主服务目录');
+      var rootRow = document.createElement('div');
+      rootRow.className = 'row';
+      rootInput = textInput(cur.root || '');
+      rootInput.placeholder = cur.root || '/srv/data';
+      rootRow.appendChild(rootInput);
+      rootField.appendChild(rootRow);
+      var rootHint = addHint(rootField, '');
+
+      function syncRootField(data) {
+        var c = data || cur;
+        if (!c) return;
+        if (rootInput.value === '' || rootInput.value === rootCurRoot) {
+          rootInput.value = c.root || '';
+        }
+        rootCurRoot = c.root || '';
+        rootInput.placeholder = c.root || '/srv/data';
+        rootInput.disabled = !c.root_switchable;
+        rootHint.textContent = c.root_switchable
+          ? '服务在 /　·　可切换的范围：' + (c.allow_roots || []).join('、') +
             '　·　填相对路径表示「从当前根再往下走」'
-          : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
+          : (c.multi_root
+              ? '服务在 /　·　有附加站点时不能切换主目录；先移除附加站点再换'
+              : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
       }
+      syncRootField(cur);
       el.appendChild(rootField);
 
+      // ---- 附加站点（即时生效，不跟着「取消/保存」走）----
+      var sites = buildSitesField(function (data) { syncRootField(data); });
+      el.appendChild(sites.field);
+
+      // ---- 单文件上传上限 ----
       // ---- 单文件上传上限 ----
       uploadField = makeSizeField({
         label: '单文件上传上限',
