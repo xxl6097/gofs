@@ -20,9 +20,9 @@ func (s *Server) Banner(w io.Writer) {
 		addr += " (unix socket)"
 	}
 
-	root := cfg.ServePath
-	if abs, err := filepath.Abs(root); err == nil {
-		root = abs
+	roots := cfg.ServePaths
+	if len(roots) == 0 {
+		roots = []string{cfg.ServePath}
 	}
 
 	perm := func(name string, on bool) string {
@@ -33,7 +33,21 @@ func (s *Server) Banner(w io.Writer) {
 	}
 	fmt.Fprintf(w, "gofs %s\n", cfg.Version)
 	fmt.Fprintf(w, "  监听      : %s://%s\n", s.Scheme(), addr)
-	fmt.Fprintf(w, "  服务目录  : %s\n", root)
+	// 多根时逐行列出，并把挂载标签印出来 —— 那才是浏览器里要敲的地址段。
+	labels := s.MountLabels()
+	for i, root := range roots {
+		label := "服务目录"
+		if i > 0 {
+			label = ""
+		}
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		if s.MultiRoot() && i < len(labels) {
+			root += "   →  /" + labels[i] + "/"
+		}
+		fmt.Fprintf(w, "  %-9s : %s\n", label, root)
+	}
 	if cfg.PathPrefix != "" {
 		fmt.Fprintf(w, "  路径前缀  : %s\n", cfg.PathPrefix)
 	}

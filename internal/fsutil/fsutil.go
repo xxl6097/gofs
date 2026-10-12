@@ -18,6 +18,14 @@ import (
 // ErrEscaped 表示解析出的路径逃逸出了服务根目录。
 var ErrEscaped = errors.New("路径超出了服务根目录")
 
+// relator 是 ReadDir / Search 真正需要的能力：把磁盘路径转回 URL 路径。
+//
+// 单独抽出来是为了让多根模式（*Roots）也能用这两个函数 —— 它们不关心
+// 路径是哪个根解析出来的，只关心能不能算出一个可点的 URL。
+type relator interface {
+	Rel(abs string) (string, error)
+}
+
 // Resolver 在根目录内做安全的路径解析。
 //
 // 根目录可以在运行期切换（登录后的「服务设置」），因此所有读写都要过
@@ -259,7 +267,7 @@ type Listing struct {
 // maxEntries 限制返回的条目数（<=0 表示不限制）。十万级文件的目录如果
 // 一次性全部返回，光是序列化就会吃掉大量内存，响应体也会大到无法渲染；
 // 截断后由 Truncated 标记告知调用方。
-func ReadDir(res *Resolver, dir string, hidden []string, maxEntries int) (*Listing, error) {
+func ReadDir(res relator, dir string, hidden []string, maxEntries int) (*Listing, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, err
@@ -374,7 +382,7 @@ func isHidden(name string, globs []string) bool {
 
 // Search 在指定目录下递归查找名称匹配 pattern 的条目（不区分大小写）。
 // limit 为返回上限，0 表示不限制。
-func Search(res *Resolver, root string, pattern string, hidden []string, limit int) ([]Entry, error) {
+func Search(res relator, root string, pattern string, hidden []string, limit int) ([]Entry, error) {
 	pattern = strings.ToLower(strings.TrimSpace(pattern))
 	out := make([]Entry, 0, 32)
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {

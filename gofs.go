@@ -176,7 +176,23 @@ func WithConfig(cfg *Config) Option {
 
 // WithRoot 设置被服务的根目录或单个文件。
 func WithRoot(path string) Option {
-	return func(c *Config) { c.ServePath = path }
+	// 顺手清掉列表，让 Normalize 重新按这个单根推导 ServePaths ——
+	// 否则「先 WithRoots 再 WithRoot」会留下一个矛盾的列表。
+	return func(c *Config) { c.ServePath = path; c.ServePaths = nil }
+}
+
+// WithRoots 一次指定多个被服务目录。
+//
+// 单个目录时行为与 WithRoot 完全一样（服务在 `/`，URL 无前缀）；
+// 给两个及以上时每个目录挂在自己的名字下（`/data/…`、`/backup/…`），
+// 重名会自动加后缀，互相嵌套的目录会在 New 时报错。
+func WithRoots(paths ...string) Option {
+	return func(c *Config) {
+		c.ServePaths = append([]string(nil), paths...)
+		if len(paths) > 0 {
+			c.ServePath = paths[0]
+		}
+	}
 }
 
 // WithBind 设置监听地址，可为 IP 或 host:port。

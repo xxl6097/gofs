@@ -34,6 +34,8 @@ type runtimeSettings struct {
 	uploadMaxSize int64
 	editMaxSize   int64
 	title         string
+	// sites 是运行期新增的附加站点（持久化的那份）。
+	sites []siteRecord
 
 	// settingsFile 是标题的持久化路径；空表示只存内存。
 	settingsFile string
@@ -60,22 +62,33 @@ func (s *runtimeSettings) SetTitle(v string) error {
 	s.mu.Lock()
 	s.title = v
 	s.mu.Unlock()
-	return s.saveTitle()
+	return s.saveSettings()
 }
 
 // settingsDoc 是设置文件的磁盘格式。
 //
-// 带 version 是为了以后加字段时能识别旧文件；目前只有一项。
+// 带 version 是为了以后加字段时能识别旧文件。version 1 只有 title；
+// version 2 起多了 sites（运行期新增的附加站点）。
 type settingsDoc struct {
-	Version int    `json:"version"`
-	Title   string `json:"title,omitempty"`
+	Version int          `json:"version"`
+	Title   string       `json:"title,omitempty"`
+	Sites   []siteRecord `json:"sites,omitempty"`
 }
 
-// loadTitle 读取设置文件里的标题。
+// siteRecord 是一个持久化的附加站点。
+//
+// 只存**运行期新增**的站点：启动时用命令行给的附加目录仍由命令行说了算
+// （去掉那个参数就等于去掉站点）。记 label 是为了让书签跨重启仍然有效。
+type siteRecord struct {
+	Path  string `json:"path"`
+	Label string `json:"label"`
+}
+
+// loadSettings 读取设置文件（标题 + 附加站点）。
 //
 // 读不到（文件不存在 / 内容损坏 / 路径为空）一律**保留启动参数给的默认值**，
 // 不报错、也不让服务起不来：一个坏掉的设置文件不该影响整个服务可用。
-func (s *runtimeSettings) loadTitle() {
+func (s *runtimeSettings) loadSettings() {
 	path := s.settingsFile
 	if path == "" {
 		return
@@ -91,15 +104,37 @@ func (s *runtimeSettings) loadTitle() {
 	if t := strings.TrimSpace(doc.Title); t != "" {
 		s.title = t
 	}
+	s.sites = append([]siteRecord(nil), doc.Sites...)
 }
 
-// saveTitle 原子写回设置文件（路径为空时只留在内存里）。
-func (s *runtimeSettings) saveTitle() error {
+// Sites 返回持久化的附加站点。
+func (s *runtimeSettings) Sites() []siteRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]siteRecord, len(s.sites))
+	copy(out, s.sites)
+	return out
+}
+
+// SetSites 记下当前的附加站点并落盘。
+func (s *runtimeSettings) SetSites(v []siteRecord) error {
+	s.mu.Lock()
+	s.sites = append([]siteRecord(nil), v...)
+	s.mu.Unlock()
+	return s.saveSettings()
+}
+
+// saveSettings 原子写回设置文件（路径为空时只留在内存里）。
+//
+// ⚠️ 必须把**当前全部**字段一起写：只写 title 会把 sites 清空 ——
+// 改一次标题就把站点列表弄丢，是这套「单文件多字段」最容易踩的坑。
+func (s *runtimeSettings) saveSettings() error {
 	path := s.settingsFile
 	if path == "" {
 		return nil
 	}
-	raw, err := json.MarshalIndent(settingsDoc{Version: 1, Title: s.Title()}, "", "  ")
+	doc := settingsDoc{Version: 2, Title: s.Title(), Sites: s.Sites()}
+	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -144,7 +179,7 @@ func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 		title:         cfg.Title,
 		settingsFile:  cfg.SettingsFile,
 	}
-	rs.loadTitle()
+	rs.loadSettings()
 
 	// 默认可切换范围是启动根的**父目录**：
 	// 启动根是 /srv/data 时能切到 /srv/* 下的任何地方（含兄弟目录），

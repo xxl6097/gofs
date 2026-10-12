@@ -295,19 +295,41 @@
       el.appendChild(titleField.field);
 
       // ---- 服务根目录 ----
-      var rootField = makeField('服务根目录');
-      var rootRow = document.createElement('div');
-      rootRow.className = 'row';
-      rootInput = textInput(cur.root || '');
-      rootInput.placeholder = cur.root || '/srv/data';
-      if (!cur.root_switchable) rootInput.disabled = true;
-      rootRow.appendChild(rootInput);
-      rootField.appendChild(rootRow);
-      addHint(rootField, cur.root_switchable
-        ? '当前根目录：' + (cur.root || '（未知）') +
-          '　·　可切换的范围：' + (cur.allow_roots || []).join('、') +
-          '　·　填相对路径表示「从当前根再往下走」'
-        : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
+      //
+      // 多根模式下没有「唯一根」这回事：URL 里每个根都挂在 /<标签>/ 下，
+      // 也没有「切换到哪一个」的定义。所以这里不摆输入框，改成只读的挂载
+      // 列表 —— 管理员仍然需要知道这台机器上挂了哪些目录。
+      var rootField = makeField(cur.multi_root ? '服务目录（多根）' : '服务根目录');
+      if (cur.multi_root) {
+        var listBox = document.createElement('div');
+        (cur.roots || []).forEach(function (r) {
+          var line = document.createElement('div');
+          line.className = 'mount-line';
+          var code = document.createElement('code');
+          code.textContent = r.url + '/';
+          line.appendChild(code);
+          var span = document.createElement('span');
+          span.textContent = r.root;
+          line.appendChild(span);
+          listBox.appendChild(line);
+        });
+        rootField.appendChild(listBox);
+        addHint(rootField, '每个服务目录挂在各自的地址前缀下，运行期不可切换。' +
+          '想换目录请改启动参数后重启（去掉多余的目录就回到单根模式，那时可以切换）。');
+      } else {
+        var rootRow = document.createElement('div');
+        rootRow.className = 'row';
+        rootInput = textInput(cur.root || '');
+        rootInput.placeholder = cur.root || '/srv/data';
+        if (!cur.root_switchable) rootInput.disabled = true;
+        rootRow.appendChild(rootInput);
+        rootField.appendChild(rootRow);
+        addHint(rootField, cur.root_switchable
+          ? '当前根目录：' + (cur.root || '（未知）') +
+            '　·　可切换的范围：' + (cur.allow_roots || []).join('、') +
+            '　·　填相对路径表示「从当前根再往下走」'
+          : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
+      }
       el.appendChild(rootField);
 
       // ---- 单文件上传上限 ----

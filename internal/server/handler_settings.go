@@ -39,8 +39,20 @@ type settingsReply struct {
 	Title string `json:"title"`
 	// TitleDefault 为启动参数里的取值，用于「恢复默认」。
 	TitleDefault string `json:"title_default"`
+	// MultiRoot 表示当前挂了多个服务目录（此时 URL 带标签前缀，
+	// 且 RootSwitchable 恒为 false）。
+	MultiRoot bool `json:"multi_root"`
+	// Roots 为各挂载点，仅在 MultiRoot 时下发（供界面展示「挂了哪些目录」）。
+	Roots []rootInfo `json:"roots,omitempty"`
 	// UploadDateDir 为当前的上传归档目录（未开启归档时为空串）。
 	UploadDateDir string `json:"upload_date_dir,omitempty"`
+}
+
+// rootInfo 描述一个挂载点：标签即 URL 首段。
+type rootInfo struct {
+	Label string `json:"label"`
+	Root  string `json:"root"`
+	URL   string `json:"url"`
 }
 
 // settingsRequest 是修改服务设置的请求体。
@@ -93,7 +105,17 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		return rep
 	}
 	rep.Root = s.res.Root()
-	rep.RootSwitchable = s.cfg.AllowRootSwitch
+	// 多根时不允许运行期换根（换掉哪一个？其余的呢？），界面上据此
+	// 把那一项变成只读的挂载列表。
+	rep.RootSwitchable = s.cfg.AllowRootSwitch && !s.MultiRoot()
+	rep.MultiRoot = s.MultiRoot()
+	if s.MultiRoot() {
+		for _, m := range s.Mounts() {
+			rep.Roots = append(rep.Roots, rootInfo{
+				Label: m.Label, Root: m.Res.Root(), URL: "/" + m.Label,
+			})
+		}
+	}
 	rep.AllowRoots = s.settings.AllowRoots()
 	return rep
 }
@@ -136,6 +158,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Root != nil {
+		// 多根模式先拦：这时 `--no-root-switch` 与否都不重要，
+		// 换根在这个模式下根本没有定义。
+		if s.MultiRoot() {
+			http.Error(w, "400 Bad Request: 多根模式下不支持运行期切换服务根目录",
+				http.StatusBadRequest)
+			return
+		}
 		if !s.cfg.AllowRootSwitch {
 			http.Error(w, "403 Forbidden: 服务已通过 --no-root-switch 禁止切换根目录",
 				http.StatusForbidden)
@@ -219,6 +248,11 @@ func normalizeTitle(raw string) (string, error) {
 //  3. 规范化要用 fsutil.NormalizePath，先把软链解析掉 ——
 //     否则在允许范围内放一个指向 /etc 的软链就能绕过第 1 条。
 func (s *Server) switchRoot(newRoot string) error {
+	// 兜底：updateSettings 已经拦过一次，但这里再挡一道 ——
+	// 换根会改 *Resolver 里的根，而多根用的是 *Roots，语义上根本不该走到这。
+	if s.MultiRoot() {
+		return errors.New("多根模式下不支持切换服务根目录")
+	}
 	newRoot = strings.TrimSpace(newRoot)
 	if newRoot == "" {
 		return errors.New("根目录不能为空")

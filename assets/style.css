@@ -1068,6 +1068,25 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 /* 统一的最小宽度：按钮随文字长短伸缩时，「取消 / 确定」会一宽一窄很难看。 */
 .modal-foot .btn { min-width: 92px; justify-content: center; }
 
+/* 多根模式下的挂载点列表（设置 → 常规）。标签与磁盘路径分列两侧，
+   路径用等宽字体，方便一眼看出「哪个地址对应哪个目录」。 */
+.mount-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.mount-line code {
+  flex: none;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.mount-line span {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
 .field { margin-bottom: 14px; }
 .field label {
   display: block;

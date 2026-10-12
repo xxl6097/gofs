@@ -123,6 +123,8 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		// 从登录框进来的反而看不到。
 		"allow_upgrade": s.cfg.Upgrader != nil,
 		"allow_restart": s.cfg.Restarter != nil,
+		// 多根模式：界面据此把「服务根目录」那一项变成只读的挂载列表。
+		"multi_root": s.MultiRoot(),
 	}
 	if s.cfg.UploadDated() {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())

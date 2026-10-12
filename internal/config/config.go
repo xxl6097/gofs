@@ -1,6 +1,6 @@
 // Package config 定义 gofs 的运行时配置，并负责从命令行参数与环境变量加载。
 //
-// 参数风格参考 sigoden/dufs：位置参数为被服务的目录，其余为选项。
+// 参数风格参考 sigoden/dufs：位置参数为被服务的目录（可给多个），其余为选项。
 // 所有选项均可通过 GOFS_ 前缀的环境变量设置，命令行显式传入时以命令行为准。
 package config
 
@@ -121,8 +121,16 @@ const (
 
 // Config 保存完整的服务配置。
 type Config struct {
-	// ServePath 为被服务的根目录或单个文件。
+	// ServePath 为被服务的根目录或单个文件。**等于 ServePaths[0]**，
+	// 保留它是为了兼容只认「一个根」的老代码与老测试。
 	ServePath string
+
+	// ServePaths 为全部被服务的根目录（含 ServePath）。
+	//
+	// 长度 1 时行为与只有 ServePath 时完全一样：服务在 `/`，URL 里没有前缀。
+	// 长度 >= 2 时每个根挂在各自的标签下（`/data/…`、`/backup/…`）。
+	// Normalize 之后长度恒 >= 1，且 ServePaths[0] == ServePath。
+	ServePaths []string
 	// Bind 为监听地址，可为 IP、host:port，或以 / 开头的 unix socket 路径。
 	Bind string
 	// Port 为监听端口。
@@ -650,9 +658,10 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		return nil, err
 	}
 
-	// 位置参数：最后一个作为被服务路径。
+	// 位置参数：**全部**被服务目录（多根时每个挂一个标签前缀）。
+	// 以前只取最后一个，多填的会被静默丢掉 —— 那种「写了不生效」最难查。
 	if rest := fs.Args(); len(rest) > 0 {
-		cfg.ServePath = rest[len(rest)-1]
+		cfg.ServePaths = append([]string(nil), rest...)
 	}
 
 	// --no-upload-dated 与显式的 --upload-date-layout 互斥，避免意图含糊。
@@ -702,6 +711,30 @@ func (c *Config) Normalize() error {
 	if strings.TrimSpace(c.Version) == "" {
 		c.Version = DefaultVersion
 	}
+	// 服务根：把「一个」和「多个」统一到 ServePaths 上，并维持
+	// ServePaths[0] == ServePath 这条不变量（单一事实来源）。
+	// 上层可能只设了 ServePath（老代码 / WithRoot），也可能只设了 ServePaths。
+	if len(c.ServePaths) == 0 {
+		p := strings.TrimSpace(c.ServePath)
+		if p == "" {
+			p = "."
+		}
+		c.ServePaths = []string{p}
+	}
+	cleaned := make([]string, 0, len(c.ServePaths))
+	for _, p := range c.ServePaths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return errors.New("服务根路径不能为空")
+		}
+		if strings.ContainsRune(p, 0) {
+			return fmt.Errorf("服务根路径 %q 含有非法字符", p)
+		}
+		cleaned = append(cleaned, p)
+	}
+	c.ServePaths = cleaned
+	c.ServePath = cleaned[0]
+
 	// 标题同理：空标题会让浏览器标签页只剩一个「—」。
 	if strings.TrimSpace(c.Title) == "" {
 		c.Title = DefaultTitle
@@ -850,10 +883,12 @@ func (c *Config) IsUnixSocket() bool { return strings.HasPrefix(c.Bind, "/") }
 func usageText() string {
 	return `gofs - 一个参照 dufs 设计的 Go 文件服务器，支持在线解压压缩包
 
-用法: gofs [选项] [serve-path]
+用法: gofs [选项] [serve-path ...]
 
 参数:
-  [serve-path]               要服务的路径，默认 "."
+  [serve-path ...]           要服务的路径，默认 "."。给多个时每个目录挂在
+                             自己的名字下（/data/…、/backup/…）；重名自动
+                             加后缀，互相嵌套的目录会被拒绝（启动即报错）
 
 选项:
   -b, --bind <addrs>         监听地址或 unix socket

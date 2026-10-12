@@ -80,7 +80,16 @@ func New(opts ...Option) (*Server, error) {
 func (s *Server) Config() *Config { return s.cfg }
 
 // Root 返回被服务的根目录绝对路径。
+//
+// 多根时返回第一个根 —— 多根没有「唯一根」这回事。
 func (s *Server) Root() string { return s.inner.Root() }
+
+// MountLabels 返回各挂载点的 URL 标签，顺序与启动时给的目录一致。
+// 单根时长度为 1，且不参与路由（那时 URL 里没有前缀）。
+func (s *Server) MountLabels() []string { return s.inner.MountLabels() }
+
+// MultiRoot 表示当前是否挂了多个服务目录（此时 URL 带标签前缀）。
+func (s *Server) MultiRoot() bool { return s.inner.MultiRoot() }
 
 // Handler 返回配置好全部中间件的 http.Handler。
 //

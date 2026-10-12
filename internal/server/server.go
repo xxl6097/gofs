@@ -26,11 +26,16 @@ import (
 
 // Server 持有全部运行时依赖。
 type Server struct {
-	cfg   *config.Config
-	res   *fsutil.Resolver
-	auth  *auth.Authenticator
-	keys  *uploadkey.Store
-	guard *guard
+	cfg *config.Config
+	// res 是**唯一**的路径解析器，运行期可增删站点 —— 所以它必须是同一个
+	// 指针、永不替换（替换一个被无锁读的接口值就是竞态）。主目录服务在 /，
+	// 附加站点挂在各自标签下；单根就是「没有附加站点」。
+	res *fsutil.Roots
+	// sitesMu 串行化增删站点（读路径完全不碰它）。
+	sitesMu sync.Mutex
+	auth    *auth.Authenticator
+	keys    *uploadkey.Store
+	guard   *guard
 	// settings 存放可以在运行期修改、且会被并发读取的设置。
 	settings *runtimeSettings
 	assets   fs.FS
@@ -54,7 +59,7 @@ const (
 
 // New 构造 Server。assets 为内嵌前端资源（根目录即 http 路径根）。
 func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
-	res, err := fsutil.NewResolver(cfg.ServePath, cfg.AllowSymlink)
+	roots, err := fsutil.BuildRoots(cfg.ServePaths, cfg.AllowSymlink)
 	if err != nil {
 		return nil, err
 	}
@@ -93,17 +98,44 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{
+	srv := &Server{
 		cfg:      cfg,
-		res:      res,
+		res:      roots,
 		auth:     authn,
 		keys:     keys,
 		guard:    newGuard(cfg),
-		settings: newRuntimeSettings(cfg, res.Root()),
+		settings: newRuntimeSettings(cfg, roots.Root()),
 		assets:   assetsFS,
 		ui:       ui,
 		logger:   logger,
-	}, nil
+	}
+	// 恢复上次落盘的附加站点。**尽力而为**：单条坏数据只记日志、不阻止启动
+	// （与读取标题同一口径）—— 一个坏掉的设置文件不该让整个服务起不来。
+	srv.restoreSites()
+	return srv, nil
+}
+
+// restoreSites 把设置文件里记着的附加站点重新挂上。
+func (s *Server) restoreSites() {
+	for _, rec := range s.settings.Sites() {
+		abs, err := fsutil.NormalizePath(rec.Path)
+		if err != nil {
+			s.logger.Errorf("恢复站点 %q 失败: %v", rec.Path, err)
+			continue
+		}
+		// 边界启动时也要再算一遍：设置文件可能被手工改过，也可能是靠
+		// 上次更宽的 --root-allow 加进来的。
+		if !s.settings.AllowsRoot(abs) {
+			s.logger.Errorf("站点 %q 不在允许范围内，已跳过（可用 --root-allow 放开）", rec.Path)
+			continue
+		}
+		m, err := s.res.AddSite(abs, rec.Label)
+		if err != nil {
+			s.logger.Errorf("恢复站点 %q 失败: %v", rec.Path, err)
+			continue
+		}
+		s.logger.Infof("已恢复站点：/%s → %s", m.Label, m.Res.Root())
+	}
 }
 
 // Handler 返回配置好中间件的 http.Handler。
@@ -144,7 +176,19 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Root 返回被服务的根目录绝对路径。
+//
+// 多根时返回**第一个**根：多根没有「唯一根」这回事，这里的用途是展示与
+// 拼接（banner、SPA 回退）。按请求选根的是 Resolve，不是这个。
 func (s *Server) Root() string { return s.res.Root() }
+
+// Mounts 返回全部挂载点（[0] 是主目录），供 banner 与设置界面展示。
+func (s *Server) Mounts() []fsutil.Mount { return s.res.Mounts() }
+
+// MountLabels 返回**附加站点**的标签（主目录服务在 /，没有前缀）。
+func (s *Server) MountLabels() []string { return s.res.Labels() }
+
+// MultiRoot 表示除主目录外还有附加站点。
+func (s *Server) MultiRoot() bool { return s.res.HasExtras() }
 
 // AuthEnabled 表示当前是否存在任何鉴权规则。
 //
@@ -678,6 +722,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	abs, err := s.res.Resolve(urlPath)
 	if err != nil {
+		// ErrNoRoot 在混合形状下已不会出现（首段不匹配就是主目录下的普通
+		// 路径），保留这条分支纯粹是兜底；真正的「想越界」仍是 403。
+		if errors.Is(err, fsutil.ErrNoRoot) {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
@@ -774,6 +824,18 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 		s.writeErr(w, err)
 		return
 	}
+	s.writeListing(w, r, listing, urlPath, p)
+}
+
+// writeListing 输出一次目录列举的结果。
+//
+// 从 handleGet 里抽出来是为了让多根模式下的虚拟根（挂载点列表）复用同一套
+// 分支：?json / ?simple / 命令行工具 / SPA 外壳，两处必须完全一致 ——
+// 各写一份迟早会出现「/ 上能 wget、/data 上不能」这种怪事。
+func (s *Server) writeListing(w http.ResponseWriter, r *http.Request,
+	listing *fsutil.Listing, urlPath string, p permResult) {
+
+	q := r.URL.Query()
 	listing.Path = fsutil.CleanURLPath(urlPath)
 
 	// 明确要求 JSON 时直接返回数据。
