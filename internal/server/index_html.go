@@ -23,7 +23,7 @@ import (
 // 这和已有的「?json / ?simple」是同一个思路 —— 由客户端声明它想要什么。
 //
 // shareToken 非空时会把令牌拼进每个链接 —— 但**只在查询串形式**下需要。
-// 走路径形式（/__share__/<token>/docs/）时链接就是普通的相对路径，
+// 走路径形式（/s/<token>/docs/）时链接就是普通的相对路径，
 // 令牌已经在前缀里，wget 拼出来的文件名也才是干净的 `readme.txt`。
 // 这一点很重要：带查询串的链接会让 wget 把文件名存成
 // `readme.txt?share=gofs_xxx`。
@@ -103,7 +103,7 @@ func escapePathSegment(name string) string {
 // ---------------------------------------------------------------------------
 // 路径形式的分享地址
 //
-// 除了 `?share=<token>`，还支持 `/__share__/<token>/<原路径>`。
+// 除了 `?share=<token>`，还支持 `/s/<token>/<原路径>`。
 //
 // 为什么要有第二种：wget 会把查询串拼进文件名，递归下载下来的是
 // `readme.txt?share=gofs_xxx` 这种名字，基本没法用。路径形式下所有链接
@@ -113,11 +113,17 @@ func escapePathSegment(name string) string {
 // ---------------------------------------------------------------------------
 
 // sharePathPrefix 是路径形式分享地址的前缀。
-const sharePathPrefix = "/__share__/"
+//
+// 特意取短：这条地址是**发给别人**的（贴到聊天里、写进文档里），
+// 早先的 `/__share__/` 又长又扎眼。同类的内部接口用的是 `/fs/`。
+//
+// ⚠️ 代价与 `/fs/` 一样：服务目录下真有个叫 `s` 的目录时，它的顶层
+// 路由会被这里抢走（`/s/<token>/…` 永远先按分享地址解析）。
+const sharePathPrefix = "/s/"
 
 type shareCtxKey struct{}
 
-// withSharePath 把 /__share__/<token>/<rest> 改写成 /<rest>，
+// withSharePath 把 /s/<token>/<rest> 改写成 /<rest>，
 // 并把令牌放进请求 context 供 shareTokenOf 取用。
 //
 // 只在路径前缀**刚好匹配**时改写；其余请求原样透传。

@@ -615,14 +615,14 @@
         });
         if (!res.ok) throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
         var data = await res.json();
-        // 用**路径形式**的地址（/__share__/<token>/<原路径>），而不是 ?share=。
+        // 用**路径形式**的地址（/s/<token>/<原路径>），而不是 ?share=。
         //
         // 差别在 wget：查询串会被拼进文件名，递归下载下来是
         // `readme.txt?share=gofs_xxx` 这种没法用的名字；路径形式下所有链接
         // 都是普通相对路径，`wget -r` 拉下来的文件名是干净的。
         // 浏览器两种都能打开。
         var url = location.origin +
-          raw('/__share__/' + encodeURIComponent(data.token) + encPath(entry.path));
+          raw('/s/' + encodeURIComponent(data.token) + encPath(entry.path));
         var ttlText = sel.options[sel.selectedIndex].textContent;
 
         // ⚠️ 链接这时候**已经在服务端建好了**，而明文只此一次、之后只剩摘要。

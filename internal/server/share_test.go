@@ -324,7 +324,7 @@ func pagePerms(t *testing.T, html string) map[string]any {
 func TestSharePathFormForWget(t *testing.T) {
 	s, _ := shareServer(t)
 	tok := newShare(t, s, "/docs")
-	base := "/__share__/" + tok
+	base := "/s/" + tok
 
 	t.Run("单文件按路径取", func(t *testing.T) {
 		got := do(t, s, http.MethodGet, base+"/docs/readme.txt", nil, nil)
@@ -380,7 +380,7 @@ func TestSharePathFormForWget(t *testing.T) {
 	})
 
 	t.Run("伪造的令牌不行", func(t *testing.T) {
-		got := do(t, s, http.MethodGet, "/__share__/gofs_fake/docs/readme.txt", nil, nil)
+		got := do(t, s, http.MethodGet, "/s/gofs_fake/docs/readme.txt", nil, nil)
 		if got.code == http.StatusOK {
 			t.Fatal("伪造令牌被放行")
 		}

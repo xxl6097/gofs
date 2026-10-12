@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xxl6097/gofs/internal/auth"
@@ -35,6 +36,10 @@ type Server struct {
 	assets   fs.FS
 	ui       *uiTemplate
 	logger   *Logger
+
+	// assetTags 缓存内嵌资源的 ETag（按内容算，只算一次）。
+	// 为什么不能只用 modTime+size：见 handler_list.go 的 assetETag。
+	assetTags sync.Map
 }
 
 // WebDAV 风格的方法，标准库未定义。
@@ -131,7 +136,7 @@ func (s *Server) Handler() http.Handler {
 	h = s.withLogging(h)
 	h = s.withConcurrency(h)
 	h = s.withPathPrefix(h)
-	// 放在最外层：先把 /__share__/<token>/… 改写成真实路径，
+	// 放在最外层：先把 /s/<token>/… 改写成真实路径，
 	// 后面所有中间件与路由看到的都是干净的路径。
 	h = s.withSharePath(h)
 	return h
@@ -346,7 +351,7 @@ const shareCookieName = "gofs_share"
 // 查询参数优先是有意的：同一个浏览器可能开过多个分享链接，
 // 显式带上来的那一个才是当前意图。
 func shareTokenOf(r *http.Request) string {
-	// 路径形式（/__share__/<token>/…）：令牌在 context 里，伪造不了。
+	// 路径形式（/s/<token>/…）：令牌在 context 里，伪造不了。
 	if v, ok := r.Context().Value(shareCtxKey{}).(string); ok && v != "" {
 		return v
 	}

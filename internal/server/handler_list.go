@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -282,11 +283,43 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	// 内嵌资源在开发期变化频繁，统一短缓存 + 强校验。
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("ETag", fmt.Sprintf(`"a-%x-%x"`, st.ModTime().UnixNano(), st.Size()))
 	rs, ok := f.(io.ReadSeeker)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("ETag", s.assetETag(name, st, rs))
 	http.ServeContent(w, r, name, st.ModTime(), rs)
+}
+
+// assetETag 给出某个前端资源的 ETag。
+//
+// ⚠️ 内嵌资源（embed.FS）**不能**用 modTime+size 拼：embed 的文件 ModTime
+// 恒为零值，时间那一项永远不变，ETag 就退化成「只认文件大小」。于是内容改了
+// 而字节数没变时 ETag 不变，浏览器一直收到 304、继续跑旧 JS ——
+// 表现就是「前端改了、部署了，页面还是老样子」，而且没有 Last-Modified
+// 可以退（零 modtime 会被 ServeContent 跳过）。所以这里按**内容**算。
+//
+// 走 WithAssetsDir 的磁盘目录仍用 modTime+size：那边的 mtime 是真的，
+// 而且作者靠它做「改前端不用重启」的热更新，按内容算反而要多读一遍文件。
+// 内嵌内容的散列只算一次，之后走缓存（embed 的内容在运行期不会变）。
+func (s *Server) assetETag(name string, st fs.FileInfo, rs io.ReadSeeker) string {
+	fallback := fmt.Sprintf(`"a-%x-%x"`, st.ModTime().UnixNano(), st.Size())
+	if !st.ModTime().IsZero() {
+		return fallback
+	}
+	if v, ok := s.assetTags.Load(name); ok {
+		return v.(string)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, rs); err != nil {
+		return fallback
+	}
+	// 读到了 EOF，要退回开头，否则下面的 ServeContent 什么都发不出去。
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return fallback
+	}
+	tag := fmt.Sprintf(`"a-%x"`, h.Sum(nil)[:12])
+	s.assetTags.Store(name, tag)
+	return tag
 }

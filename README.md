@@ -1323,19 +1323,24 @@ https://your-host/docs/报告.docx?share=…    分享单个文件
 分享链接有**两种形式**，效果一样：
 
 ```
-https://your-host/__share__/<token>/docs/          ← 复制出来的就是这个
-https://your-host/docs?share=<token>               ← 等价写法
+https://your-host/s/<token>/docs/            ← 复制出来的就是这个
+https://your-host/docs?share=<token>         ← 等价写法
 ```
+
+> 前缀 `/s/` 是特意取短的 —— 这条地址是发给别人看的。它从早先的
+> `/__share__/` 改过来，**改之前发出去的旧链接会失效**（分享链接本身
+> 有有效期，最长 30 天）。⚠️ 服务目录下真有个叫 `s` 的目录时，
+> `/s/<token>/…` 会优先按分享地址解析，那个目录的顶层路由会被遮蔽。
 
 命令行工具用起来是这样：
 
 ```bash
 # 单个文件
-wget -O 报告.docx "https://host/__share__/<token>/docs/报告.docx"
-curl -O "https://host/__share__/<token>/docs/报告.docx"
+wget -O 报告.docx "https://host/s/<token>/docs/报告.docx"
+curl -O "https://host/s/<token>/docs/报告.docx"
 
 # 整个目录（递归）
-wget -r -np -nH --cut-dirs=2 -P out "https://host/__share__/<token>/docs/"
+wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 #   out/docs/readme.txt
 #   out/docs/子目录/deep.txt
 ```
