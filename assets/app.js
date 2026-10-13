@@ -1187,15 +1187,39 @@
     bc.scrollLeft = bc.scrollWidth;
   }
 
+  // 名称比较器：文件管理器的通行规则 ——
+  //   - 自然序：文件名里的数字按数值比，"file2" 排在 "file10" 前面
+  //     （而不是按字符逐个比，否则会出现 file10 < file2 的错觉）；
+  //   - 忽略大小写：sensitivity:'accent' 让 "A" 与 "a" 视为同级，
+  //     但仍区分重音字符，避免把 "résumé" 和 "resume" 混为一谈；
+  //   - 中文按拼音（zh-Hans-CN 区域规则）。
+  // 优先用 Intl.Collator：它把 locale 规则编译进比较器，整表排序只构造一次，
+  // 比每个元素现调 localeCompare 快得多。
+  var nameCollator = (typeof Intl !== 'undefined' && Intl.Collator)
+    ? new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'accent' })
+    : null;
+
+  function compareName(a, b) {
+    if (nameCollator) return nameCollator.compare(a, b);
+    // 兜底：极老的浏览器没有 Intl.Collator，退回 localeCompare（同样带自然序）。
+    return a.toLowerCase().localeCompare(b.toLowerCase(), 'zh-Hans-CN', { numeric: true });
+  }
+
   function sortedEntries() {
     var k = state.sortKey, dir = state.sortDir;
     return state.entries.slice().sort(function (a, b) {
+      // 目录恒在前：升序降序都不打破「目录段 / 文件段」的分组，
+      // 与资源管理器、Finder、主流网盘一致（只在各段内部翻转方向）。
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
       var r = 0;
       if (k === 'size') r = (a.size || 0) - (b.size || 0);
       else if (k === 'mtime') r = new Date(a.mtime) - new Date(b.mtime);
-      else r = a.name.toLowerCase().localeCompare(b.name.toLowerCase(), 'zh-Hans-CN');
-      if (r === 0) r = a.name.toLowerCase().localeCompare(b.name.toLowerCase(), 'zh-Hans-CN');
+      else r = compareName(a.name, b.name);
+      // 并列时按名称再排一次，保证 size/mtime 相同时顺序稳定可预期。
+      if (r === 0) r = compareName(a.name, b.name);
+      // 名称在忽略大小写后仍相等（如 "A.txt" 与 "a.txt"）时，
+      // 用原始字符序定序，避免不同浏览器给出不同结果。
+      if (r === 0) r = a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
       return r * dir;
     });
   }
