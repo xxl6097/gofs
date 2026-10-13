@@ -44,7 +44,7 @@ func main() {
 	port := flag.Int("port", 8080, "监听端口")
 	exit := flag.String("exit", "later",
 		"何时退出进程：later＝响应发出去之后再退（页面拿到 200）；"+
-			"now＝在回调里就退（页面看到连接被掐断）")
+			"now＝回调里立刻 os.Exit、不写响应（页面看到连接被掐断）")
 	unit := flag.String("unit", "",
 		"要删除的服务注册文件（如 /etc/systemd/system/gofs.service）；留空＝跳过这一步")
 	purgeConfig := flag.Bool("purge-config", false,
@@ -128,9 +128,10 @@ func newOptions(exit, unit string, purgeConfig, removeBinary bool) (options, err
 
 func (o options) exitNote() string {
 	if o.exitNow {
-		return "-exit now：进程会在回调里就退出，页面多半看到连接被掐断"
+		return "-exit now：回调里立刻退出、不写响应 —— 页面会看到连接被掐断，\n" +
+			"     这正是前端「把断连当成功」要处理的那一支"
 	}
-	return "-exit later：响应先发出去，进程随后退出，页面拿到 200"
+	return "-exit later：响应先发出去（页面拿到 200），进程随后退出"
 }
 
 func (o options) configDir() string { return gofs.DefaultKeyDir() }
@@ -251,12 +252,20 @@ func (o options) uninstall(ctx context.Context) error {
 // stop 停掉自己。
 func (o options) stop() error {
 	if o.exitNow {
-		// 直接在回调里退出：响应发不出去，页面看到连接被掐断 ——
-		// 这正是前端「把断连当成功」要处理的那种情况。
-		return syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		// 立刻退出，**不写响应**：客户端看到连接被掐断 —— 这正是前端
+		// 「把断连当成卸载的正常表现」那一支要处理的情况。
+		//
+		// ⚠️ 注意这里用 os.Exit 而不是给自己发 SIGTERM：gofs 的 Run 装了
+		// SIGTERM 处理器，会走**优雅关闭**，把在途请求（包括当前这个）
+		// 等完再退 —— 那样响应照样发得出去，也就演示不出「断连」这条路径。
+		//
+		// 代价是跳过优雅关闭：在途的上传/下载会被掐断，日志与密钥也来不及
+		// 刷盘。卸载场景下通常可以接受（配置目录本来就要删掉），
+		// 但在乎在途传输的部署应当用 -exit later。
+		os.Exit(0)
 	}
-	// 先让响应发出去，再退。延迟是为了让 handler 有时间写完响应体；
-	// gofs 的优雅关闭会等这个进程退出，所以这里用 goroutine + 一点点延迟。
+	// 先让响应发出去，再退：handler 写完响应体之后这里返回，半秒后
+	// 再给自己发 SIGTERM，走 gofs 的优雅关闭。
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
