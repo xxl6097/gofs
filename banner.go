@@ -90,6 +90,11 @@ func (s *Server) Banner(w io.Writer) {
 		}
 		fmt.Fprintf(w, "  用户表    : %s\n", userLoc)
 	}
+	// 运行期设置（站点标题与附加站点）也是落盘的，位置值得一并印出来 ——
+	// 否则「改完重启就没了」只能靠猜。
+	if cfg.SettingsFile != "" {
+		fmt.Fprintf(w, "  设置文件  : %s\n", cfg.SettingsFile)
+	}
 	// 把生效中的防护值打出来：这些默认值直接决定了服务被滥用时的表现，
 	// 显式可见比藏在 --help 里更让人放心。
 	fmt.Fprintf(w, "  防护      : 上传≤%s  打包≤%s/%s  目录≤%s  并发%d  无进展超时%s  跨站校验%s\n",

@@ -17,8 +17,8 @@ import (
 
 // newServer 起一个只服务临时目录的实例。
 //
-// 密钥与用户表都改到临时目录：默认值指向用户配置目录，
-// 跑测试时不该去碰开发者本机的真实文件。
+// 密钥、用户表、运行期设置都改到临时目录：默认值指向用户配置目录，
+// 跑测试时不该去碰开发者本机的真实文件（更不该触发旧文件迁移）。
 func newServer(t *testing.T, opts ...gofs.Option) (*gofs.Server, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -29,6 +29,7 @@ func newServer(t *testing.T, opts ...gofs.Option) (*gofs.Server, string) {
 		gofs.WithPort(0),
 		gofs.WithKeyFile(filepath.Join(state, "keys.json")),
 		gofs.WithUserFile(filepath.Join(state, "users.json")),
+		gofs.WithSettingsFile(filepath.Join(state, "settings.json")),
 	}
 	srv, err := gofs.New(append(base, opts...)...)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xxl6097/gofs/internal/config"
 	"github.com/xxl6097/gofs/internal/server"
 )
 
@@ -55,6 +56,15 @@ type Server struct {
 func New(opts ...Option) (*Server, error) {
 	cfg, err := buildConfig(opts)
 	if err != nil {
+		return nil, err
+	}
+
+	// 把早期版本遗留在上一层目录（少一个 gofs/）里的文件搬到新的默认位置。
+	// 只动**默认路径**、不覆盖已有文件、可重复调用（见该函数的注释）。
+	// 放在这里而不是 New 之外，是为了让命令行与库调用者都能自动受益。
+	if err := config.MigrateLegacyDefaults(cfg); err != nil {
+		// 搬不动就报错：那种情况下使用者会看到「密钥全没了」，
+		// 明确告诉他手动挪比让他自己猜好。
 		return nil, err
 	}
 

@@ -111,6 +111,7 @@ gofs 0.1.0
   鉴权      : 已启用（1 条规则），页面使用 Basic 认证
   上传密钥  : /home/me/.config/gofs/keys.json
   用户表    : /home/me/.config/gofs/users.json
+  设置文件  : /home/me/.config/gofs/settings.json
   防护      : 上传≤10GiB  打包≤200000条/50GiB  目录≤20000条  并发512  无进展超时2m0s  跨站校验on
 ```
 
@@ -786,6 +787,28 @@ curl -u admin:secret -X DELETE \
 入口对**任一子功能可用**的账号可见 —— 所以一个只被授予 `/docs` 写权限的账号
 虽然看不到「常规」（那需要服务根的读写权限），仍能管自己的密钥。服务端对每个
 接口还会再校验一次（见下方「权限」）。
+
+### 这些文件存在哪
+
+三个 JSON 都在**用户配置目录下的 `gofs/`** 里（可用 `--key-file` /
+`--user-file` / `--settings-file` 分别改，置空＝只存内存）：
+
+| 平台 | 目录 |
+| --- | --- |
+| Linux | `~/.config/gofs/`（或 `$XDG_CONFIG_HOME/gofs/`） |
+| macOS | `~/Library/Application Support/gofs/` |
+| Windows | `%AppData%\gofs\` |
+
+| 文件 | 内容 | 是否跨重启 |
+| --- | --- | --- |
+| `keys.json` | 上传密钥（只存摘要） | 是 |
+| `users.json` | 用户表（PBKDF2 摘要） | 是 |
+| `settings.json` | 站点标题、运行期新增的站点 | 是 |
+
+⚠️ **升级提示**：早期版本少了 `gofs/` 这一层，文件直接躺在用户配置目录里。
+现在启动时会**自动把它们搬到新位置**（只动默认路径、不覆盖已有文件、可重复
+调用）—— 既有密钥与用户表不会丢。若你显式指定过 `--key-file` 之类，那些
+路径不受影响，也不会被搬。
 
 ### 站点标题
 

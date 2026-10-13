@@ -19,16 +19,86 @@ import (
 // dateLayoutProbe 是校验日期布局字面量时使用的参照时刻。
 var dateLayoutProbe = time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC)
 
+// DefaultKeyDir 返回默认的配置目录：<用户配置目录>/gofs。
+//
+// 多一层 gofs 是必要的：下面那三个文件（keys / users / settings.json）
+// 名字都很通用，直接躺在 <用户配置目录> 里既不符合两个平台的惯例
+// （macOS 是 Application Support/<app>/，Linux 是 ~/.config/<app>/），
+// 也容易和别的软件的 settings.json 撞名。
+//
+// 历史：早期版本直接用了 os.UserConfigDir() 的返回值（少了 gofs 这一层）。
+// 旧位置的文件由 MigrateLegacyDefaults 在启动时搬过来。
 func DefaultKeyDir() string {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
 		home, herr := os.UserHomeDir()
 		if herr != nil {
 			return ""
 		}
-		dir = filepath.Join(home, ".config", "gofs")
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "gofs")
+}
+
+// LegacyKeyDir 返回加上 gofs 这一层之前用的目录，仅供迁移使用。
+//
+// 取不到用户配置目录时返回空串：那种情况下新旧目录本来就是同一个
+// （都回落到 ~/.config/gofs），没有东西可搬。
+func LegacyKeyDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
 	}
 	return dir
+}
+
+// MigrateLegacyDefaults 把上一版留在旧目录里的文件搬到新的默认位置。
+//
+// 三条规矩：
+//
+//   - **只动默认路径**。三者中任何一项被显式指定过（--key-file /
+//     GOFS_KEY_FILE / WithKeyFile…）就跳过该项 —— 那种情况下旧位置的文件
+//     与本次启动无关，去动它属于越权。
+//   - **不覆盖**。新位置已经有文件就跳过，绝不拿旧的盖掉新的。
+//   - **幂等**。只在「新位置没有、旧位置有」时才搬，重复调用无副作用。
+//
+// 新旧目录是同一个父目录下的两层（<cfgdir> 与 <cfgdir>/gofs），所以在同一
+// 文件系统上，rename 是原子的。搬不动时报错而不是默默吞掉 —— 那种情况下
+// 使用者会看到「密钥全没了」，明确告诉他手动挪比让他猜好。
+func MigrateLegacyDefaults(cfg *Config) error {
+	legacy := LegacyKeyDir()
+	newDir := DefaultKeyDir()
+	if legacy == "" || newDir == "" || legacy == newDir {
+		return nil
+	}
+	items := []struct {
+		cur  string // 本次实际使用的路径
+		def  string // 默认路径（只有等于它才认为「没被显式指定」）
+		name string
+	}{
+		{cfg.KeyFile, DefaultKeyFile(), "keys.json"},
+		{cfg.UserFile, DefaultUserFile(), "users.json"},
+		{cfg.SettingsFile, DefaultSettingsFile(), "settings.json"},
+	}
+	for _, it := range items {
+		if it.cur == "" || it.cur != it.def {
+			continue
+		}
+		if _, err := os.Stat(it.cur); err == nil {
+			continue // 新位置已有，不覆盖
+		}
+		old := filepath.Join(legacy, it.name)
+		if _, err := os.Stat(old); err != nil {
+			continue // 旧位置也没有，没什么可搬
+		}
+		if err := os.MkdirAll(filepath.Dir(it.cur), 0o700); err != nil {
+			return fmt.Errorf("迁移 %s 失败（建目录）: %w", it.name, err)
+		}
+		if err := os.Rename(old, it.cur); err != nil {
+			return fmt.Errorf("迁移 %s 失败（%s → %s）: %w", it.name, old, it.cur, err)
+		}
+	}
+	return nil
 }
 
 // DefaultKeyFile 的返回值是上传密钥的默认持久化路径。

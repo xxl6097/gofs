@@ -281,6 +281,14 @@ func WithUserFile(path string) Option {
 	return func(c *Config) { c.UserFile = path }
 }
 
+// WithSettingsFile 指定「运行期设置」（站点标题与附加站点）的持久化路径。
+//
+// 为空表示只保存在内存中（重启即回到启动参数的值）。
+// 不给就用默认路径 <用户配置目录>/gofs/settings.json。
+func WithSettingsFile(path string) Option {
+	return func(c *Config) { c.SettingsFile = path }
+}
+
 // WithUploadDateLayout 设置上传自动归档的日期目录布局（Go 时间布局字面量）。
 // 传空串关闭归档，文件直接落在目标目录。
 func WithUploadDateLayout(layout string) Option {
