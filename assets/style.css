@@ -295,8 +295,13 @@
    块与块之间用换行拼起来的，pre-wrap 会把每个换行都画成一个空行。 */
 .upgrade-notes {
   margin-top: 6px;
-  padding: 8px 10px;
-  max-height: 180px;
+  padding: 10px 12px;
+  /* 发布说明是这个页签的主体内容，要按弹窗比例给足高度：
+     跟着视口走（约半屏），再用上限兜住超大屏 —— 写死 px 的话
+     在大屏上只占一小条，还得在一个小框里滚。
+     设置弹窗本身是 92vh，这里留出「当前版本 / 发现新版本 / 底部按钮」
+     那几个固定块的位置，50vh 不会把它们挤掉。 */
+  max-height: min(50vh, 560px);
   overflow: auto;
   background: var(--bg-soft);
   border: 1px solid var(--border);
