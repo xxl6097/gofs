@@ -142,16 +142,78 @@ func (r *Resolver) resolveLocked(urlPath string) (string, error) {
 	if !within(r.root, full) {
 		return "", ErrEscaped
 	}
-	// 处理符号链接逃逸：仅当目标存在且开启软链逃逸时放行。
+	// 处理符号链接逃逸。
 	if !r.allowSymlink {
-		real, err := filepath.EvalSymlinks(full)
-		if err == nil {
-			if !within(r.root, real) {
-				return "", ErrEscaped
-			}
+		if err := EnsureWithin(r.root, full); err != nil {
+			return "", err
 		}
 	}
 	return full, nil
+}
+
+// EnsureWithin 确认 target 落在 root 之内 —— **沿已存在的那一段解析软链之后**。
+//
+// 与 IsWithin 的分工：IsWithin 是纯字符串前缀比较，看不懂软链；这里会解析
+// target 中最长的那段**已存在**路径，因此能挡住「先往根里放一条指向根外的
+// 软链，再借一次新建写入跳出去」这条路。
+//
+// ⚠️ 为什么不能只在 EvalSymlinks 成功时判断：叶子往往还不存在 ——
+// PUT 一个新文件、MKCOL 一个新目录、MOVE 的目标、解压写出一个新条目都是
+// 这种情况。EvalSymlinks 对不存在的路径直接返回 ENOENT，于是整段检查被跳过，
+// 而随后的 os.OpenFile / os.MkdirAll 会老老实实跟着父目录里的软链写出去。
+//
+// root 必须已经是解析过软链的绝对路径（fsutil 的根目录构造已保证这一点）。
+// 任何要把客户端给的路径落盘的地方都该过一下它：HTTP 层与解压层都用它，
+// 只堵一边等于没堵。
+func EnsureWithin(root, target string) error {
+	// root 也解析一次：它本身可能就是一条软链（例如解压目标是个指向根内
+	// 别处的软链目录）。只解析 target 的话，两边一个是解析后的真实路径、
+	// 一个还是软链形式，前缀比对必然失败 —— 于是合法写入被误判成逃逸。
+	// 正常情况下 root 已经被规范化过，这里是幂等的。
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+
+	real, err := evalExistingAncestor(target)
+	if err != nil {
+		// 连一段存在的祖先都找不到：正常情况下根目录必然存在，
+		// 所以按逃逸处理（宁可拒绝，不可放行）。
+		return ErrEscaped
+	}
+	if !within(root, real) {
+		return ErrEscaped
+	}
+	return nil
+}
+
+// evalExistingAncestor 解析 p 中最长的那段**已存在**的路径，
+// 再把剩下（尚不存在）的部分原样接回去。
+//
+// 为什么要这么绕：EvalSymlinks 要求整条路径都存在，而这里恰恰要判断
+// 「即将被创建」的路径 —— 它的父目录可能就是一条通往根目录之外的软链。
+// 只解析存在的部分就够了：还不存在的那一段不可能是软链。
+//
+// ⚠️ 这不构成完整的 TOCTOU 防护：检查与随后的 OpenFile 之间，攻击者仍可能
+// 把某个已经检查过的目录换成软链。要彻底堵住得用 openat/O_NOFOLLOW 逐段打开，
+// 而本服务的威胁模型里「能在服务根内建软链的人」已经具备写权限，
+// 这里挡住的是「预置一条软链，事后借一次写入跳出根目录」这条路径。
+func evalExistingAncestor(p string) (string, error) {
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real, nil
+	}
+	cur := filepath.Clean(p)
+	rest := ""
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", ErrEscaped // 走到根了都没有存在的部分
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+		if real, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(real, rest), nil
+		}
+	}
 }
 
 // within 判断 p 是否位于 root 之内。

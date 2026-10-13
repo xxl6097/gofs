@@ -251,24 +251,21 @@
     return res.json();
   }
 
-  // waitForOrigin 轮询某个绝对地址上的 /fs/health，最多等 tries 秒。
+  // 关于「跳转前先等新地址起来」这件事：
   //
-  // 改监听端口之后要用它：新端口刚绑上，浏览器立刻跳过去有可能撞上还没开始
-  // accept 的一瞬间。用裸 fetch 而不是 apiFetch —— health 不需要鉴权，而
-  // apiFetch 遇到 401 会把用户弹到登录框（重启那套里也是这个理由）。
+  // 重启那套（buildRestartBox）是**同源**轮询 /fs/health，没问题；
+  // 但改监听地址**不能**照搬。改端口就意味着换 origin，
+  // 而换 origin 就是跨域请求 —— 服务端只在 --enable-cors 时才发
+  // Access-Control-Allow-Origin（默认关），于是这里的 fetch 一定被浏览器
+  // 拦下、promise 一定 reject，轮询永远等不到结果：白等 10 秒，再报一句
+  // 「新地址没有应答」的假警报（服务其实好好的）。也轮询不了：跨域下我们
+  // 拿不到对方的任何响应，这恰恰是浏览器该拦的。
   //
-  // baseUrl 形如 "http://host:8080/files/"，已含访问前缀，所以拼上
-  // "fs/health" 就是完整的健康检查地址。
-  async function waitForOrigin(baseUrl, tries) {
-    for (var i = 0; i < tries; i++) {
-      try {
-        var res = await fetch(baseUrl + 'fs/health', { cache: 'no-store' });
-        if (res.ok) return true;
-      } catch (e) { /* 还没起来，继续等 */ }
-      await new Promise(function (r) { setTimeout(r, 1000); });
-    }
-    return false;
-  }
+  // 所以那条路径直接跳转。可以放心：服务端的 Relisten 是「新监听建好并开始
+  // serve 之后」才返回的，跳过去时端口已经在 accept 了；万一真连不上，
+  // 浏览器自己会给出比我们编的文案更准的错误页。
+  //
+  // 这里的轮询留给**同源**的场景（重启：同 origin 的 /fs/health）。
 
   // ---------------------------------------------------------------- 各标签
 
@@ -782,12 +779,8 @@
         // 带上了新的访问前缀（前缀分支先执行），所以它是最完整的目标。
         if (out.listen_jump_url) {
           var listenLabel = (out.listen_addr || '所有网卡') + ':' + out.listen_port;
-          G.toast('ok', '监听地址已改为 ' + listenLabel + '，正在等待新地址…');
-          // 等它真的能应答再跳，别让用户撞上一个还没起来的端口；等不到也照跳，
-          // 反正旧端口这时已经不接受新连接了，留在原地没有意义。
-          if (!(await waitForOrigin(out.listen_jump_url, 10))) {
-            G.toast('warn', '新地址 10 秒内没有应答，仍将尝试跳转。');
-          }
+          G.toast('ok', '监听地址已改为 ' + listenLabel + '，正在跳转…');
+          // 不等、不轮询 —— 跨域下轮询不出结果，理由见上面 waitForOrigin 那段。
           location.assign(out.listen_jump_url);
           return;
         }
@@ -799,6 +792,15 @@
               '请同步把代理的 upstream 指到新地址。';
           G.toast('warn', '监听地址已改为 ' +
             (out.listen_addr || '所有网卡') + ':' + out.listen_port + '。本页不跳转：' + why);
+
+          // 但如果**前缀**同时改了，就得跳到新前缀去：旧前缀已经不再被路由，
+          // 留在原地只会满屏 404，而上面的提示只说了监听的事，用户不知道
+          // 还得自己改地址。新前缀是同源的，跳转没有跨域问题。
+          if (patch.path_prefix !== undefined) {
+            var base2 = out.path_prefix || '';
+            G.toast('ok', '访问前缀已改为 ' + (base2 || '（根路径）') + '，正在跳转…');
+            location.assign(base2 + '/');
+          }
           return;
         }
 

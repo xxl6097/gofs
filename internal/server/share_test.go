@@ -395,3 +395,23 @@ func TestShareQueryFormStillWorks(t *testing.T) {
 		t.Fatalf("查询串形式返回 %d", got.code)
 	}
 }
+
+// TestShareTokenCannotUpload 是权限模型的另一个方向。
+//
+// 已有的 TestUploadKeyIsNotAShareToken 只堵了「上传密钥当分享令牌用」；
+// 反方向没堵：handleWithUploadKey 校验了令牌有效，却没校验它是**哪一种**
+// —— 于是发给第三方的只读分享链接可以直接拿来 PUT/POST 上传，
+// 而且落在该链接自己的 scope 内，看上去完全「合规」。
+func TestShareTokenCannotUpload(t *testing.T) {
+	s, root := shareServer(t)
+	tok := newShare(t, s, "/docs") // kind = read（只读分享）
+
+	put := do(t, s, http.MethodPut, "/docs/uploaded.txt?key="+tok,
+		strings.NewReader("恶意内容"), nil)
+	if put.code == http.StatusCreated || put.code == http.StatusOK || put.code == http.StatusNoContent {
+		t.Fatalf("只读分享令牌上传成功了：%d %s", put.code, put.body)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "uploaded.txt")); err == nil {
+		t.Error("文件竟然真的写进去了")
+	}
+}

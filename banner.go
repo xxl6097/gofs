@@ -3,6 +3,7 @@ package gofs
 import (
 	"fmt"
 	"io"
+	"time"
 )
 
 // Banner 把启动信息写入 w，让使用者一眼看清关键配置。
@@ -97,14 +98,28 @@ func (s *Server) Banner(w io.Writer) {
 	}
 	// 把生效中的防护值打出来：这些默认值直接决定了服务被滥用时的表现，
 	// 显式可见比藏在 --help 里更让人放心。
-	fmt.Fprintf(w, "  防护      : 上传≤%s  打包≤%s/%s  目录≤%s  并发%d  无进展超时%s  跨站校验%s\n",
+	//
+	// ⚠️ 「无进展超时」要**分别**打上传与下载两项：它们是两个独立的开关
+	//（--upload-read-timeout / --download-timeout），只是默认值恰好都是 2m。
+	// 早先这里只打了 DownloadTimeout 一个，标着笼统的「无进展超时」——
+	// 两个默认值相同，所以怎么调都看不出问题；一旦分别配置，
+	// 横幅就在误导运维（他只改了上传，看到的却是下载那个值）。
+	fmt.Fprintf(w, "  防护      : 上传≤%s  打包≤%s/%s  目录≤%s  并发%d  无进展超时 上传%s/下载%s  跨站校验%s\n",
 		limitSize(cfg.UploadMaxSize),
 		limitCount(cfg.ArchiveMaxItems), limitSize(cfg.ArchiveMaxBytes),
 		limitCount(cfg.ListMaxEntries),
 		cfg.MaxConcurrent,
-		cfg.DownloadTimeout,
+		noProgress(cfg.UploadReadTimeout), noProgress(cfg.DownloadTimeout),
 		perm("on", !cfg.DisableCSRFProtect),
 	)
+}
+
+// noProgress 把「无进展超时」格式化成可读文案（0 表示不限制）。
+func noProgress(d time.Duration) string {
+	if d <= 0 {
+		return "不限"
+	}
+	return d.Round(time.Second).String()
 }
 
 // limitSize 把字节上限格式化成可读文案，0 表示不限制。

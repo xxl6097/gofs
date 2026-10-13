@@ -13,6 +13,13 @@ import (
 	"github.com/xxl6097/gofs/internal/uploadkey"
 )
 
+// maxKeyTTLSeconds 是密钥/分享链接允许的最长有效期（10 年）。
+//
+// 存在是为了挡住整数溢出：请求里的秒数会乘成纳秒放进 time.Duration，
+// 超过约 292 年就会绕成负数，而下游用的是 `TTL > 0` 判断 ——
+// 结果是「请求一个超长有效期，拿到一把永不过期的钥匙」。
+const maxKeyTTLSeconds = 10 * 365 * 24 * 3600
+
 // keyView 是返回给前端的密钥视图。
 // 刻意不含任何可用于认证的字段——明文只在创建时返回一次，摘要则永不外泄。
 type keyView struct {
@@ -118,6 +125,16 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	}
 	if req.TTLSeconds < 0 {
 		http.Error(w, "400 Bad Request: 有效期不能为负数", http.StatusBadRequest)
+		return
+	}
+	// 上限不只是「别太过分」：这个数会被乘成纳秒塞进 time.Duration，
+	// 而 Duration 是 int64 —— 超过约 292 年就溢出成负数，
+	// 于是下面的 `TTL > 0` 判成 false，密钥**悄悄变成永不过期**。
+	// 「请求 300 年有效期，拿到一把永久钥匙」是这里最坏的失败方式，
+	// 所以宁可明确拒绝。
+	if req.TTLSeconds > maxKeyTTLSeconds {
+		http.Error(w, fmt.Sprintf("400 Bad Request: 有效期最多 %d 天（要永久请填 0）",
+			maxKeyTTLSeconds/86400), http.StatusBadRequest)
 		return
 	}
 	if fsutil.HasParentSegment(req.Scope) {
@@ -266,6 +283,21 @@ func (s *Server) handleWithUploadKey(w http.ResponseWriter, r *http.Request, url
 	if err != nil {
 		s.logger.Errorf("上传密钥校验失败（%s %s）：%v", r.Method, r.URL.Path, err)
 		http.Error(w, "401 Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	// 令牌得是**上传**那一种。
+	//
+	// Verify 只回答「这串令牌有效吗」，不回答「它是哪一种」—— 少了这一判，
+	// 一条发给第三方的**只读**分享链接（kind=read）就能反过来当写凭据用：
+	// PUT/POST 全部走通，而且落在该链接自己的 scope 内，看上去还很「合规」。
+	//
+	// 反方向的同类判断在 authorize 里（上传密钥不能当分享令牌读内容），
+	// 两个方向都要堵 —— 只堵一边等于没堵，而这正是当初漏掉的一边。
+	if k.KindOf() != uploadkey.KindUpload {
+		s.logger.Errorf("拒绝用只读分享令牌上传（%s %s）", r.Method, r.URL.Path)
+		http.Error(w, "403 Forbidden: 该令牌是只读分享链接，不能用于上传",
+			http.StatusForbidden)
 		return
 	}
 

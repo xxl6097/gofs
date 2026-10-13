@@ -14,6 +14,19 @@ import (
 // 调用方应当据此以 0 退出，而不是当成错误。
 //
 // 本函数不安装信号处理器，退出时机由 ctx 决定。
+//
+// ⚠️ 这里**不能**再额外注入一个默认账号（历史上曾有一行
+// `WithAuth("admin:admin123@/:rw")`）。三个后果都很难看：
+//
+//   - 它是**没人知道的后门**：运维配了 `-a boss:secret@/:rw`，而
+//     admin/admin123 照样能进、还是全盘读写 —— 这个口令在文档里一个字都没有；
+//   - 无 `-a` 时它会**悄悄把鉴权打开**，于是 `gofs -A ./data` 要求登录，
+//     与 README 写的「服务指定目录，并开放全部操作」不符；
+//   - 运维若恰好也用 `admin` 这个名字（密码不同），启动会直接失败在
+//     「账号 admin 出现了不一致的密码」上。
+//
+// 要默认账号的只有示例，以及 Run 那个「起一个服务就完事」的快捷入口 ——
+// 它们把口令写在明处并打印给使用者。
 func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	cfg, err := ParseArgs(args, stdout)
 	if err != nil {
@@ -24,7 +37,7 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return nil
 	}
 
-	srv, err := New(WithConfig(cfg), WithAuth("admin:admin123@/:rw"))
+	srv, err := New(WithConfig(cfg))
 	if err != nil {
 		return err
 	}

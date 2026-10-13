@@ -120,6 +120,12 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 		}
 
 		if f.FileInfo().IsDir() {
+			// 目录也要计入条目数：解压炸弹不一定要有文件内容 ——
+			// 一个几百 KB 的包可以声明上百万个空目录，把 inode 吃光。
+			// 早先只在写文件的路径上 checkNext，目录分支整个绕过了上限。
+			if err := limit.checkNext(f.Name, 0); err != nil {
+				return rep, err // 与文件分支一致：超限即中止，不静默跳过
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return rep, err
 			}

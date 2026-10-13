@@ -34,6 +34,13 @@ import (
 type runtimeSettings struct {
 	cfg *config.Config
 
+	// writeMu 把「改内存 + 落盘」整段串起来（见 mutate）。
+	//
+	// 与 mu 分开是刻意的：mu 保护**单个字段**的读写，读路径（每请求都要读
+	// PathPrefix）必须保持无阻塞；而这个锁只在设置写入时短暂持有，
+	// 里面确实有文件 IO，绝不能让它挡住请求。
+	writeMu sync.Mutex
+
 	mu            sync.RWMutex
 	uploadMaxSize int64
 	editMaxSize   int64
@@ -69,6 +76,24 @@ type runtimeSettings struct {
 	siteRoots []string
 }
 
+// mutate 串行化一次「改内存 + 落盘」。
+//
+// ⚠️ 所有 Set* 都必须走它。直接「先改字段、再 saveSettings」有两个问题，
+// 合起来会让改动从磁盘上消失：
+//
+//   - saveSettings 是「读一份快照 → 写文件」，两次并发保存的读取会互相跨越；
+//   - 于是后写的那份可能读到的是**旧值**，把先写的那份整个盖掉。
+//     内存里两个改动都在，文件里少一个 —— 重启后静默回退，没人会察觉。
+//
+// 加锁之后「最后一次写盘」必定持有最新的内存状态（保存顺序与状态一致）。
+// 这条有并发用例钉着：TestSettingsConcurrentSaveKeepsAllFields。
+func (s *runtimeSettings) mutate(fn func()) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	fn()
+	return s.saveSettings()
+}
+
 // Title 返回当前站点标题。
 func (s *runtimeSettings) Title() string {
 	s.mu.RLock()
@@ -81,10 +106,11 @@ func (s *runtimeSettings) Title() string {
 // 落盘失败不影响本次生效（内存里已经是新值），但要把错误回给调用方 ——
 // 否则管理员会以为「设好了」，重启后才发现又变回去了。
 func (s *runtimeSettings) SetTitle(v string) error {
-	s.mu.Lock()
-	s.title = v
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.title = v
+		s.mu.Unlock()
+	})
 }
 
 // PathPrefix 返回当前生效的访问路径前缀（"" 表示服务在根）。
@@ -102,10 +128,11 @@ func (s *runtimeSettings) PathPrefix() string {
 // 调用方必须先用 config.NormalizePathPrefix 归一化并校验：这里不做校验，
 // 是因为启动参数那条路径也走同一个函数，两处各校验一次容易走岔。
 func (s *runtimeSettings) SetPathPrefix(v string) error {
-	s.mu.Lock()
-	s.pathPrefix = v
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.pathPrefix = v
+		s.mu.Unlock()
+	})
 }
 
 // ListenBind 返回当前生效的监听地址（"" 表示所有网卡，"/" 开头为 unix socket）。
@@ -128,11 +155,12 @@ func (s *runtimeSettings) ListenPort() int {
 // 反过来的话，一个建不起来的地址会被写进文件，下次重启就起不来了 ——
 // 那正是「把服务改坏」最难看的一种。
 func (s *runtimeSettings) SetListen(bind string, port int) error {
-	s.mu.Lock()
-	s.listenBind = bind
-	s.listenPort = port
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.listenBind = bind
+		s.listenPort = port
+		s.mu.Unlock()
+	})
 }
 
 // settingsDoc 是设置文件的磁盘格式。
@@ -235,10 +263,11 @@ func (s *runtimeSettings) Sites() []siteRecord {
 
 // SetSites 记下当前的附加站点并落盘。
 func (s *runtimeSettings) SetSites(v []siteRecord) error {
-	s.mu.Lock()
-	s.sites = append([]siteRecord(nil), v...)
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.sites = append([]siteRecord(nil), v...)
+		s.mu.Unlock()
+	})
 }
 
 // saveSettings 原子写回设置文件（路径为空时只留在内存里）。
@@ -250,25 +279,38 @@ func (s *runtimeSettings) saveSettings() error {
 	if path == "" {
 		return nil
 	}
-	doc := settingsDoc{Version: 5, Title: s.Title(), Sites: s.Sites()}
+
+	// 在**一把锁**里把全部字段读成一份快照。
+	//
+	// ⚠️ 不能像早先那样逐个字段去调访问器：每次调用各取一次 RLock，于是
+	// 一次保存的读取会跨越另一次保存的写入 —— 两个管理员同时改**不同**字段时，
+	// 后写的那份可能读到的是旧值，把先写的那份整个盖掉。内存里两个改动都在，
+	// 磁盘上少一个，重启后静默回退（这条有并发用例钉着：
+	// TestSettingsConcurrentSaveKeepsAllFields）。
+	s.mu.RLock()
+	doc := settingsDoc{Version: 5, Title: s.title, Sites: append([]siteRecord(nil), s.sites...)}
+	uploadMax, editMax := s.uploadMaxSize, s.editMaxSize
+	pathPrefix, listenBind, listenPort := s.pathPrefix, s.listenBind, s.listenPort
+	s.mu.RUnlock()
+
 	// 只在**与启动参数不同**时才写这几项。
 	//
 	// 为什么不无脑写：那样「恢复启动时的默认值」之后，文件里会留下一份
 	// 等于旧默认值的记录；运维以后把 --upload-max-size 改大，重启却仍被
 	// 那份旧记录压住 —— 参数明明改了却不生效，很难查。
-	if v := s.UploadMaxSize(); v != s.cfg.UploadMaxSize {
+	if v := uploadMax; v != s.cfg.UploadMaxSize {
 		doc.UploadMaxSize = &v
 	}
-	if v := s.EditMaxSize(); v != s.cfg.EditMaxSize {
+	if v := editMax; v != s.cfg.EditMaxSize {
 		doc.EditMaxSize = &v
 	}
-	if v := s.PathPrefix(); v != s.cfg.PathPrefix {
+	if v := pathPrefix; v != s.cfg.PathPrefix {
 		doc.PathPrefix = &v
 	}
-	if v := s.ListenBind(); v != s.cfg.Bind {
+	if v := listenBind; v != s.cfg.Bind {
 		doc.ListenBind = &v
 	}
-	if v := s.ListenPort(); v != s.cfg.Port {
+	if v := listenPort; v != s.cfg.Port {
 		doc.ListenPort = &v
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
@@ -387,10 +429,11 @@ func (s *runtimeSettings) SetUploadMaxSize(n int64) error {
 	if n < 0 {
 		n = 0
 	}
-	s.mu.Lock()
-	s.uploadMaxSize = n
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.uploadMaxSize = n
+		s.mu.Unlock()
+	})
 }
 
 // EditMaxSize 返回当前生效的在线编辑大小上限（恒为正数）。
@@ -411,10 +454,11 @@ func (s *runtimeSettings) SetEditMaxSize(n int64) error {
 	if n <= 0 {
 		n = config.DefaultEditMaxSize
 	}
-	s.mu.Lock()
-	s.editMaxSize = n
-	s.mu.Unlock()
-	return s.saveSettings()
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.editMaxSize = n
+		s.mu.Unlock()
+	})
 }
 
 // AllowRoots 返回允许切换到的路径前缀（供界面展示）。

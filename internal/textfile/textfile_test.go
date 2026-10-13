@@ -175,3 +175,39 @@ func TestLanguageCaseInsensitive(t *testing.T) {
 		t.Errorf("markdown 识别异常")
 	}
 }
+
+// TestSniffLargeNonUTF8IsBinary 钉住一个大坑：阈值必须按**被嗅探的那段**
+// 算，不能按整个文件长度算。
+//
+// 早先是 `threshold := len(data) / 20`，而 `bad` 只统计前 8 KiB。于是文件一大，
+// 阈值就涨到超过 8 KiB 本身 —— 一个 2 MiB 的文件阈值是 104857，而前 8 KiB
+// 全烂也只有 8192，**任何**大文件都被判成文本。后果不是「显示难看」：
+// textRead 会把原始字节塞进 JSON 字符串，json.Marshal 会把非法 UTF-8 悄悄
+// 换成 U+FFFD，用户一保存，原文件里那批字节就永久变成了 U+FFFD。
+//
+// 最容易撞上的是**大块 GBK / Latin-1 文本**（这是中文环境里最常见的非
+// UTF-8 文本），它们没有 NUL 字节，所以第一道 NUL 检查拦不住。
+func TestSniffLargeNonUTF8IsBinary(t *testing.T) {
+	// 一块合法的 GBK 中文（"中文" 的 GBK 编码是 D6 D0 CE C4），重复到 2 MiB。
+	gbk := []byte{0xD6, 0xD0, 0xCE, 0xC4}
+	big := bytes.Repeat(gbk, (2<<20)/len(gbk))
+	if bytes.IndexByte(big[:8<<10], 0) >= 0 {
+		t.Fatal("测试数据不该含 NUL —— 那会被第一道检查拦下，测不到阈值这条路径")
+	}
+	if Sniff(big) {
+		t.Errorf("2 MiB 的 GBK 文本被判成了纯文本 —— 编辑器会把 U+FFFD 写回原文件")
+	}
+
+	// 真正的大文本文件仍然要放行（不能矫枉过正）。
+	large := bytes.Repeat([]byte("hello 世界\n"), (2<<20)/13)
+	if !Sniff(large) {
+		t.Error("2 MiB 的 UTF-8 文本被误判成二进制")
+	}
+
+	// 少量损坏字节仍算文本（阈值下限 4 的作用）。
+	noisy := append([]byte("正常内容\n"), 0xFF, 0xFE, 0xFD)
+	noisy = append(noisy, bytes.Repeat([]byte("more text\n"), 100)...)
+	if !Sniff(noisy) {
+		t.Error("只有几个坏字节的文本被误判成二进制")
+	}
+}

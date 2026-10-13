@@ -248,3 +248,83 @@ func TestDefaultIsReadOnly(t *testing.T) {
 		t.Fatalf("默认服务目录是 %q，期望 \".\"", cfg.ServePath)
 	}
 }
+
+// TestRunCLIIgnoresNoDefaultAccount 是安全回归：命令行入口**不得**自带账号。
+//
+// 历史上 RunCLI 里有一行 `WithAuth("admin:admin123@/:rw")`，后果有三条，
+// 每一条单独看都够糟：
+//
+//   - 它是个没人知道的后门 —— 运维配了 -a boss:secret@/:rw，
+//     admin/admin123 照样能全盘读写，而那个口令在文档里一个字都没有；
+//   - 无 -a 时它会悄悄把鉴权打开，于是 `gofs -A ./data` 要求登录，
+//     与 README 写的「服务开放全部操作」不符；
+//   - 运维若也用 admin 这个名字（密码不同），启动直接失败在
+//     「账号 admin 出现了不一致的密码」上 —— 这条最容易被当成正常的参数错误忽略掉。
+//
+// 这里直接盯住「配置里到底有几条规则」：CLI 注入的东西必须一条都没有。
+func TestRunCLIIgnoresNoDefaultAccount(t *testing.T) {
+	for _, args := range [][]string{
+		{"."},                       // 不给 -a
+		{"-A", "."},                 // README 快速开始里的第二条
+		{"-a", "boss:pw@/:rw", "."}, // 给了一条自己的
+	} {
+		cfg, err := gofs.ParseArgs(args, io.Discard)
+		if err != nil {
+			t.Fatalf("ParseArgs(%v): %v", args, err)
+		}
+		want := 0
+		if args[0] == "-a" {
+			want = 1
+		}
+		if got := len(cfg.AuthRules); got != want {
+			t.Errorf("ParseArgs(%v) 解析出 %d 条鉴权规则，期望 %d：%v",
+				args, got, want, cfg.AuthRules)
+		}
+	}
+}
+
+// TestCLIDoesNotAdvertiseDefaultCredential 确认 RunCLI 起的实例里，
+// 没有配置过的那个默认口令进不去。
+//
+// 用 -h 之外的路径走一遍完整流程：起服务、匿名拿不到、
+// 用 admin/admin123 也拿不到 —— 而用配置里的账号能拿到。
+func TestCLIDoesNotAdvertiseDefaultCredential(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 直接仿照 RunCLI 的构造方式（它没有暴露成可注入 ctx 之外的东西，
+	// 而 Start 之后的行为正是这里要验的）。
+	cfg, err := gofs.ParseArgs([]string{
+		"-A", "-b", "127.0.0.1", "-p", "0", "--log-format", "none",
+		"-a", "boss:pw@/:rw",
+		"--key-file", "", "--user-file", "", "--settings-file", "",
+		root,
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := gofs.New(gofs.WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	h := srv.Handler()
+
+	ask := func(user, pass string) int {
+		r := httptest.NewRequest(http.MethodGet, "/a.txt", nil)
+		r.SetBasicAuth(user, pass)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		res := w.Result()
+		_ = res.Body.Close()
+		return res.StatusCode
+	}
+
+	if got := ask("admin", "admin123"); got == http.StatusOK {
+		t.Error("没配置过的 admin/admin123 竟然能访问 —— 命令行入口不该自带账号")
+	}
+	if got := ask("boss", "pw"); got != http.StatusOK {
+		t.Errorf("配置里的账号访问失败：%d", got)
+	}
+}

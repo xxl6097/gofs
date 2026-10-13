@@ -69,7 +69,7 @@ func (s *Server) upgradeCheck(w http.ResponseWriter, r *http.Request) {
 // upgradeRun 执行升级，并通过 SSE 推送进度。
 func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
 	// 同一时刻只允许一次（闸门的实现在 runlock.go，卸载也用它）。
-	g := gateFor(&upgradeGates, s)
+	g := &s.upgradeGate
 	if !g.tryAcquire() {
 		http.Error(w, g.busyMessage("升级"), http.StatusConflict)
 		return

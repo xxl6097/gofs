@@ -255,3 +255,61 @@ func TestInsideOrSame(t *testing.T) {
 		}
 	}
 }
+
+// TestMoveDestinationCannotBeRoot 是数据安全底线：MOVE 的目标**不能**是服务根。
+//
+// 早先只挡了「源是根」（isRootPath / IsRoot(src)），没挡目标。
+// 于是 `MOVE /a.txt` + `Destination: /` + `Overwrite: T` 会走到
+// `os.RemoveAll(dst)`，而 dst 正是服务根 —— 整个被服务的目录连同子目录
+// 一起没了。任何在**任意一个路径**上有写权限的账号都能做到这件事，
+// 包括只被授予 /docs 的账号（目标完全没有权限校验）。
+func TestMoveDestinationCannotBeRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "a.txt"), []byte("A"))
+	writeFile(t, filepath.Join(root, "sub", "keep.txt"), []byte("K"))
+	s := newTestServer(t, testConfig(t, root, "-A", "-a", "boss:pw@/:rw"))
+
+	do(t, s, "MOVE", "/a.txt", nil, map[string]string{
+		"Authorization": basicAuth("boss", "pw"),
+		"Destination":   "http://example.com/",
+		"Overwrite":     "T",
+	})
+
+	// 无论返回什么状态码，服务目录都必须还在。
+	if _, err := os.Stat(filepath.Join(root, "sub", "keep.txt")); err != nil {
+		t.Fatalf("服务根被 MOVE 的目标删掉了：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub")); err != nil {
+		t.Fatalf("服务根下的子目录没了：%v", err)
+	}
+}
+
+// TestMoveChecksDestinationPermission 确认目标路径也要过权限模型。
+//
+// 只校验源的话，一个只在 /docs 有写权限的账号可以把文件 MOVE 到任意别处 ——
+// 按路径的权限模型等于形同虚设。
+func TestMoveChecksDestinationPermission(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "secret"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "docs", "a.txt"), []byte("A"))
+	s := newTestServer(t, testConfig(t, root, "-A", "-a", "bob:pw@/docs:rw"))
+
+	got := move(t, s, "/docs/a.txt", "/secret/a.txt", false)
+	if got.code == http.StatusCreated || got.code == http.StatusNoContent || got.code == http.StatusOK {
+		t.Errorf("只对 /docs 有写权限的账号把文件移到了 /secret：%d", got.code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "a.txt")); err != nil {
+		t.Errorf("被拒的移动把源文件弄没了：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "secret", "a.txt")); err == nil {
+		t.Error("文件竟然真的落到 /secret 了")
+	}
+}

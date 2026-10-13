@@ -3552,3 +3552,25 @@ func jsonString(s string) string {
 	}
 	return string(b)
 }
+
+// TestTextReadRejectsInvalidUTF8 是上一条的补集：内容里**没有 NUL**，
+// 只有少数几个非法 UTF-8 字节 —— 嗅探的阈值兜得住（不是二进制），
+// 但编辑器那条链路是 字节 → Go string → JSON → 浏览器 → JSON → 字节，
+// 而 json.Marshal 会把非法字节**悄悄**换成 U+FFFD（不报错、不失败）。
+// 放行的话用户看不出任何异常，一保存原文件里那些字节就永久变成了 U+FFFD。
+//
+// 与其静默改坏文件，不如在打开时就明确拒绝。
+func TestTextReadRejectsInvalidUTF8(t *testing.T) {
+	root := makeFixture(t)
+	// 大量合法 ASCII 把阈值撑开，只夹两个坏字节 —— 嗅探会当它是文本。
+	data := bytes.Repeat([]byte("正常的一行文本\n"), 100)
+	data = append(data, 0xFF, 0xFE)
+	data = append(data, []byte("后面还有内容\n")...)
+	writeFile(t, filepath.Join(root, "mixed.txt"), data)
+
+	s := newTestServer(t, testConfig(t, root, "-A"))
+	code, _, body := readDoc(t, s, "/mixed.txt", nil)
+	if code != http.StatusUnsupportedMediaType {
+		t.Errorf("状态码 = %d, 期望 415；%s", code, body)
+	}
+}

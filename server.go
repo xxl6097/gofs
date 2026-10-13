@@ -294,6 +294,20 @@ func (s *Server) Relisten(ctx context.Context, bind string, port int) (string, e
 	}
 
 	old := s.ln
+
+	// 地址没变就直接返回 —— 对 unix socket 来说这不是「省点事」，而是**必须**：
+	//
+	// Go 的 UnixListener.Close() 会把 socket 路径 unlink 掉，而此刻那个路径
+	// 已经属于**新**监听 —— 于是旧监听顺手把新监听的 socket 文件删了，
+	// 之后所有新连接都是 ENOENT，只有重启能救。
+	//
+	// 这条路径并不罕见：页面上「只改端口」就会走到这里。unix socket 下端口是
+	// 无效字段（界面提示里也这么写了），但界面允许改，而 ListenAddr 对 unix
+	// 只认路径 —— 于是 bind 没变、port 变了，handler 那边的短路判断不成立。
+	if config.ListenAddr(bind, port) == old.Addr().String() {
+		return old.Addr().String(), nil
+	}
+
 	newLn, err := s.listen(bind, port)
 	if err != nil {
 		return "", err // 旧监听一个字节没动
@@ -302,8 +316,9 @@ func (s *Server) Relisten(ctx context.Context, bind string, port int) (string, e
 	go s.serve(newLn)
 
 	_ = old.Close()
-	// Go 关掉 unix listener 不会删 socket 文件，留着会变成下次启动时的
-	// 「残留 socket」；顺手清掉，别把垃圾留给下一个进程。
+	// 旧监听是 unix socket 时它的文件已经随 Close 被 unlink 了（见上）；
+	// 这里再删一次是给「Close 没删成」的平台兜底，而且是**另一个**路径
+	//（同路径的分支上面已经短路返回了），不会误删新监听的 socket。
 	if ua, ok := old.Addr().(*net.UnixAddr); ok && ua != nil {
 		_ = os.Remove(ua.Name)
 	}

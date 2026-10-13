@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xxl6097/gofs/internal/auth"
 	"github.com/xxl6097/gofs/internal/fsutil"
@@ -147,6 +148,20 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 	bom, body := textfile.TrimBOM(raw)
 	if kind := textfile.BOMKind(bom); strings.HasPrefix(kind, "utf-16") {
 		http.Error(w, "415 Unsupported Media Type: 暂不支持编辑 "+kind+" 编码的文件",
+			http.StatusUnsupportedMediaType)
+		return
+	}
+	// 内容必须是**合法 UTF-8**，这是这条链路能成立的前提：
+	// 字节 → Go string → JSON → 浏览器 → JSON → Go string → 字节。
+	// 中间那两次 json 编解码会把非法字节**静默**换成 U+FFFD（不报错、也不失败），
+	// 用户看到的只是几个「」，一保存原文件里那些字节就被永久替换掉了。
+	//
+	// 嗅探（Sniff）拦的是「整体像不像二进制」，它允许极少量噪音；
+	// 而这里拦的是「能不能安全地走一趟 JSON」—— 少一个坏字节都不行。
+	// 与其静默改坏文件，不如在打开时就说清楚。
+	if !utf8.Valid(body) {
+		http.Error(w, "415 Unsupported Media Type: 该文件不是合法的 UTF-8 文本"+
+			"（在线编辑会把非法字节写成 U+FFFD，改坏原文件），请下载后编辑",
 			http.StatusUnsupportedMediaType)
 		return
 	}

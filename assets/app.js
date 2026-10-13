@@ -2171,11 +2171,22 @@
   //
   // 大文件传到一半断网是常事，从头上传几百 MB 很浪费。这里在中断之后
   // 先问服务端已经落盘多少字节，再从那个位置接着传：
-  //   - 首传是覆盖写（O_TRUNC），所以失败后残留的那部分**一定是本次的内容**，
-  //     接着往后写不会把别的文件拼进来；
   //   - 续传用 X-Update-Range: append，服务端追加到末尾，语义正好吻合；
   //   - 服务端会返回本次写入的字节数，用来确认最终大小一致。
+  //
+  // ⚠️ 但「磁盘上那截就是本次上传的内容」这个前提**并不总是成立**：
+  // 请求可能在还没碰到文件时就被拒了（并发闸门返回 503、前面的代理回 5xx、
+  // 连接根本没建立），这时磁盘上躺着的是**上一次**的完整文件。拿它的长度
+  // 当偏移量去 append，就是把新文件的尾巴接在旧文件头上，而收尾的
+  // `offset + written === file.size` 校验**照样通过** —— 界面报「上传成功」，
+  // 文件却是旧内容加新尾巴，完全看不出来。
+  //
+  // 所以上传前先记下服务端已有的字节数：只有「现在的大小跟那会儿不一样」，
+  // 才证明这次请求确实动过这个文件，剩下的那截才是我们自己的。
+  // 这次 HEAD 只对够大、值得续传的文件做（小文件直接跳过，
+  // 免得给「传一堆小文件」的场景平白多加一倍请求）。
   async function putFile(url, file, onProgress) {
+    var baseSize = file.size >= resumeMinSize ? await remoteSize(url) : -1;
     var offset = 0;
     for (var attempt = 0; ; attempt++) {
       try {
@@ -2193,12 +2204,22 @@
         if (!err.retryable || file.size < resumeMinSize || attempt >= resumeMaxRetry) throw err;
 
         var got = await remoteSize(url);
-        // 只有「确实写了一部分、但还没写完」才值得续传；
-        // 否则（0 字节或已完整）重传更稳妥。
-        if (!(got > 0 && got < file.size)) throw err;
-        offset = got;
-        if (onProgress) onProgress(offset, file.size);
-        toast('warn', '上传中断，已从 ' + fmtSize(offset) + ' 处继续');
+        // 三个条件缺一不可：确实写了一部分、还没写完、**且与上传前不一样**。
+        if (got > 0 && got < file.size && got !== baseSize) {
+          offset = got;
+          if (onProgress) onProgress(offset, file.size);
+          toast('warn', '上传中断，已从 ' + fmtSize(offset) + ' 处继续');
+          continue;
+        }
+        // 剩下的那截证明不了是我们的（服务端压根没碰到文件），
+        // 或者什么都没写进去 —— 那就从头上传：覆盖写会把旧文件截断，
+        // 拼不出「旧内容 + 新尾巴」这种东西。
+        // 已经在从头传了还是失败，就交给上层报错，别在这里打转。
+        if (offset === 0) throw err;
+        offset = 0;
+        baseSize = got;
+        if (onProgress) onProgress(0, file.size);
+        toast('warn', '上传中断，改为从头重传');
       }
     }
   }
@@ -3498,14 +3519,23 @@
     wrap.appendChild(cur);
     wrap.appendChild(logBox);
 
+    // 底部按钮先抓在手里：结束时要把「后台运行」改回「关闭」。
+    //
+    // ⚠️ 早先这里是 `closeBtn.textContent = '关闭'`，而 closeBtn **从来没被声明过** ——
+    // 严格模式下直接 ReferenceError，而且是在 done/error 分支里抛的：
+    // 完成提示、失败提示、列表刷新全都到不了（文件其实已经解压好了，
+    // 界面却像卡住不动）。抓一个引用就够了，不必改按钮的构造方式。
+    var foot = modalFoot([
+      // 解压是后台任务，关掉弹窗不会中断它 —— 按钮文案如实说明这一点。
+      { label: '后台运行', onClick: function () { m.close(); } }
+    ]);
+    var closeBtn = foot.querySelector('button');
+
     var m = openModal({
       title: '解压 ' + entry.name,
       body: wrap,
       locked: true,
-      footer: modalFoot([
-        // 解压是后台任务，关掉弹窗不会中断它 —— 按钮文案如实说明这一点。
-        { label: '后台运行', onClick: function () { m.close(); } }
-      ])
+      footer: foot
     });
 
     function log(msg) {

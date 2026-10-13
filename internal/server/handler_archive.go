@@ -393,7 +393,22 @@ func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string, l
 			continue
 		}
 
-		rel := strings.Trim(strings.TrimPrefix(p, base), "/")
+		// 剥掉「当前目录」这一层前缀 —— 必须按**路径边界**剥。
+		//
+		// base=/ab 而选中 /abc/f.txt 时，直接 TrimPrefix 会把它变成
+		// `c/f.txt`：包内文件名错了，还可能与其他条目撞名（撞了就被 seen
+		// 静默丢掉一条）。p 也可能压根不在 base 底下（上面允许以 / 开头
+		// 按服务根解析），那种情况本就该原样当相对路径。
+		rel := strings.Trim(p, "/")
+		if b := strings.Trim(base, "/"); b != "" {
+			switch {
+			case rel == b:
+				// 选中的就是当前目录本身：下面按「没有可用的包内名」跳过。
+				rel = ""
+			case strings.HasPrefix(rel, b+"/"):
+				rel = rel[len(b)+1:]
+			}
+		}
 		if rel == "" {
 			// 选中的就是当前目录本身：等于打包全部，但没有可用的包内名。
 			skipped = append(skipped, raw)

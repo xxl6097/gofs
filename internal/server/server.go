@@ -33,9 +33,15 @@ type Server struct {
 	res *fsutil.Roots
 	// sitesMu 串行化增删站点（读路径完全不碰它）。
 	sitesMu sync.Mutex
-	auth    *auth.Authenticator
-	keys    *uploadkey.Store
-	guard   *guard
+
+	// upgradeGate / uninstallGate 是「同一时刻只允许一次」的闸门
+	// （实现在 runlock.go）。挂在实例上而不是包级 map：不会随实例数增长，
+	// 也不必拿 *Server 当键。
+	upgradeGate   runGate
+	uninstallGate runGate
+	auth          *auth.Authenticator
+	keys          *uploadkey.Store
+	guard         *guard
 	// settings 存放可以在运行期修改、且会被并发读取的设置。
 	settings *runtimeSettings
 	assets   fs.FS
@@ -162,7 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/fs/settings", s.handleSettings)
 	mux.HandleFunc("/fs/upgrade", s.handleUpgrade)
 	mux.HandleFunc("/fs/restart", s.handleRestart)
-	// 卸载挂在 Restarter 上：只有那个值还实现了 Uninstaller 时才可用。
+	// 卸载是**独立**的扩展点（WithUninstaller），与 Restarter 无关。
 	mux.HandleFunc("/fs/uninstall", s.handleUninstall)
 	mux.HandleFunc("/fs/users", s.handleUsers)
 	mux.HandleFunc("/fs/extract", s.handleExtract)
@@ -649,6 +655,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	switch {
 	case hasCred:
 		perm = s.auth.Lookup(urlPath, user, pass, true)
+		// 失败计数**只在这里**清零：真的用密码验过一次才算。
+		//
+		// ⚠️ 不能放在下面统一的 `perm != PermNone` 分支里。那样任何一次
+		// 「匿名就能读」的请求都会把计数抹掉 —— 部署里有 `-a @/:r` 这类
+		// 公开只读规则（很常见）时，攻击者只要在两次猜密码之间插一个匿名
+		// GET，计数永远归零、封禁永远不触发，字典攻击又回到无限次。
+		// 会话 cookie 同理不在这里清：它是「过去某次登录成功」的凭据，
+		// 不代表当下验过密码，而且可能被第三方持有一份。
+		if perm != auth.PermNone {
+			s.noteAuthSuccess(ip)
+		}
 	case cookieUser != "":
 		// 会话身份：cookie 在登录时已经验过密码，这里只按身份取权限。
 		user = cookieUser
@@ -657,7 +674,6 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		perm = s.auth.Lookup(urlPath, "", "", false)
 	}
 	if perm != auth.PermNone {
-		s.noteAuthSuccess(ip)
 		// 会话身份也算「已认证」—— 否则登录后每个请求都会被当成匿名。
 		return permResult{Perm: perm, User: user, Authenticated: hasCred || cookieUser != ""}, true
 	}

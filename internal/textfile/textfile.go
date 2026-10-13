@@ -197,7 +197,14 @@ func Sniff(data []byte) bool {
 		sample = sample[size:]
 	}
 	// 允许极少量噪音（例如个别损坏字节），超过 5% 判定为二进制。
-	threshold := len(data) / 20
+	//
+	// ⚠️ 分母必须是**被统计的那一段**（sample），不能是 len(data)：bad 只数了
+	// 前 8 KiB，拿整个文件长度算阈值的话，文件一超过 8KiB*20 = 160KiB，阈值
+	// 就涨到超过 8 KiB 本身 —— 前 8 KiB 全烂也照样判成文本。那样大块的
+	// GBK / Latin-1 文本（没有 NUL，第一道检查拦不住）会被放进来，
+	// 而编辑器那条链路里 json.Marshal 会把非法字节悄悄换成 U+FFFD，
+	// 用户一保存原文件就被改坏了。
+	threshold := len(sample) / 20
 	if threshold < 4 {
 		threshold = 4
 	}

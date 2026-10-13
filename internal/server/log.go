@@ -129,21 +129,39 @@ func sanitizeLogLine(s string) string {
 }
 
 // replaceHTTPHeaders 展开 $http_xxx 变量。
+//
+// ⚠️ 必须**单趟从左到右**扫：替换进去的内容不再参与查找。
+//
+// 早先的写法是「替换一处、再从行首重扫」，而替换进去的值是**客户端可控**的
+// —— 只要它里面含有正在展开的那个变量名，替换前后整行一个字节都不变，
+// 循环就永远出不来（`User-Agent: $http_user_agent` +
+// `--log-format '… $http_user_agent'` 即触发）。后果不只是占着 CPU：
+// 日志中间件在并发闸门**里面**，那一个请求会一直握着名额不放，
+// 几个请求就能把服务打到拒绝服务，而且不需要任何凭据。
+//
+// 单趟扫描天然终止：每轮至少消费掉原始行里的 `$http_` 这 6 个字节。
 func replaceHTTPHeaders(line string, r *http.Request) string {
+	if !strings.Contains(line, "$http_") {
+		return line
+	}
+	var b strings.Builder
 	for {
 		idx := strings.Index(line, "$http_")
 		if idx < 0 {
-			return line
+			b.WriteString(line) // 剩余部分原样落地
+			break
 		}
+		b.WriteString(line[:idx])
 		end := idx + len("$http_")
 		for end < len(line) && isHeaderChar(line[end]) {
 			end++
 		}
-		key := line[idx+len("$http_") : end]
-		key = strings.ReplaceAll(key, "_", "-")
-		val := r.Header.Get(key)
-		line = line[:idx] + val + line[end:]
+		key := strings.ReplaceAll(line[idx+len("$http_"):end], "_", "-")
+		b.WriteString(r.Header.Get(key))
+		// 只继续扫**原始行**剩下的部分，替换进来的值不再回头处理。
+		line = line[end:]
 	}
+	return b.String()
 }
 
 // isHeaderChar 判断字符是否可作为 header 变量名的一部分。

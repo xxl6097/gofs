@@ -439,9 +439,15 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 	if u, err := url.Parse(destURL); err == nil && u.Path != "" {
 		destPath = u.Path
 	}
-	// 去掉访问前缀。
+	// 去掉访问前缀。要求**整段**匹配：`/filesX/y` 不该被前缀 `/files`
+	// 剥成 `X/y` —— 那会把用户没写的路径当成目标。
 	if pre := s.PathPrefix(); pre != "" {
-		destPath = strings.TrimPrefix(destPath, pre)
+		switch {
+		case destPath == pre:
+			destPath = "/"
+		case strings.HasPrefix(destPath, pre+"/"):
+			destPath = strings.TrimPrefix(destPath, pre)
+		}
 	}
 	destPath = fsutil.CleanURLPath(destPath)
 
@@ -472,6 +478,22 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 		s.writeErr(w, err)
 		return
 	}
+
+	// 目标也要过两道关 —— 只挡源是远远不够的：
+	//
+	//   - **目标不能是服务根**（任何站点的根）。下面 `Overwrite: T` 那一支会
+	//     `os.RemoveAll(dst)`，dst 是根就等于把整个被服务的目录删光；
+	//   - **目标要有写权限**。不判的话，一个只在 /docs 有写权限的账号可以把
+	//     文件 MOVE 到任何别的地方去，等于绕开了按路径的权限模型。
+	if s.res.IsRoot(dst) {
+		http.Error(w, "403 Forbidden: 不允许把目标设为服务根目录", http.StatusForbidden)
+		return
+	}
+	if s.checkPerm(r, destPath) != auth.PermReadWrite {
+		http.Error(w, "403 Forbidden: 对目标路径没有写权限", http.StatusForbidden)
+		return
+	}
+
 	// 目标落在源里面（含「就是它自己」）必须挡掉。
 	//
 	// 不挡的话，os.Rename 会返回 EINVAL，用户看到的是一句裸内核错误

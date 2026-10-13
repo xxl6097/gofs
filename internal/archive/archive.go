@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // Format 表示压缩包格式。
@@ -312,10 +314,15 @@ type limitedWriter struct {
 	w       io.Writer
 	written int64
 	max     int64
+	// limited 与 max 分开，是因为「预算刚好用尽」与「没有上限」都表现为 max == 0：
+	// 只看 max > 0 的话，前一个条目恰好把总预算写满时，下一个条目会变成**无上限**，
+	// 整份内容先落到磁盘上，等写完才被 checkWritten 发现超限再删掉 ——
+	// 那正是解压炸弹要的效果（磁盘被瞬时写满），而这个上限的存在意义就是提前拦住。
+	limited bool
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
-	if lw.max > 0 && lw.written+int64(len(p)) > lw.max {
+	if lw.limited && lw.written+int64(len(p)) > lw.max {
 		return 0, fmt.Errorf("解压后总大小超过上限 %s，已中止解压", humanBytes(lw.max))
 	}
 	n, err := lw.w.Write(p)
@@ -348,6 +355,13 @@ func normalizeEntryName(name string) string {
 // 一旦中途失败（超出配额、磁盘错误等），已写入的残缺文件会被删除，
 // 避免在目标目录里留下半截数据。
 func writeFile(target string, src io.Reader, opts Options, limit *limiter, compressed int64, name string, modTime time.Time) (int64, error) {
+	// 包内条目名本身是干净的（secureJoin 做过词法检查），但目标路径上可能
+	// 有一条**本来就存在**的软链指向根外 —— MkdirAll/OpenFile 会跟过去，
+	// 于是解压把文件写到服务根之外。这条检查与 HTTP 层用的是同一个实现
+	//（fsutil.EnsureWithin），只堵一边等于没堵。
+	if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
+		return 0, err
+	}
 	if !opts.Overwrite {
 		if _, err := os.Stat(target); err == nil {
 			return 0, fs.ErrExist
@@ -364,9 +378,12 @@ func writeFile(target string, src io.Reader, opts Options, limit *limiter, compr
 		return 0, err
 	}
 
-	lw := &limitedWriter{w: f, max: 0}
+	lw := &limitedWriter{w: f}
 	if limit.maxTotal > 0 {
+		// 剩余预算可能是 0（上一个条目刚好写满），那时应当**立刻**拒绝，
+		// 而不是当成「无上限」—— 见 limitedWriter.limited 的说明。
 		lw.max = limit.maxTotal - limit.total
+		lw.limited = true
 	}
 
 	cleanup := func() {

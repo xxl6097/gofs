@@ -62,17 +62,7 @@ func (g *runGate) busyMessage(what string) string {
 	return msg
 }
 
-// gateFor 取某个 Server 的闸门（没有就建一个）。
-//
-// 用 sync.Map 按实例分开：同一进程里可能起多个 gofs 实例（测试里很常见），
-// 它们之间没有互斥的必要。
-func gateFor(m *sync.Map, s *Server) *runGate {
-	v, _ := m.LoadOrStore(s, &runGate{})
-	return v.(*runGate)
-}
-
-// upgradeGates / uninstallGates 分别是升级与卸载的闸门表。
-var (
-	upgradeGates   sync.Map // *Server -> *runGate
-	uninstallGates sync.Map // *Server -> *runGate
-)
+// 闸门直接挂在 Server 上（upgradeGate / uninstallGate 两个字段），
+// 不放进包级 map —— 早先用的是 `sync.Map` 按 *Server 索引：
+// 同一进程里起过又丢掉多少实例，表里就永远留着多少个条目（测试里尤其明显）。
+// 挂到实例上既没有这个泄漏，也不必再靠指针当键。

@@ -64,7 +64,7 @@ func (s *Server) handleUninstall(w http.ResponseWriter, r *http.Request) {
 	// 与重启不同，这里**要**串行化：卸载不幂等。两个管理员同时点，实现方
 	// 那边会交叉着删同一批东西 —— 升级那边是「把同一个二进制写坏」，
 	// 这里是「删到一半互相打架」，都够难收拾的。
-	g := gateFor(&uninstallGates, s)
+	g := &s.uninstallGate
 	if !g.tryAcquire() {
 		http.Error(w, g.busyMessage("卸载"), http.StatusConflict)
 		return

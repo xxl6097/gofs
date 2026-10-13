@@ -222,6 +222,11 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// 目录同样计入条目数，理由见 zip 侧的同名分支。
+			if err := limit.checkNext(hdr.Name, 0); err != nil {
+				rep.ElapsedMs = time.Since(start).Milliseconds()
+				return rep, err // 与文件分支一致：超限即中止
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()
 				return rep, err
