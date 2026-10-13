@@ -403,6 +403,13 @@ type Config struct {
 	// 不升级的部署都很常见（见 Restarter 的注释）。
 	Restarter Restarter
 
+	// Uninstaller 为「卸载服务」的实现，由调用方注入。
+	//
+	// 与 Restarter **相互独立**：只重启不卸载、只卸载不重启都常见。
+	// 为 nil 表示这个部署不提供卸载：/fs/uninstall 返回「未启用」，
+	// 界面上也不显示「卸载」按钮。
+	Uninstaller Uninstaller
+
 	// Relistener 为「把服务换到另一个监听地址上」的实现（热重绑）。
 	//
 	// gofs 自己 Start 时会自动注入内置实现（见根包 New）；以库方式嵌进

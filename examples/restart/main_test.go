@@ -13,17 +13,12 @@ import (
 // 才看得出来，所以这里把三个分支连同未知取值都钉住。
 func TestRestarterFor(t *testing.T) {
 	for _, mode := range []string{"exec", "signal"} {
-		h, err := restarterFor(mode)
+		r, err := restarterFor(mode)
 		if err != nil {
 			t.Errorf("mode=%s 返回错误: %v", mode, err)
-			continue
 		}
-		// 两个动作都要有：注入一个只有 Restart 的值，页面上就没有「卸载」按钮。
-		if h.restart == nil {
-			t.Errorf("mode=%s 没有重启动作", mode)
-		}
-		if h.uninstall == nil {
-			t.Errorf("mode=%s 没有卸载动作 —— 页面上不会出现「卸载」按钮", mode)
+		if r == nil {
+			t.Errorf("mode=%s 返回了 nil —— 注入 nil 等于没注入，按钮会消失", mode)
 		}
 	}
 
@@ -36,20 +31,13 @@ func TestRestarterFor(t *testing.T) {
 	}
 }
 
-// TestHooksSatisfyBothInterfaces 是「这个值能直接塞进 gofs.WithRestarter，
-// 且页面上两个按钮都会出现」这条契约的编译期版本。
+// TestStrategiesSatisfyRestarter 是「两种策略都能直接塞进
+// gofs.WithRestarter」这条契约的编译期版本。
 //
-// 卸载能力是**断言**出来的（cfg.Restarter.(Uninstaller)），所以这个类型必须
-// 真的同时满足两个接口 —— 少一个，按钮就静默消失。
-func TestHooksSatisfyBothInterfaces(t *testing.T) {
-	var _ gofs.Restarter = hooks{}
-	var _ gofs.Uninstaller = hooks{}
-	// 同时留一条「单独用 RestarterFunc 时**没有**卸载能力」的对照，
-	// 免得以后有人把它当成「也支持卸载」。
-	var r gofs.Restarter = gofs.RestarterFunc(reexecSelf)
-	if _, ok := r.(gofs.Uninstaller); ok {
-		t.Error("RestarterFunc 不该凭空获得卸载能力")
-	}
+// 卸载是**另一个**扩展点，示例在 examples/uninstall 里。
+func TestStrategiesSatisfyRestarter(t *testing.T) {
+	var _ gofs.Restarter = gofs.RestarterFunc(reexecSelf)
+	var _ gofs.Restarter = gofs.RestarterFunc(signalSelf)
 }
 
 // TestExecTargetPointsAtThisBinary 覆盖 reexecSelf 里唯一能安全测的部分。

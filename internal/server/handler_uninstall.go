@@ -14,22 +14,18 @@ import (
 // 比一次重启慢得多；但也不该无限等 —— 卡住的卸载要有个了断。
 const uninstallTimeout = 5 * time.Minute
 
-// uninstaller 取出「能做卸载」的 Restarter 实现。
+// uninstaller 取出卸载实现（没注入时 ok 为 false）。
 //
-// 卸载能力是**从 Restarter 的值上断言出来的可选扩展**（见 config.Uninstaller）：
-// 用类型断言而非单独一个字段，好处是「这个值的方法集」就是能力声明 ——
-// 页面据此决定显不显示按钮，不会出现点了必然失败的按钮。
+// 卸载是**独立**的扩展点：单独注入，不从 Restarter 上断言 ——
+// 想让页面只有「卸载」没有「重启」的部署是存在的（见 config.Uninstaller）。
 func (s *Server) uninstaller() (config.Uninstaller, bool) {
-	if s.cfg.Restarter == nil {
-		return nil, false
-	}
-	u, ok := s.cfg.Restarter.(config.Uninstaller)
-	return u, ok
+	u := s.cfg.Uninstaller
+	return u, u != nil
 }
 
 // canUninstall 表示这次部署要不要在页面上露出「卸载」。
 //
-// 下发标志的地方（页面外壳、登录响应）都走它，别各自写一遍类型断言 ——
+// 下发标志的地方（页面外壳、登录响应）都走它，别各自判一遍 ——
 // 两处判断一旦走岔，就会出现「按钮显示了但接口 404」这种最难查的组合。
 func (s *Server) canUninstall() bool {
 	_, ok := s.uninstaller()
@@ -40,10 +36,10 @@ func (s *Server) canUninstall() bool {
 //
 //	POST /fs/uninstall
 //
-// 「卸载具体做什么」**不在这里** —— 由调用方通过实现了 config.Uninstaller
-// 的 Restarter 注入。库自己**不删任何东西**：删二进制、注销 systemd 单元、
-// 清配置目录、通知编排器 …… 各家不同，与升级同一个理由，怎么做由部署方
-// 按自己的威胁模型决定。
+// 「卸载具体做什么」**不在这里** —— 由调用方通过 config.Uninstaller 注入。
+// 库自己**不删任何东西**：删二进制、注销 systemd 单元、清配置目录、
+// 通知编排器 …… 各家不同，与升级同一个理由，怎么做由部署方按自己的
+// 威胁模型决定。
 //
 // 权限：只有**管理员**能用。这是本服务最不可逆的操作 —— 比升级（换掉自己的
 // 二进制）还彻底，因为它连「换回来」的机会都不留。
@@ -52,8 +48,8 @@ func (s *Server) handleUninstall(w http.ResponseWriter, r *http.Request) {
 	// 而且不必让一个没用这个功能的部署先过一遍鉴权。
 	un, ok := s.uninstaller()
 	if !ok {
-		http.Error(w, "404 Not Found: 本服务未启用卸载"+
-			"（未注入 Restarter，或它没有实现 Uninstaller）", http.StatusNotFound)
+		http.Error(w, "404 Not Found: 本服务未启用卸载（未注入 Uninstaller）",
+			http.StatusNotFound)
 		return
 	}
 	if !s.requireAdmin(w, r) {

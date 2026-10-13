@@ -7,7 +7,7 @@
 
 ## 特性
 
-**基础能力（对齐 dufs）**
+**基础能力（对齐 dufs）**Uninstaller
 
 - 静态文件服务，目录浏览支持 HTML / JSON / 纯文本三种视图
 - 上传：拖拽上传、**整目录上传（保留层级）**、表单上传、`PUT` 直传、
@@ -781,7 +781,7 @@ curl -u admin:secret -X DELETE \
 | 常规 | 站点标题、访问路径前缀、监听地址与端口、主服务目录、附加站点（增删）、上传上限、编辑上限（后五项见下） |
 | 密钥 | 上传密钥与分享链接的管理（需 `--allow-keys` 且在某目录上有写权限） |
 | 用户与权限 | 增删改账号、按路径分配只读/读写（需 `--allow-user-manage` 且为管理员） |
-| 升级、重启与卸载 | 检查并执行升级、重启、卸载服务（按实际注入的能力显示，标签名跟着变；需为管理员） |
+| 升级、重启与卸载 | 检查并执行升级、重启、卸载服务（三者独立注入，按实际可用的显示，标签名跟着变；需为管理员） |
 
 底部按钮跟着当前标签走：常规是「取消 / 保存」，用户与权限是「关闭 / 新建用户」，
 其余是「关闭」。常规页有未保存改动时，切标签或关窗会先确认一次。
@@ -1649,23 +1649,26 @@ type Restarter interface {
     Restart(ctx context.Context) error
 }
 
-// Uninstaller 是 Restarter 的可选扩展：同一个值再实现它，
-// 页面上就多一个「卸载」按钮（没有对应的 WithXxx，能力靠方法集表达）
 type Uninstaller interface {
     Uninstall(ctx context.Context) error
 }
 
 srv, _ := gofs.New(
     gofs.WithRoot("./data"),
-    gofs.WithVersion("1.4.2"),            // 服务对外报告的版本
-    gofs.WithUpgrader(myUpgrader{}),      // 不注入＝不提供在线升级
-    gofs.WithRestarter(myRestarter{}),    // 不注入＝不显示「重启」按钮
-    // 这个值还实现了 Uninstall，所以「卸载」按钮也会出现
+    gofs.WithVersion("1.4.2"),             // 服务对外报告的版本
+    gofs.WithUpgrader(myUpgrader{}),       // 不注入＝不提供在线升级
+    gofs.WithRestarter(myRestarter{}),     // 不注入＝不显示「重启」按钮
+    gofs.WithUninstaller(myUninstaller{}), // 不注入＝不显示「卸载」按钮
 )
 ```
 
-三个能力**相互独立**：只升级不重启、只重启不卸载都很常见。标签页在任一可用时
+这几个接口**相互独立**（还有 `Relistener`，见「服务设置（运行期）」）：
+只升级不重启、只重启不卸载、**只卸载不重启**都很常见。标签页在任一可用时
 出现（名字跟着实际能力走，如「升级、重启与卸载」），页内再各显各的块。
+
+⚠️ 「只卸载不重启」是刻意支持的。早先的写法是从 `Restarter` 上做类型断言
+（`cfg.Restarter.(Uninstaller)`），那样「想暴露卸载但不想暴露重启」的部署
+会被迫连「重启」按钮一起露出来 —— 所以改成了单独的注入点。
 
 重启的常见实现（`RestarterFunc` 可以省掉一个只为实现接口而存在的类型）：
 
@@ -1715,10 +1718,9 @@ gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
   前端会把这段说明原样显示出来，不要退化成「升级失败：HTTP 409」。
 - **重启同样是管理员专属**（`POST /fs/restart`）。它会掐断所有进行中的上传
   与下载，未注入 `Restarter` 时接口返回 404、界面上也不显示那个按钮。
-- **卸载（`POST /fs/uninstall`）是可选能力，也是最不可逆的一个**：
-  它是从 `cfg.Restarter` 上**断言**出来的（`cfg.Restarter.(Uninstaller)`），
-  没实现就 404、按钮也不显示 —— 用类型断言而不是开关字段，就是为了让
-  「能力」与「按钮」不可能对不上。
+- **卸载（`POST /fs/uninstall`）是独立的扩展点，也是最不可逆的一个**：
+  由 `WithUninstaller` 单独注入，与 `Restarter` 无关 —— 没注入就 404、
+  按钮也不显示（免得给一个点了必然失败的按钮）。
   **gofs 自己不删任何东西**：删二进制、注销 systemd 单元、清配置目录
   （`keys.json` / `users.json` / `settings.json`）、通知编排器，各部署不同，
   与升级同一个理由 —— 这种事该由部署方按自己的威胁模型决定。
@@ -1787,9 +1789,9 @@ go build -o /tmp/gofs-restart-demo ./examples/restart
 
 同样**不要用 `go run`**：`os.Executable()` 会拿到临时文件，重执行它没有意义。
 
-`examples/restart/` 同时也演示**卸载**：它注入的值是一个同时实现了
-`Restart` 与 `Uninstall` 的小结构体（`gofs.RestarterFunc` 只包一个函数，
-表达不了第二个动作），所以页面上会同时出现「重启」与「卸载」两个按钮。
+`examples/restart/` 同时也演示**卸载**：它在 `WithRestarter` 之外多注入了
+一个 `WithUninstaller`，所以页面上会同时出现「重启」与「卸载」两个按钮。
+两个各用各的函数适配器（`RestarterFunc` / `UninstallFunc`），互不牵连。
 
 ⚠️ 示例的卸载**刻意不删你的 gofs 二进制** —— 那是一个演示程序不该做的事
 （你会发现自己刚 `go build` 出来的东西没了）。它只删自己启动时在临时目录里
@@ -2149,6 +2151,8 @@ gofs/
 │       ├── handler_extract.go   在线解压（SSE）
 │       ├── handler_upgrade.go   检查更新与执行升级（SSE 进度、单次串行）
 │       ├── handler_restart.go   重启服务（实际重启交给注入的 Restarter）
+│       ├── handler_uninstall.go 卸载服务（实际卸载交给注入的 Uninstaller）
+│       ├── runlock.go           「同一时刻只允许一次」的闸门（升级 / 卸载共用）
 │       ├── log.go               日志
 │       └── server_test.go       集成测试
 ├── assets/                      内嵌前端（原生 HTML/CSS/JS，无框架）

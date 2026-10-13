@@ -12,9 +12,11 @@ import (
 	"github.com/xxl6097/gofs/internal/config"
 )
 
-// fakeUninstaller 同时实现 Restarter 与 Uninstaller —— 「两个都要」的部署形态。
+// fakeUninstaller 是卸载实现的替身。
+//
+// 它**只**实现 Uninstaller —— 卸载不从 Restarter 上断言，所以这是合法的
+// 注入值；「能卸载但不能重启」也正是独立扩展点要支持的部署。
 type fakeUninstaller struct {
-	restarts    int
 	uninstalls  int
 	uninstallEr error
 	// started / release 用来把卸载卡住，测单飞闸门（照 upgrade_lock_test 的写法）。
@@ -23,11 +25,6 @@ type fakeUninstaller struct {
 	started     chan struct{}
 	startedOnce sync.Once
 	release     chan struct{}
-}
-
-func (f *fakeUninstaller) Restart(context.Context) error {
-	f.restarts++
-	return nil
 }
 
 func (f *fakeUninstaller) Uninstall(context.Context) error {
@@ -41,12 +38,13 @@ func (f *fakeUninstaller) Uninstall(context.Context) error {
 	return f.uninstallEr
 }
 
-// uninstallServer 造一个注入了 fakeUninstaller 的实例。
-func uninstallServer(t *testing.T, r config.Restarter) (*Server, *fakeUninstaller) {
+// uninstallServer 造一个注入了卸载实现的实例。
+// r 为 nil 表示这个部署不提供卸载。
+func uninstallServer(t *testing.T, u config.Uninstaller) (*Server, *fakeUninstaller) {
 	t.Helper()
-	fu, _ := r.(*fakeUninstaller)
+	fu, _ := u.(*fakeUninstaller)
 	cfg := testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw", "-a", "guest:g@/:r")
-	cfg.Restarter = r
+	cfg.Uninstaller = u
 	return newTestServer(t, cfg), fu
 }
 
@@ -81,31 +79,59 @@ func TestUninstallInvokesImplementation(t *testing.T) {
 	if fu.uninstalls != 1 {
 		t.Errorf("实现被调了 %d 次，期望 1", fu.uninstalls)
 	}
-	if fu.restarts != 0 {
-		t.Errorf("卸载不该顺带重启（Restart 被调了 %d 次）", fu.restarts)
-	}
 }
 
-// TestUninstallDisabledWhenNotImplemented 是这次改动的关键契约：
-// 只有 Restarter **没有**实现 Uninstaller 时，接口必须 404、按钮也不显示。
+// TestUninstallIndependentOfRestarter 钉住「卸载是独立扩展点」这条设计。
 //
-// 用类型断言而不是一个开关字段，就是为了让「能力」和「按钮」不可能对不上。
-func TestUninstallDisabledWhenNotImplemented(t *testing.T) {
-	// ① 完全没注入 Restarter。
-	s, _ := uninstallServer(t, nil)
-	if got := do(t, s, http.MethodPost, "/fs/uninstall", nil, adminSettingsHdr()); got.code != http.StatusNotFound {
-		t.Errorf("未注入时返回 %d，期望 404：%s", got.code, got.body)
+// 三种组合都要成立，它们在真实部署里都常见：
+//   - 只卸载不重启 —— 独立注入之前根本做不到（能力绑在 Restarter 上，
+//     想卸载就必须连「重启」按钮一起露出来）；
+//   - 只重启不卸载 —— 绝大多数部署；
+//   - 两个都没有 —— /fs/uninstall 必须 404、界面不显示按钮。
+func TestUninstallIndependentOfRestarter(t *testing.T) {
+	hdr := adminSettingsHdr()
+
+	// ① 只卸载不重启。
+	s, _ := uninstallServer(t, &fakeUninstaller{})
+	if got := do(t, s, http.MethodPost, "/fs/uninstall", nil, hdr); got.code != http.StatusOK {
+		t.Errorf("只注入卸载时 /fs/uninstall 返回 %d，期望 200：%s", got.code, got.body)
+	}
+	// 重启仍然是「未启用」—— 不该被卸载的注入顺带点亮。
+	if got := do(t, s, http.MethodPost, "/fs/restart", nil, hdr); got.code != http.StatusNotFound {
+		t.Errorf("没注入 Restarter，重启却返回 %d，期望 404", got.code)
+	}
+	page := do(t, s, http.MethodGet, "/", nil,
+		map[string]string{"Authorization": basicAuth("boss", "pw"), "Accept": "text/html"})
+	if !strings.Contains(page.body, `"allow_uninstall":true`) {
+		t.Errorf("页面没下发 allow_uninstall：%.300s", page.body)
+	}
+	if !strings.Contains(page.body, `"allow_restart":false`) {
+		t.Errorf("页面不该下发 allow_restart=true：%.300s", page.body)
 	}
 
-	// ② 注入了 Restarter，但它没有实现 Uninstaller（这就是绝大多数部署）。
-	s2, _ := uninstallServer(t, &fakeRestarter{})
-	got := do(t, s2, http.MethodPost, "/fs/uninstall", nil, adminSettingsHdr())
-	if got.code != http.StatusNotFound {
-		t.Errorf("Restarter 未实现 Uninstaller 时返回 %d，期望 404：%s", got.code, got.body)
+	// ② 只重启不卸载（最常见的部署）。
+	s2, _ := uninstallServer(t, nil)
+	s2.cfg.Restarter = &fakeRestarter{}
+	if got := do(t, s2, http.MethodPost, "/fs/uninstall", nil, hdr); got.code != http.StatusNotFound {
+		t.Errorf("只注入重启时 /fs/uninstall 返回 %d，期望 404：%s", got.code, got.body)
 	}
-	// 文案要点明两种可能，否则使用者会以为「重启能用，卸载凭什么不行」。
-	if !strings.Contains(got.body, "Uninstaller") {
-		t.Errorf("404 文案没有点明缺的是 Uninstaller：%s", got.body)
+	page2 := do(t, s2, http.MethodGet, "/", nil,
+		map[string]string{"Authorization": basicAuth("boss", "pw"), "Accept": "text/html"})
+	if !strings.Contains(page2.body, `"allow_restart":true`) {
+		t.Errorf("重启能力不该被卸载的缺失影响：%.300s", page2.body)
+	}
+	if !strings.Contains(page2.body, `"allow_uninstall":false`) {
+		t.Errorf("没注入卸载时页面应下发 false：%.300s", page2.body)
+	}
+
+	// ③ 两个都没注入。
+	s3, _ := uninstallServer(t, nil)
+	got := do(t, s3, http.MethodPost, "/fs/uninstall", nil, hdr)
+	if got.code != http.StatusNotFound {
+		t.Errorf("都没注入时返回 %d，期望 404：%s", got.code, got.body)
+	}
+	if !strings.Contains(got.body, "未注入 Uninstaller") {
+		t.Errorf("404 文案要点明缺的是 Uninstaller：%s", got.body)
 	}
 }
 
@@ -182,35 +208,22 @@ func TestUninstallSingleFlight(t *testing.T) {
 	}
 }
 
-// TestPageAdvertisesUninstall 确认页面外壳与登录响应都带上了开关。
+// TestPageAdvertisesUninstall 确认登录响应也带上了开关。
 //
-// 两个地方都要有：页面外壳是直接访问时用的，登录响应是「从登录框进来」时
-// 补数据用的 —— 漏了后者，用户得手动刷新一次才看得到按钮。
+// 页面外壳那条在 TestUninstallIndependentOfRestarter 里已经覆盖；这里专测
+// 登录响应 —— 它是「从登录框进来」时补数据用的，漏了的话用户得手动刷新
+// 一次才看得到按钮（allow_restart 当初就是这么漏的）。
 func TestPageAdvertisesUninstall(t *testing.T) {
 	s, _ := uninstallServer(t, &fakeUninstaller{})
-	hdr := map[string]string{"Authorization": basicAuth("boss", "pw"), "Accept": "text/html"}
-
-	page := do(t, s, http.MethodGet, "/", nil, hdr)
-	for _, want := range []string{`"allow_restart":true`, `"allow_uninstall":true`} {
-		if !strings.Contains(page.body, want) {
-			t.Errorf("页面没带 %s：%.300s", want, page.body)
-		}
-	}
 
 	auth := do(t, s, http.MethodGet, "/fs/auth", nil, adminSettingsHdr())
-	for _, want := range []string{`"allow_restart":true`, `"allow_uninstall":true`} {
-		if !strings.Contains(auth.body, want) {
-			t.Errorf("登录响应没带 %s：%s", want, auth.body)
-		}
+	if !strings.Contains(auth.body, `"allow_uninstall":true`) {
+		t.Errorf("登录响应没带 allow_uninstall：%s", auth.body)
 	}
 
-	// 没实现 Uninstaller 的部署：开关为 false（按钮就不显示）。
-	s2, _ := uninstallServer(t, &fakeRestarter{})
-	page2 := do(t, s2, http.MethodGet, "/", nil, hdr)
-	if !strings.Contains(page2.body, `"allow_uninstall":false`) {
-		t.Errorf("未实现卸载时页面应下发 false：%.300s", page2.body)
-	}
-	if !strings.Contains(page2.body, `"allow_restart":true`) {
-		t.Errorf("重启能力不该被卸载的缺失影响：%.300s", page2.body)
+	s2, _ := uninstallServer(t, nil)
+	auth2 := do(t, s2, http.MethodGet, "/fs/auth", nil, adminSettingsHdr())
+	if !strings.Contains(auth2.body, `"allow_uninstall":false`) {
+		t.Errorf("未注入卸载时登录响应应下发 false：%s", auth2.body)
 	}
 }
