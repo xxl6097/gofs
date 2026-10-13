@@ -52,15 +52,6 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 }
 
 func Run(ctx context.Context, stdout, stderr io.Writer) error {
-	//cfg := Default()
-	//cfg.Port = 5000
-	//user := "admin"
-	//pass := "admin123"
-	//path := "."
-	//cfg.AuthRules = []string{fmt.Sprintf("%s:%s@%s:rw", user, pass, path)}
-	//cfg.AllowAll = true
-	//cfg.Compress = "low"
-
 	srv, err := New(WithRoot("."),
 		WithPort(5000),
 		WithAuth("admin:admin123@/:rw"),
@@ -97,13 +88,6 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 }
 
 func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, restarter Restarter, stdout, stderr io.Writer) error {
-	//srv, err := New(WithRoot(cfg.ServePath),
-	//	WithPort(cfg.Port),
-	//	WithAuth(cfg.AuthRules...),
-	//	WithAllowAll(),
-	//	WithTune(func(c *Config) { // 逃生舱：改任意字段
-	//		c.MaxConcurrent = 128
-	//	}))
 	srv, err := New(WithConfig(cfg),
 		WithUpgrader(uploader),
 		WithRestarter(restarter))

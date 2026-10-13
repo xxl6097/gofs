@@ -16,7 +16,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := gofs.Run(ctx, os.Stdout, os.Stderr); err != nil {
+	//if err := gofs.Run(ctx, os.Stdout, os.Stderr); err != nil {
+	//	if errors.Is(err, gofs.ErrHelp) {
+	//		os.Exit(0)
+	//	}
+	//	fmt.Fprintf(os.Stderr, "gofs: %v\n", err)
+	//	os.Exit(1)
+	//}
+
+	cfg := gofs.Default()
+
+	cfg.Port = 5000
+	user := "admin"
+	pass := "admin123"
+	path := "."
+	cfg.ServePath = path
+	// 规则里 @ 后面是 URL 路径（相对服务根目录），不是磁盘路径。
+	// 填 path 等于只授权 URL /path，根目录反而无权限，列目录会 401。
+	cfg.AuthRules = []string{fmt.Sprintf("%s:%s@/:rw", user, pass)}
+	cfg.AllowAll = true
+	cfg.ServePath = path
+
+	if err := gofs.RunCfg(ctx, cfg, nil, nil, os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, gofs.ErrHelp) {
 			os.Exit(0)
 		}
