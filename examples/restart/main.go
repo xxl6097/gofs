@@ -10,7 +10,7 @@
 //	/tmp/gofs-restart-demo -root ./data -port 8080
 //
 //	# 打开 http://127.0.0.1:8080 ，用 admin / admin123 登录，
-//	# 进「设置 → 升级与重启」，点「重启」。
+//	# 进「设置 → 重启」，点「重启」。
 //
 //	# 另一种重启方式：退出后交给 supervisor 拉起（见下面 -mode signal 的说明）
 //	/tmp/gofs-restart-demo -mode signal ...
@@ -40,7 +40,7 @@ func main() {
 		"重启方式：exec＝原地重新执行自己；signal＝给自己发 SIGTERM，交给 supervisor 拉起")
 	flag.Parse()
 
-	// ★ 关键的一行：注入之后页面上才会出现「升级与重启 → 重启」。
+	// ★ 关键的一行：注入之后页面上才会出现「设置 → 重启」那一页。
 	// 不注入的话接口返回 404，按钮也不显示 —— 免得给一个点了必然失败的按钮。
 	restarter, err := restarterFor(*mode)
 	if err != nil {
