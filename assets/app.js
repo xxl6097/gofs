@@ -1707,6 +1707,16 @@
     });
   }
 
+  // syncToolbarOffset 把顶栏的实际高度写进 --topbar-h，供吸顶工具栏定位。
+  //
+  // 不能写死数值：顶栏在窄屏会 flex-wrap 换行、高度说变就变，写死就会错位。
+  // 只在需要吸顶时调用（见 syncSelection），平时不做无谓的 DOM 读取。
+  function syncToolbarOffset() {
+    var tb = document.querySelector('.topbar');
+    if (!tb) return;
+    document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+  }
+
   function syncSelection() {
     var listed = state.entries.length;
     var n = state.selected.size;
@@ -1714,6 +1724,10 @@
     // 被截断时用户看到的就只有这些，全选自然也只能覆盖这些。
     $('check-all').checked = listed > 0 && n >= listed;
     $('check-all').indeterminate = n > 0 && n < listed;
+
+    // 多选时把工具栏吸在顶栏下方。先量高度再挂类，保证第一次吸顶就定位正确。
+    $('toolbar').classList.toggle('stuck', n > 0);
+    if (n > 0) syncToolbarOffset();
 
     var stat = $('stat');
     stat.textContent = statText();
@@ -2537,6 +2551,20 @@
 
   // ---------------------------------------------------------------- 重命名 / 移动
 
+  // selectBaseName 只选中输入框里的「主名」，把扩展名留在选区之外。
+  //
+  // 改 "report.txt" 时，用户绝大多数时候只想改 "report"：选中整串的话，
+  // 第一次键入就把 ".txt" 一起抹掉了。这也是资源管理器 / Finder 的行为。
+  // 无扩展名（README）和以点开头的隐藏文件（.gitignore）不做截断，整体选中 ——
+  // 对它们来说整个名字就是主名，何况点前为空会选出 0 长度。
+  function selectBaseName(input) {
+    var v = input.value;
+    var dot = v.lastIndexOf('.');
+    var end = dot > 0 ? dot : v.length;
+    input.focus();
+    input.setSelectionRange(0, end);
+  }
+
   function openRenameDialog(entry) {
     var input = document.createElement('input');
     input.type = 'text';
@@ -2561,6 +2589,11 @@
         { label: '确定', cls: 'primary', onClick: function () { submit(); } }
       ])
     });
+
+    // openModal 默认全选输入内容；重命名这里收窄成只选主名。
+    // 必须放在 openModal 之后 —— 它的自动 focus/select 是同步执行的，
+    // 晚于它的 setSelectionRange 才会覆盖掉那次全选。
+    selectBaseName(input);
 
     async function submit() {
       var name = input.value.trim();
@@ -3647,6 +3680,10 @@
       // 操作列的收起与否取决于实际宽度，所以每次改宽都要重算 ——
       // 不能只在跨过断点时算（拖动窗口时列宽一直在变）。
       collapseWrappedOps();
+      // 顶栏换行会改变高度，吸顶偏移跟着更新；这条必须在下面的断点
+      // 提前 return 之前，否则「没跨断点但顶栏变高了」时偏移就卡在旧值。
+      // 没吸顶时不用量，省掉拖动窗口时的无谓 DOM 读取。
+      if ($('toolbar').classList.contains('stuck')) syncToolbarOffset();
       var now = isNarrow();
       if (now === wasNarrow) return;
       wasNarrow = now;

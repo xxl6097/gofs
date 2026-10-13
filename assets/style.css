@@ -594,6 +594,21 @@ svg {
   flex-wrap: wrap;
 }
 
+/* 多选后工具栏吸顶：长列表里滚到下面时，「全选 / 打包所选 / 移动所选 /
+   删除所选」仍然够得着，不必为了点一下先滚回顶部。
+   顶栏本身是 sticky top:0，所以这里用 JS 量出的 --topbar-h 作吸顶偏移，
+   正好贴在顶栏下沿、不互相盖住（z-index 25 < 顶栏 30）。
+   只在有选中时挂这个类 —— 没选中就没有这些操作，常驻一条不动的横条反而碍事。 */
+.toolbar.stuck {
+  position: sticky;
+  top: var(--topbar-h, 0px);
+  z-index: 25;
+  padding-top: 8px;
+  background: var(--bg);
+  /* 吸顶后会盖住滚上来的表格行，用下边界 + 一层淡影把层次分开。 */
+  box-shadow: 0 1px 0 var(--border), 0 8px 12px -10px rgba(0, 0, 0, .4);
+}
+
 .toolbar-left, .toolbar-right {
   display: flex;
   align-items: center;
