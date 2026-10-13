@@ -45,7 +45,7 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(stderr, "gofs: %v\n", err)
 		}
-	case <-srv.done:
+	case <-srv.Done:
 		// 服务自行停止（多半是 Serve 出错），错误由下面的 Wait 返回。
 	}
 	return srv.Wait()
@@ -81,7 +81,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(stderr, "gofs: %v\n", err)
 		}
-	case <-srv.done:
+	case <-srv.Done:
 		// 服务自行停止（多半是 Serve 出错），错误由下面的 Wait 返回。
 	}
 	return srv.Wait()
@@ -111,7 +111,7 @@ func RunCfg(ctx context.Context, cfg *Config, uploader Upgrader, restarter Resta
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			fmt.Fprintf(stderr, "gofs: %v\n", err)
 		}
-	case <-srv.done:
+	case <-srv.Done:
 		// 服务自行停止（多半是 Serve 出错），错误由下面的 Wait 返回。
 	}
 	return srv.Wait()

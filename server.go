@@ -43,8 +43,8 @@ type Server struct {
 	stopping bool
 	closed   bool
 
-	// done 在 Serve 返回后关闭，serveErr 存放其返回值。
-	done     chan struct{}
+	// Done 在 Serve 返回后关闭，serveErr 存放其返回值。
+	Done     chan struct{}
 	serveErr error
 }
 
@@ -81,7 +81,7 @@ func New(opts ...Option) (*Server, error) {
 	return &Server{
 		cfg:   cfg,
 		inner: inner,
-		done:  make(chan struct{}),
+		Done:  make(chan struct{}),
 	}, nil
 }
 
@@ -175,7 +175,7 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// serve 在后台跑 Serve，结束后记录错误并关闭 done。
+// serve 在后台跑 Serve，结束后记录错误并关闭 Done。
 func (s *Server) serve(ln net.Listener) {
 	var err error
 	if s.cfg.TLSCert != "" {
@@ -190,7 +190,7 @@ func (s *Server) serve(ln net.Listener) {
 	s.mu.Lock()
 	s.serveErr = err
 	s.mu.Unlock()
-	close(s.done)
+	close(s.Done)
 }
 
 // listen 按配置建立监听。调用时须持有 s.mu。
@@ -268,7 +268,7 @@ func (s *Server) Wait() error {
 	if !started {
 		return nil
 	}
-	<-s.done
+	<-s.Done
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.serveErr
@@ -307,7 +307,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
-	case <-s.done:
+	case <-s.Done:
 	}
 	return s.Wait()
 }
@@ -351,7 +351,7 @@ func (s *Server) Close() error {
 		_ = srv.Close()
 	}
 	if started {
-		<-s.done
+		<-s.Done
 	} else if ln != nil {
 		_ = ln.Close()
 	}
