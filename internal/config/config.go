@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,27 +30,65 @@ var dateLayoutProbe = time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC)
 // 历史：早期版本直接用了 os.UserConfigDir() 的返回值（少了 gofs 这一层）。
 // 旧位置的文件由 MigrateLegacyDefaults 在启动时搬过来。
 func DefaultKeyDir() string {
-	base, err := os.UserConfigDir()
-	if err != nil || base == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return ""
-		}
-		base = filepath.Join(home, ".config")
+	base := configBaseDir()
+	if base == "" {
+		return ""
 	}
 	return filepath.Join(base, "gofs")
 }
 
+// configBaseDir 返回「用户配置目录」这一层（还没有拼 gofs）。
+//
+// 平台惯例由 os.UserConfigDir() 决定；它在**环境变量拿不到**时会失败，
+// 这时退回账号的真实家目录 + .config —— 见 homeDir 的注释，那是 systemd
+// 系统级服务的常见情形。
+func configBaseDir() string {
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return dir
+	}
+	if h := homeDir(); h != "" {
+		return filepath.Join(h, ".config")
+	}
+	return ""
+}
+
+// homeDir 返回当前账号的家目录。
+//
+// 先看 $HOME；拿不到就查账号数据库（/etc/passwd、Directory Services），
+// 那条路不依赖环境变量。为什么需要它：**systemd 的系统级 service 默认不设
+// HOME**，os.UserHomeDir() 会直接失败。放任下去 DefaultKeyDir() 返回空串，
+// filepath.Join("", "keys.json") 就是**相对路径** —— 文件会静默写进服务的
+// WorkingDirectory（常见是 /），而 banner 上只显示一个 `keys.json`，
+// 使用者根本看不出它去了哪。
+//
+// ⚠️ 这条退路给的是 <家目录>/.config，在 macOS 上不是惯例位置
+// （那边是 Library/Application Support）。但那只会发生在 HOME 也丢了的
+// 情况下 —— 那时能有个绝对路径、且每次一致，比一个会到处飘的相对路径好。
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	return ""
+}
+
 // LegacyKeyDir 返回加上 gofs 这一层之前用的目录，仅供迁移使用。
 //
-// 取不到用户配置目录时返回空串：那种情况下新旧目录本来就是同一个
-// （都回落到 ~/.config/gofs），没有东西可搬。
+// 它要**精确复刻旧版的计算方式**，否则迁移会找错地方：
+//   - UserConfigDir() 可用 → 就是它（少一层 gofs，可搬）；
+//   - 不可用但能拿到家目录 → 旧版当年拼的是 <家>/.config/gofs（已经带
+//     gofs），与新默认位置相同，于是没有东西可搬；
+//   - 都不行 → 空串（旧版那时给的是相对路径，无处可查，不猜）。
 func LegacyKeyDir() string {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		return ""
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return dir
 	}
-	return dir
+	if h := homeDir(); h != "" {
+		return filepath.Join(h, ".config", "gofs")
+	}
+	return ""
 }
 
 // MigrateLegacyDefaults 把上一版留在旧目录里的文件搬到新的默认位置。

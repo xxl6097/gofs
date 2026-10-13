@@ -808,7 +808,20 @@ curl -u admin:secret -X DELETE \
 ⚠️ **升级提示**：早期版本少了 `gofs/` 这一层，文件直接躺在用户配置目录里。
 现在启动时会**自动把它们搬到新位置**（只动默认路径、不覆盖已有文件、可重复
 调用）—— 既有密钥与用户表不会丢。若你显式指定过 `--key-file` 之类，那些
-路径不受影响，也不会被搬。
+路径不受影响，也不会被搬。banner 里会打印实际生效的路径，照它看就行。
+
+⚠️ **以 systemd 服务运行时**：系统级 unit 默认**不设 `HOME`**，而两个
+`os.User*Dir()` 都依赖它。此时 gofs 会退回**账号的真实家目录**（查
+`/etc/passwd`，不依赖环境变量），所以仍然落在 `~root/.config/gofs/` 这种
+绝对路径上 —— 实测过，不会跑到服务的 `WorkingDirectory` 里去。要更明确的话，
+在 unit 里写一行即可：
+
+```ini
+[Service]
+User=root
+Environment=HOME=/root
+Environment=XDG_CONFIG_HOME=/root/.config    # 可选，优先级高于 HOME
+```
 
 ### 站点标题
 

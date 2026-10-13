@@ -175,3 +175,39 @@ func TestDefaultPathsIncludeAppDir(t *testing.T) {
 		}
 	}
 }
+
+// TestHomeUnsetFallsBackToAccountHome 是给 systemd 那类场景上的一道保险。
+//
+// systemd 的**系统级** service 默认不设 HOME。那时 os.UserConfigDir() 与
+// os.UserHomeDir() 都会失败，若不兜底，filepath.Join("", "keys.json") 就是
+// **相对路径** —— 文件会静默写进服务的 WorkingDirectory（常见是 /），而
+// banner 上只显示一个 `keys.json`，使用者看不出它去了哪。
+//
+// 现在退回账号的真实家目录（查 /etc/passwd，不依赖环境变量），所以拿到的
+// 必须是**绝对路径**。
+func TestHomeUnsetFallsBackToAccountHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	for _, f := range []string{DefaultKeyFile(), DefaultUserFile(), DefaultSettingsFile()} {
+		if !filepath.IsAbs(f) {
+			t.Errorf("HOME 未设置时应当回退到账号家目录（绝对路径），实际 %q", f)
+		}
+		if filepath.Base(filepath.Dir(f)) != "gofs" {
+			t.Errorf("%s 不在 gofs/ 之下", f)
+		}
+	}
+	if !filepath.IsAbs(DefaultKeyDir()) {
+		t.Errorf("DefaultKeyDir 应当是绝对路径，实际 %q", DefaultKeyDir())
+	}
+
+	// 旧目录这时与新的位置相同（旧版当年也拼了 .config/gofs），
+	// 于是迁移无事可做 —— 不能反过来把新位置当成旧位置去搬。
+	if LegacyKeyDir() != DefaultKeyDir() {
+		t.Errorf("HOME 未设置时新旧目录应当相同：legacy=%q new=%q",
+			LegacyKeyDir(), DefaultKeyDir())
+	}
+	if err := MigrateLegacyDefaults(Defaults()); err != nil {
+		t.Errorf("迁移不该报错: %v", err)
+	}
+}
