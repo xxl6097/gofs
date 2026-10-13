@@ -3112,6 +3112,40 @@ func TestLogSanitizesControlChars(t *testing.T) {
 	}
 }
 
+// TestLogRequestTimeAndVarPrefixes 覆盖 $request_time，并守住一个容易踩的坑：
+// $request 是 $request_method / $request_uri / $request_time 的前缀，
+// 变量替换必须按「最长匹配」而不是「参数顺序」来，否则 $request_method
+// 会被替换成 "$request" + 残留的 "_method"。
+func TestLogRequestTimeAndVarPrefixes(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPut, "/up.bin", nil)
+	var buf bytes.Buffer
+	lg := &Logger{
+		out:     &buf,
+		enabled: true,
+		format:  `$request_method|$request_uri|$request_time|$request`,
+	}
+	// 伪造一个「1.5 秒前开始」的请求，让耗时可预期。
+	lg.Log(r, 201, "", time.Now().Add(-1500*time.Millisecond))
+
+	line := buf.String()
+	parts := strings.Split(strings.TrimSpace(line), "|")
+	if len(parts) != 4 {
+		t.Fatalf("字段数 = %d, 期望 4：%q", len(parts), line)
+	}
+	if parts[0] != "PUT" {
+		t.Errorf("$request_method = %q, 期望 PUT（被 $request 抢先匹配了）", parts[0])
+	}
+	if parts[1] != "/up.bin" {
+		t.Errorf("$request_uri = %q, 期望 /up.bin", parts[1])
+	}
+	if !strings.HasPrefix(parts[2], "1.5") {
+		t.Errorf("$request_time = %q, 期望约 1.500", parts[2])
+	}
+	if parts[3] != "PUT /up.bin HTTP/1.1" {
+		t.Errorf("$request = %q", parts[3])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 运行期设置：切换服务根目录、调整单文件上传上限
 // ---------------------------------------------------------------------------

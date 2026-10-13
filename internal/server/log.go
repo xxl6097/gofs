@@ -66,6 +66,10 @@ func (l *Logger) Log(r *http.Request, status int, user string, start time.Time) 
 }
 
 // render 做日志格式的变量替换。
+//
+// ⚠️ 变量顺序有讲究：strings.Replacer 在同一位置**按参数顺序**取第一个命中的，
+// 不是最长匹配。所以所有 $request_* 都必须排在 $request 之前 —— 否则
+// $request_method 会先被 $request 吃掉，渲染成 "GET /a HTTP/1.1_method"。
 func (l *Logger) render(r *http.Request, status int, user string, start time.Time) string {
 	repl := strings.NewReplacer(
 		"$time_iso8601", start.Format(time.RFC3339),
@@ -73,9 +77,14 @@ func (l *Logger) render(r *http.Request, status int, user string, start time.Tim
 		"$log_level", levelFor(status),
 		"$remote_addr", clientIP(r),
 		"$remote_user", user,
-		"$request", fmt.Sprintf("%s %s %s", r.Method, r.URL.RequestURI(), r.Proto),
 		"$request_method", r.Method,
 		"$request_uri", r.URL.RequestURI(),
+		// $request_time 与 nginx 同名同义：从开始处理到响应完成的秒数，保留毫秒。
+		// 上传排查时它就派上用场 —— 服务端真正花了多久，和客户端观察到的时间
+		// 一比，就能立刻分清「慢在服务端」还是「慢在链路/客户端」。
+		"$request_time", fmt.Sprintf("%.3f", time.Since(start).Seconds()),
+		// $request 必须排在最后：它是上面几个变量的前缀。
+		"$request", fmt.Sprintf("%s %s %s", r.Method, r.URL.RequestURI(), r.Proto),
 		"$status", fmt.Sprintf("%d", status),
 	)
 	out := repl.Replace(l.format)
