@@ -84,6 +84,12 @@ type (
 	//
 	// 未注入时相关接口返回 404，界面上也不显示「重启」按钮。
 	Restarter = config.Restarter
+	// Uninstaller 是 Restarter 的**可选扩展**：同一个值再实现它，
+	// 页面上就多一个「卸载」按钮（未实现时那一块不显示）。
+	//
+	// 能力靠**值的方法集**表达，所以没有对应的 WithUninstaller ——
+	// 用 WithRestarter 注入一个同时实现了两个方法的类型即可。
+	Uninstaller = config.Uninstaller
 	// Relistener 由调用方实现「把服务换到另一个监听地址上」（热重绑）。
 	//
 	// gofs 自己 Start 时会自动注入内置实现；以库方式嵌进别人的 HTTP 服务、
@@ -112,6 +118,10 @@ func WithUpgrader(u Upgrader) Option {
 // 不注入（默认）＝ 这个部署不提供重启：界面上不显示「重启」按钮，
 // /fs/restart 返回 404。与 WithUpgrader 相互独立。
 //
+// 注入的值如果**还实现了 Uninstaller**，页面上会多一个「卸载」按钮，
+// /fs/uninstall 也随之可用。只实现 Restarter 的部署拿不到那个按钮 ——
+// 能力由值的方法集决定，不需要额外开关。
+//
 // 典型写法是原地重执行自己，或给自己发 SIGTERM 交给 supervisor：
 //
 //	gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
@@ -131,10 +141,25 @@ func WithRelistener(r Relistener) Option {
 }
 
 // RestarterFunc 让普通函数满足 Restarter，省掉一个只为实现接口而存在的类型。
+//
+// 它**只**表达重启。既要重启又要卸载时，写一个带两个方法的类型
+// （见 examples/restart）—— 「这个值的方法集」就是能力声明，
+// 库据此决定页面上出现哪几个按钮。
 type RestarterFunc func(ctx context.Context) error
 
 // Restart 实现 Restarter。
 func (f RestarterFunc) Restart(ctx context.Context) error { return f(ctx) }
+
+// UninstallFunc 让普通函数满足 Uninstaller。
+//
+// ⚠️ 单独用它是没意义的：卸载能力是从 `cfg.Restarter` 上断言出来的
+// （见 WithRestarter）。它存在的用途是嵌进你自己的 Restarter 实现里，
+// 例如 `type mySvc struct{ gofs.UninstallFunc }` —— 这样一个类型就能
+// 同时满足两个接口，而不必手写 Uninstall 那个转发方法。
+type UninstallFunc func(ctx context.Context) error
+
+// Uninstall 实现 Uninstaller。
+func (f UninstallFunc) Uninstall(ctx context.Context) error { return f(ctx) }
 
 // WithVersion 指定本服务对外报告的版本号。
 //

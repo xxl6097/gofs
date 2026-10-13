@@ -163,9 +163,12 @@ func build(o buildOptions) (*gofs.Server, error) {
 		gofs.WithPort(o.port),
 		gofs.WithPermissions(perms),
 		gofs.WithAuth(rules...),
-		// 密钥与用户表放内存，别碰开发者本机的真实配置。
+		// 密钥 / 用户表 / 运行期设置都放内存，别碰开发者本机的真实配置。
+		// 少了 settings 那一项的话，示例会读到（并写坏）你真实环境里存的
+		// 站点标题、访问前缀、监听地址 —— 表现为「示例一启动就在 /files 下」。
 		gofs.WithKeyFile(""),
 		gofs.WithUserFile(""),
+		gofs.WithSettingsFile(""),
 		gofs.WithUploadDateLayout(""), // 示例里不要自动归档，免得文件跑进日期目录
 	}
 

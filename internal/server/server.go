@@ -162,6 +162,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/fs/settings", s.handleSettings)
 	mux.HandleFunc("/fs/upgrade", s.handleUpgrade)
 	mux.HandleFunc("/fs/restart", s.handleRestart)
+	// 卸载挂在 Restarter 上：只有那个值还实现了 Uninstaller 时才可用。
+	mux.HandleFunc("/fs/uninstall", s.handleUninstall)
 	mux.HandleFunc("/fs/users", s.handleUsers)
 	mux.HandleFunc("/fs/extract", s.handleExtract)
 	mux.HandleFunc("/fs/text", s.handleText)

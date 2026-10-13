@@ -70,9 +70,14 @@
     if (typeof info.allow_users === 'boolean') DATA.allow_users = info.allow_users;
     if (typeof info.upload_max_size === 'number') DATA.upload_max_size = info.upload_max_size;
     if (typeof info.edit_max_size === 'number') DATA.edit_max_size = info.edit_max_size;
-    // 同上：「升级与重启」的开关只在登录响应里补齐，
+    // 同上：升级 / 重启 / 卸载的开关只在登录响应里补齐，
     // 未登录外壳里是空的（renderAuthGate 不下发任何数据）。
+    //
+    // ⚠️ 三个都要合并。这里原先漏了 allow_restart —— 后果是从登录框进来的
+    // 页面看不到「重启」入口，得手动刷新一次才有（服务端一直在下发，是前端没接）。
     if (typeof info.allow_upgrade === 'boolean') DATA.allow_upgrade = info.allow_upgrade;
+    if (typeof info.allow_restart === 'boolean') DATA.allow_restart = info.allow_restart;
+    if (typeof info.allow_uninstall === 'boolean') DATA.allow_uninstall = info.allow_uninstall;
     // 多站点模式：站点集合是运行期可变的，登录响应里已经带了这个标记，
     // 前端一直没接 —— 不接的话从登录框进来的页面要等下次请求才知道模式。
     if (typeof info.multi_root === 'boolean') DATA.multi_root = info.multi_root;

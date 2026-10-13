@@ -21,6 +21,7 @@
   var EP = BASE + '/fs/settings';
   var EP_UPGRADE = BASE + '/fs/upgrade';
   var EP_RESTART = BASE + '/fs/restart';
+  var EP_UNINSTALL = BASE + '/fs/uninstall';
   // 重启期间要靠它判断「服务回来没有」。这个接口不需要鉴权，是故意挑的。
   var EP_HEALTH = BASE + '/fs/health';
 
@@ -870,10 +871,12 @@
 
   function buildUpgradeTab() {
     var el = document.createElement('div');
-    // 两块互相独立：注入了 Upgrader 才有「检查更新」，注入了 Restarter
-    // 才有「重启」。两个都没注入的话这个标签压根不会出现。
+    // 三块互相独立：注入了 Upgrader 才有「检查更新」，注入了 Restarter
+    // 才有「重启」，那个 Restarter 还实现了 Uninstaller 才有「卸载」。
+    // 都没注入的话这个标签压根不会出现。
     if (G.data.allow_upgrade) el.appendChild(buildUpgradeBox());
     if (G.data.allow_restart) el.appendChild(buildRestartBox());
+    if (G.data.allow_uninstall) el.appendChild(buildUninstallBox());
     return { el: el, footerItems: [] };
   }
 
@@ -1150,6 +1153,123 @@
     return box;
   }
 
+  // buildUninstallBox 造出「卸载服务」那一块。
+  //
+  // 与重启最大的不同在**怎么判断成功**：重启是等它**回来**，卸载是等它**别回来**。
+  // 所以那套 60 秒「恢复了吗」的循环在这里要反过来用 —— 等满一小段时间仍
+  // 连不上，才算卸载成功；连得上反而说明没卸干净，得如实说出来。
+  //
+  // 库自己**不删任何东西**：删二进制、注销 systemd 单元、清配置目录都由
+  // 服务端的 Uninstaller 实现决定（见 config.Uninstaller）。
+  function buildUninstallBox() {
+    var box = document.createElement('div');
+    box.className = 'field upgrade-box';
+
+    var lb = document.createElement('label');
+    lb.textContent = '卸载服务';
+    box.appendChild(lb);
+
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.alignItems = 'center';
+    var btn = G.btn('卸载', 'danger', function () { askUninstall(); });
+    row.appendChild(btn);
+    box.appendChild(row);
+
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = '删掉什么由本部署的实现决定（二进制 / systemd 单元 / ' +
+      '配置目录…）；gofs 自身不删任何东西。这一步不可逆。';
+    box.appendChild(hint);
+
+    var result = document.createElement('div');
+    result.className = 'upgrade-progress';
+    result.hidden = true;
+    box.appendChild(result);
+
+    function say(text, cls) {
+      result.hidden = false;
+      result.className = 'upgrade-progress' + (cls ? ' ' + cls : '');
+      result.textContent = text;
+    }
+
+    function askUninstall() {
+      G.confirm({
+        title: '确认卸载服务？',
+        message: '这一步不可逆，服务会被移除。',
+        // 把「不会自动恢复」说在最前面：重启会自己回来，卸载不会 ——
+        // 这一点不说清楚，用户会像等重启那样干等下去。
+        detail: '卸载后本服务将被移除，页面会断开且**不会**自动恢复。' +
+          '具体删掉什么由本部署的实现决定（二进制、systemd 单元、配置目录等）。' +
+          '要恢复只能重新部署。',
+        okLabel: '卸载',
+        danger: true
+      }).then(function (ok) { if (ok) run(); });
+    }
+
+    async function run() {
+      btn.disabled = true;
+      say('正在卸载…');
+      try {
+        var res = await G.apiFetch(EP_UNINSTALL, { method: 'POST' });
+        if (!res.ok) {
+          // 能拿到完整响应，说明卸载**没有**开始（403/404/409/500），
+          // 那就是真的失败，把服务端的说明原样显示。
+          var body = (await res.text()).trim();
+          say('卸载失败：' + (body || ('HTTP ' + res.status)), 'err');
+          btn.disabled = false;
+          return;
+        }
+      } catch (e) {
+        // 连接被掐断 —— 实现方多半已经把自己删掉并退出了。这是卸载的
+        // 正常表现（响应是尽力而为），继续往下确认。
+      }
+      await waitForGone();
+    }
+
+    // waitForGone 确认服务**没有**回来。
+    //
+    // 用裸 fetch 而不是 apiFetch：health 不需要鉴权，而 apiFetch 遇到 401
+    // 会把用户弹到登录框 —— 服务都没了，弹一个登录框只会让人更糊涂。
+    async function waitForGone() {
+      // 15 秒：只是个观察窗口，不是「卸载要多久」。实现方若是异步收尾
+      // （比如交给 systemd 停服务），这里可能还是连得上 —— 那种情况
+      // 下面的分支会如实说「仍在运行」，让人去服务端确认，而不是假报成功。
+      for (var i = 0; i < 15; i++) {
+        await new Promise(function (r) { setTimeout(r, 1000); });
+        try {
+          var res = await fetch(EP_HEALTH, { cache: 'no-store' });
+          if (res.ok) {
+            say('卸载请求已受理，但服务仍在运行（可能只做了一半或还在收尾），' +
+              '请到服务端确认。', 'err');
+            btn.disabled = false;
+            return;
+          }
+        } catch (e) { /* 连不上 —— 正是我们要的结果，继续数满窗口 */ }
+      }
+      // 连不上且窗口走完：服务确实停了。
+      // 不 reload：页面已经是死的，刷新只会得到一个连接错误。
+      say('服务已停止，卸载完成。本页可以关闭。', 'ok');
+      btn.disabled = true;
+    }
+
+    return box;
+  }
+
+  // joinCapabilities 按可用能力拼标签名，如「升级与重启」「升级、重启与卸载」。
+  //
+  // 参数成对：先真假、再名字。三个能力全上时直接写死字符串会变成一堆
+  // 三目嵌套，加第四个就彻底读不动了。
+  function joinCapabilities() {
+    var names = [];
+    for (var i = 0; i < arguments.length; i += 2) {
+      if (arguments[i]) names.push(arguments[i + 1]);
+    }
+    if (names.length <= 1) return names[0] || '';
+    // 「与」只连最后一项，前面用顿号 —— 与界面里原有的「升级与重启」一致。
+    return names.slice(0, -1).join('、') + '与' + names[names.length - 1];
+  }
+
   function stageText(stage) {
     return {
       checking: '准备中…',
@@ -1208,16 +1328,19 @@
     if (G.data.allow_users) {
       defs.push({ id: 'users', label: '用户与权限', build: buildUsersTab });
     }
-    // 升级与重启接口都要管理员权限，所以没「常规」就没有这一页 ——
+    // 升级 / 重启 / 卸载接口都要管理员权限，所以没「常规」就没有这一页 ——
     // 否则会给出一个点了必然 403 的标签。
-    // 两者只要注入了一个就显示：只重启不升级（或反之）的部署很常见，
+    // 只要有一个可用就显示：只重启不升级（或只卸载不重启）的部署很常见，
     // 页内再各自判断显示哪一块。
-    var canUp = !!G.data.allow_upgrade, canRestart = !!G.data.allow_restart;
-    if (G.data.allow_settings && (canUp || canRestart)) {
+    var canUp = !!G.data.allow_upgrade;
+    var canRestart = !!G.data.allow_restart;
+    var canUninstall = !!G.data.allow_uninstall;
+    if (G.data.allow_settings && (canUp || canRestart || canUninstall)) {
       // 标签名跟着实际有的能力走 —— 只注入了 Upgrader 却写着「重启」，
       // 点进去找不到那个按钮，比不写更让人困惑。
-      var label = canUp && canRestart ? '升级与重启' : (canUp ? '升级' : '重启');
-      defs.push({ id: 'upgrade', label: label, build: buildUpgradeTab });
+      defs.push({ id: 'upgrade', label: joinCapabilities(
+        canUp, '升级', canRestart, '重启', canUninstall, '卸载'),
+        build: buildUpgradeTab });
     }
     if (!defs.length) return;
 

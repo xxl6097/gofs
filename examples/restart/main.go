@@ -42,9 +42,19 @@ func main() {
 
 	// ★ 关键的一行：注入之后页面上才会出现「升级与重启 → 重启」。
 	// 不注入的话接口返回 404，按钮也不显示 —— 免得给一个点了必然失败的按钮。
+	//
+	// 这里注入的值**还实现了 Uninstaller**，所以页面上会同时出现「卸载」——
+	// 能力由值的方法集决定，没有额外的开关要打。
 	restarter, err := restarterFor(*mode)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// 卸载要有东西可删才看得出来跑了。示例刻意**不动你的 gofs 二进制**
+	// （见 uninstallSelf 的注释），只删这个自己在启动时建的标记文件。
+	marker := demoMarker()
+	if err := os.WriteFile(marker, []byte("如果这个文件在，说明服务还没被卸载\n"), 0o600); err != nil {
+		log.Fatalf("写演示标记文件失败: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -56,9 +66,12 @@ func main() {
 		gofs.WithPort(*port),
 		gofs.WithAllowAll(),
 		gofs.WithAuth("admin:admin123@/:rw"),
-		// 密钥与用户表放内存，别碰开发者本机的真实配置。
+		// 密钥 / 用户表 / 运行期设置都放内存，别碰开发者本机的真实配置。
+		// 少了 settings 那一项的话，示例会读到（并写坏）你真实环境里存的
+		// 站点标题、访问前缀、监听地址 —— 表现为「示例一启动就在 /files 下」。
 		gofs.WithKeyFile(""),
 		gofs.WithUserFile(""),
+		gofs.WithSettingsFile(""),
 		gofs.WithRestarter(restarter),
 	)
 	if err != nil {
@@ -71,26 +84,71 @@ func main() {
 	}
 	srv.Banner(os.Stdout)
 	fmt.Printf("\n打开 %s ，用 admin / admin123 登录，\n", srv.URL())
-	fmt.Printf("在「设置 → 升级与重启」里点「重启」。%s\n\n", modeNote(*mode))
+	fmt.Printf("在「设置 → 升级、重启与卸载」里点「重启」或「卸载」。%s\n", modeNote(*mode))
+	fmt.Printf("卸载演示只删 %s，不会碰你的二进制。\n\n", marker)
 
 	if err := srv.Run(ctx); err != nil {
 		log.Fatalf("运行失败: %v", err)
 	}
 }
 
-// restarterFor 按 -mode 选出一种重启策略。
+// hooks 同时实现 Restarter 与 Uninstaller —— 「两个都要」时的形态。
+//
+// 为什么不用 gofs.RestarterFunc：它只包得住**一个**函数，表达不了第二个动作。
+// 想要「重启 + 卸载」就得用一个带方法的类型 —— 而**这个值的方法集就是能力
+// 声明**：gofs 靠 `cfg.Restarter.(Uninstaller)` 断言来决定页面上出现哪几个
+// 按钮，所以不需要额外的开关。
+type hooks struct {
+	restart   func(context.Context) error
+	uninstall func(context.Context) error
+}
+
+func (h hooks) Restart(ctx context.Context) error { return h.restart(ctx) }
+
+func (h hooks) Uninstall(ctx context.Context) error { return h.uninstall(ctx) }
+
+// restarterFor 按 -mode 选出一种重启策略（卸载策略两种 mode 共用）。
 //
 // 抽成函数是为了能测：main 里的分支没法单独调用，而选错策略
 // （比如把 signal 写成 exec）会以「点了没反应」的形式才暴露。
-func restarterFor(mode string) (gofs.Restarter, error) {
+func restarterFor(mode string) (hooks, error) {
 	switch mode {
 	case "exec":
-		return gofs.RestarterFunc(reexecSelf), nil
+		return hooks{restart: reexecSelf, uninstall: uninstallSelf}, nil
 	case "signal":
-		return gofs.RestarterFunc(signalSelf), nil
+		return hooks{restart: signalSelf, uninstall: uninstallSelf}, nil
 	default:
-		return nil, fmt.Errorf("未知的 -mode %q，可选：exec / signal", mode)
+		return hooks{}, fmt.Errorf("未知的 -mode %q，可选：exec / signal", mode)
 	}
+}
+
+// demoMarker 是卸载演示要删的那个文件。
+func demoMarker() string {
+	return filepath.Join(os.TempDir(), "gofs-uninstall-demo.txt")
+}
+
+// uninstallSelf 演示卸载。
+//
+// ⚠️ 它**刻意不删你的 gofs 二进制** —— 那是一个演示程序不该做的事
+// （你会发现自己刚 go build 出来的东西没了）。真实部署的 Uninstall 该删什么
+// 由部署方自己定，通常是这几样：
+//
+//   - 自己的二进制（注意：删正在运行的可执行文件在多数平台上可行，
+//     inode 会保留到进程退出）；
+//   - 注册项：systemd unit / launchd plist / Windows 服务；
+//   - 配置目录（keys.json / users.json / settings.json）；
+//   - 编排器里的资源（K8s Deployment、docker compose 条目）。
+//
+// 这里只删启动时建的标记文件，好让「卸载真的跑了」肉眼可见，然后走**优雅
+// 退出**（SIGTERM）—— 卸载不该像重启那样把自己换一份新的起来。
+func uninstallSelf(context.Context) error {
+	marker := demoMarker()
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除 %s 失败: %w", marker, err)
+	}
+	log.Printf("已删除演示标记文件 %s（真实部署在这里删二进制 / 服务注册 / 配置目录）", marker)
+	log.Printf("正在停止服务：卸载与重启不同，不会再把自己拉起来")
+	return syscall.Kill(os.Getpid(), syscall.SIGTERM)
 }
 
 // execTarget 给出「原地重执行自己」要用的可执行文件与参数。

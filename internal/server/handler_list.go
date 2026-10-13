@@ -86,6 +86,10 @@ type pageData struct {
 	// AllowRestart 表示服务端注入了 Restarter，页面上才显示「重启」。
 	// 与 AllowUpgrade 相互独立：只重启不升级的部署很常见。
 	AllowRestart bool `json:"allow_restart"`
+	// AllowUninstall 表示注入的 Restarter **还实现了 Uninstaller**，
+	// 页面上才显示「卸载」。只实现 Restarter 的部署拿不到这个按钮 ——
+	// 能力由值的方法集决定（见 config.Uninstaller）。
+	AllowUninstall bool `json:"allow_uninstall"`
 	// AllowUsers 表示当前用户可以在页面上管理用户（增删改）。
 	AllowUsers bool `json:"allow_users"`
 }
@@ -130,6 +134,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		Perms:            s.buildPerms(p),
 		AllowUpgrade:     s.cfg.Upgrader != nil,
 		AllowRestart:     s.cfg.Restarter != nil,
+		AllowUninstall:   s.canUninstall(),
 		User:             p.User,
 		Anonymous:        !p.Authenticated,
 		AuthOn:           s.auth.Enabled(),
