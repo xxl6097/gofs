@@ -2,11 +2,13 @@ package gofs
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +39,13 @@ type Server struct {
 	inner   *server.Server
 	httpSrv *http.Server
 
+	// tlsConfig 在 Start 时把证书读一次装好，serve 之后用 ServeTLS(ln, "", "")。
+	//
+	// 为什么不直接把文件名传给 ServeTLS：那样**每次** ServeTLS 都会重新读盘，
+	// 于是热重绑时多出一条「读到一半证书没了」的失败路径 —— 而它发生在旧监听
+	// 已经关掉之后，等于把服务改没了。证书在启动时读成功过，就应当一直可用。
+	tlsConfig *tls.Config
+
 	mu       sync.Mutex
 	ln       net.Listener
 	started  bool
@@ -44,8 +53,13 @@ type Server struct {
 	closed   bool
 
 	// Done 在 Serve 返回后关闭，serveErr 存放其返回值。
+	//
+	// 只有**当前**监听（s.ln）的退出才会关它：热重绑会主动关掉旧监听，
+	// 那不是「服务结束」，不能据此让 RunCLI 以为该退出了。
 	Done     chan struct{}
 	serveErr error
+	// doneOnce 兜底，保证 Done 只关一次。
+	doneOnce sync.Once
 }
 
 // New 构造一个服务器实例。
@@ -73,16 +87,23 @@ func New(opts ...Option) (*Server, error) {
 		return nil, err
 	}
 
+	s := &Server{cfg: cfg, Done: make(chan struct{})}
+
 	inner, err := server.New(cfg, assets)
 	if err != nil {
 		return nil, err
 	}
+	s.inner = inner
 
-	return &Server{
-		cfg:   cfg,
-		inner: inner,
-		Done:  make(chan struct{}),
-	}, nil
+	// 自己 Start 的实例自己会重绑 —— 把内置实现注入进去。
+	//
+	// 注入时机看着别扭（server.New 已经跑完了），但没问题：设置处理器是
+	// **每请求**读 cfg.Relistener，而不是构造时缓存。宿主自己注入了就不覆盖，
+	// 那种部署里监听归宿主，不归我们。
+	if cfg.Relistener == nil {
+		cfg.Relistener = s
+	}
+	return s, nil
 }
 
 // Config 返回生效中的配置。
@@ -149,9 +170,24 @@ func (s *Server) Start() error {
 		return errors.New("gofs: 服务器已关闭")
 	}
 
-	ln, err := s.listen()
+	// 监听地址取自 inner 的运行期设置（它可能被 settings.json 覆盖），
+	// 而不是 cfg.Addr() —— 否则页面上改过的地址重启后不生效。
+	ln, err := s.listen(s.inner.ListenBind(), s.inner.ListenPort())
 	if err != nil {
 		return err
+	}
+
+	// 证书读一次装好：serve 之后不再碰文件（见 tlsConfig 的说明）。
+	if s.cfg.TLSCert != "" {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("读取 TLS 证书失败: %w", err)
+		}
+		s.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
 	}
 
 	// 服务器层面的防护：
@@ -167,6 +203,7 @@ func (s *Server) Start() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
+		TLSConfig:         s.tlsConfig,
 	}
 	s.ln = ln
 	s.started = true
@@ -176,10 +213,16 @@ func (s *Server) Start() error {
 }
 
 // serve 在后台跑 Serve，结束后记录错误并关闭 Done。
+//
+// ⚠️ 必须区分「这个监听被热重绑换掉了」与「服务真的结束了」：
+// 热重绑会主动关掉旧监听，那时 Serve 返回的是 net.ErrClosed（**不是**
+// http.ErrServerClosed）。若照旧在这里关 Done，RunCLI 的
+// `select { <-ctx.Done / <-srv.Done }` 会立刻走 Wait() 返回 —— 一次改端口
+// 就等于让进程自己退出。判据是「它还是不是当前监听」。
 func (s *Server) serve(ln net.Listener) {
 	var err error
-	if s.cfg.TLSCert != "" {
-		err = s.httpSrv.ServeTLS(ln, s.cfg.TLSCert, s.cfg.TLSKey)
+	if s.tlsConfig != nil {
+		err = s.httpSrv.ServeTLS(ln, "", "") // 证书已在 Start 时装进 TLSConfig
 	} else {
 		err = s.httpSrv.Serve(ln)
 	}
@@ -188,15 +231,22 @@ func (s *Server) serve(ln net.Listener) {
 		err = nil
 	}
 	s.mu.Lock()
+	if s.ln != ln {
+		// 已被热重绑换下：这是预期内的退出，不当成服务结束。
+		s.mu.Unlock()
+		return
+	}
 	s.serveErr = err
 	s.mu.Unlock()
-	close(s.Done)
+	s.doneOnce.Do(func() { close(s.Done) })
 }
 
-// listen 按配置建立监听。调用时须持有 s.mu。
-func (s *Server) listen() (net.Listener, error) {
-	addr := s.cfg.Addr()
-	if s.cfg.IsUnixSocket() {
+// listen 在指定的 bind/port 上建立监听。调用时须持有 s.mu。
+//
+// 显式收参数而不是读 cfg：热重绑用的是页面上刚改的值，而 cfg 启动后不可写。
+func (s *Server) listen(bind string, port int) (net.Listener, error) {
+	addr := config.ListenAddr(bind, port)
+	if strings.HasPrefix(bind, "/") {
 		// unix socket 需要先清理残留文件。
 		if _, err := os.Stat(addr); err == nil {
 			if rmErr := os.Remove(addr); rmErr != nil {
@@ -215,6 +265,49 @@ func (s *Server) listen() (net.Listener, error) {
 		return nil, fmt.Errorf("监听 %s 失败: %w", addr, err)
 	}
 	return ln, nil
+}
+
+// CanRelisten 实现 config.Relistener：只有真的在监听（Start 过且没关）才为 true。
+func (s *Server) CanRelisten() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ln != nil && !s.closed && !s.stopping
+}
+
+// Relisten 实现 config.Relistener：把服务热重绑到新的监听地址上。
+//
+// 顺序是刻意的：**先建新监听，成功了再关旧的**。反过来一旦新地址建不起来
+// （端口被占、socket 路径不可写），调用方就已经失去旧地址了 —— 而页面
+// （或那条 curl）往往是唯一能改回来的入口。
+//
+// 只关监听、不断连接：已经 accept 的连接由各自的 goroutine 继续处理，
+// 正在跑的上传/下载会照常完成，只有**新**连接会走新端口。
+func (s *Server) Relisten(ctx context.Context, bind string, port int) (string, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ln == nil {
+		return "", errors.New("本服务没有自己监听端口（未调用 Start，或以库方式嵌在别的 HTTP 服务里）")
+	}
+	if s.closed || s.stopping {
+		return "", errors.New("服务正在关闭，无法切换监听地址")
+	}
+
+	old := s.ln
+	newLn, err := s.listen(bind, port)
+	if err != nil {
+		return "", err // 旧监听一个字节没动
+	}
+	s.ln = newLn
+	go s.serve(newLn)
+
+	_ = old.Close()
+	// Go 关掉 unix listener 不会删 socket 文件，留着会变成下次启动时的
+	// 「残留 socket」；顺手清掉，别把垃圾留给下一个进程。
+	if ua, ok := old.Addr().(*net.UnixAddr); ok && ua != nil {
+		_ = os.Remove(ua.Name)
+	}
+	return newLn.Addr().String(), nil
 }
 
 // Addr 返回实际监听地址，未启动时返回 nil。
@@ -246,17 +339,21 @@ func (s *Server) URL() string {
 	if addr == nil {
 		return ""
 	}
-	if s.cfg.IsUnixSocket() {
+	// 判 unix 看**实时监听**而不是 cfg.IsUnixSocket()：热重绑可以在 tcp 与
+	// unix socket 之间来回切，cfg 里那个是启动时的值，切过之后就不准了。
+	if addr.Network() == "unix" {
 		return "http+unix://" + addr.String()
 	}
+	// 前缀经 inner 的访问器取：它可能在页面上被改掉，读 cfg 只会拿到启动值。
+	prefix := s.inner.PathPrefix()
 	host, port, err := net.SplitHostPort(addr.String())
 	if err != nil {
-		return s.Scheme() + "://" + addr.String() + s.cfg.PathPrefix
+		return s.Scheme() + "://" + addr.String() + prefix
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		host = "127.0.0.1"
 	}
-	return s.Scheme() + "://" + net.JoinHostPort(host, port) + s.cfg.PathPrefix
+	return s.Scheme() + "://" + net.JoinHostPort(host, port) + prefix
 }
 
 // Wait 阻塞直到服务停止，返回 Serve 的错误（主动关闭时为 nil）。

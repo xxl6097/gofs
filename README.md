@@ -27,8 +27,10 @@
 - 隐藏路径 glob、访问路径前缀、CORS、HTTPS、unix socket
 - **手机端交互适配**：触摸目标 ≥40px、无 hover 依赖、操作收进「更多」菜单、
   阻断 iOS 输入框自动缩放（详见下文）
-- **运行期服务设置**：登录后可在页面上直接**切换服务根目录**、**调整单文件上传上限**，
-  改完立刻生效、不用重启（受 `--no-root-switch` / `--root-allow` 约束，详见下文）
+- **运行期服务设置**：登录后可在页面上直接**切换服务根目录**、
+  **调整单文件上传上限**、**改访问路径前缀**、**改监听地址与端口**
+  （热重绑，连接不中断），改完立刻生效、不用重启
+  （换根受 `--no-root-switch` / `--root-allow` 约束，详见下文）
 - **面向大文件与恶意使用的防护**：流式传输（内存与文件大小无关）、
   「无进展」超时（慢速大文件不被误杀）、断点续传、CSRF / 暴力破解 /
   慢速攻击 / 资源耗尽防护、存储型 XSS 与日志注入防护（详见下文）
@@ -776,7 +778,7 @@ curl -u admin:secret -X DELETE \
 
 | 标签 | 内容 |
 | --- | --- |
-| 常规 | 站点标题、主服务目录、附加站点（增删）、上传上限、编辑上限（后四项见下） |
+| 常规 | 站点标题、访问路径前缀、监听地址与端口、主服务目录、附加站点（增删）、上传上限、编辑上限（后五项见下） |
 | 密钥 | 上传密钥与分享链接的管理（需 `--allow-keys` 且在某目录上有写权限） |
 | 用户与权限 | 增删改账号、按路径分配只读/读写（需 `--allow-user-manage` 且为管理员） |
 | 升级与重启 | 检查并执行升级、重启服务（需注入了 Upgrader 或 Restarter 且为管理员） |
@@ -803,12 +805,33 @@ curl -u admin:secret -X DELETE \
 | --- | --- | --- |
 | `keys.json` | 上传密钥（只存摘要） | 是 |
 | `users.json` | 用户表（PBKDF2 摘要） | 是 |
-| `settings.json` | 站点标题、运行期新增的站点、上传上限、编辑上限 | 是 |
+| `settings.json` | 站点标题、访问路径前缀、监听地址与端口、运行期新增的站点、上传上限、编辑上限 | 是 |
 
 `settings.json` 里的每一项都是**改过才记**（值与启动参数相同时不写）——
 所以「恢复启动时的默认值」之后文件里不会留下一条旧记录，运维以后改启动参数
 仍然生效。运行期切换的**服务根目录不在其中**：那是「这个部署该服务哪个目录」
 的声明，属于启动参数，不该被一次页面操作固化。
+
+⚠️ **访问路径前缀与监听地址是个例外，它们反过来：启动参数优先于文件。**
+其它项都是「文件里的值胜出」，这两项刻意相反 —— 因为它们改错之后的后果最严重：
+前缀必须与反向代理（nginx）的 `location` 一致，监听端口往往还牵着 Docker 端口
+映射、防火墙、systemd unit、代理的 upstream。改成一个没人放通的地址，页面就会
+在新旧地址下都打不开，而页面正是改回它的唯一入口。这时唯一的自救办法就是
+「用 `--path-prefix` / `--bind` / `--port` 重启一次」，所以参数必须能压过文件。
+设置页据此下发 `path_prefix_locked` / `listen_locked`，界面上会说明
+「重启后回到参数值」。
+
+判定「启动参数给过没有」对前缀是「非空即给过」，对端口不能这么算 ——
+`--port 5000` 与「默认就是 5000」看不出区别。所以解析阶段会把「用户到底写没写」
+记进 `Config.BindSet` / `PortSet`（命令行、`GOFS_BIND`/`GOFS_PORT` 环境变量、
+`WithBind`/`WithPort`/`WithUnixSocket` 都算），运行期设置据此决定重启后听谁的。
+
+⚠️ **改监听地址是「立即重绑」**：新监听先建起来、成功了才关掉旧的（失败时旧地址
+一点没动，页面照常服务）。只关监听、**不断连接** —— 正在跑的上传/下载会跑完，
+只是**新**连接走新地址。这跟「重启」的语义不一样，界面上的确认框会讲清这一点。
+若当前请求不是直达监听端口（前面挡着反向代理），界面**不会**跳转，只提示你去
+改代理的 upstream —— 那种部署下改监听端口只改了上游那一侧。
+以库方式嵌在别人的 HTTP 服务里（宿主自己监听）时这一栏不显示：重绑该由宿主决定。
 
 ⚠️ **升级提示**：早期版本少了 `gofs/` 这一层，文件直接躺在用户配置目录里。
 现在启动时会**自动把它们搬到新位置**（只动默认路径、不覆盖已有文件、可重复
@@ -1379,6 +1402,110 @@ Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admi
 ```
 
 启动时会打印当前生效的防护值，便于确认。
+
+## 反向代理（nginx）
+
+gofs 是个自包含的 HTTP 服务，可以直接听公网端口，也可以躲在 nginx 后面。
+完整可拷贝的示例见 [`examples/nginx/gofs.conf`](examples/nginx/gofs.conf)，
+下面只说清楚**为什么**要那么写。
+
+### 三条硬性约束
+
+漏掉任何一条都会出问题，而症状往往和原因看起来不相关：
+
+| 约束 | 漏掉的后果 | 原因 |
+| --- | --- | --- |
+| `proxy_set_header Host $http_host;` | 写操作全部 403、分享链接指向 `127.0.0.1` | 跨站写校验比的是 `Origin` 的 host 与 `r.Host` 是否同源（`internal/server/guard.go`）；分享链接与一键脚本的地址也取自 `r.Host`（`internal/server/up_script.go`） |
+| `proxy_buffering off;` | 在线解压进度条全程不动，结束才刷新 | 解压进度走 SSE（`text/event-stream`），nginx 默认会把响应缓冲起来 |
+| `client_max_body_size 0;` | 稍大的文件上传返回 413 | nginx 默认 1m，而 gofs 单次上传默认允许 10GiB |
+
+再配上 `proxy_request_buffering off;`：否则 nginx 会先把整个上传体缓冲到磁盘
+再转发给 gofs，几百 MB 以上的上传会先卡一阵，还可能写满临时目录。
+gofs 自己会限速、限大小、限并发（见上一节），把缓冲交给它更合适。
+
+### 最小配置
+
+```nginx
+server {
+    listen      80;
+    server_name files.example.com;
+
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_buffering         off;
+        proxy_cache             off;
+        proxy_request_buffering off;
+        proxy_read_timeout      1h;
+        proxy_send_timeout      1h;
+    }
+}
+```
+
+`proxy_read_timeout` / `proxy_send_timeout` 要放大：默认 60 秒会掐断长时间
+没进展的上传 / 下载 / 解压推送。gofs 侧对这些有自己的「无进展超时」控制
+（默认 2 分钟），不需要 nginx 再插一刀。
+
+### 子路径部署
+
+想挂在别的站点的 `/files/` 下时，gofs 加 `--path-prefix /files`，
+nginx 侧 `proxy_pass` **结尾不要带斜杠**：
+
+```bash
+gofs -b 127.0.0.1 -p 5000 --path-prefix /files /data -a 'admin:密码@/data:rw'
+```
+
+```nginx
+location /files/ {
+    proxy_pass http://127.0.0.1:5000;   # 结尾不带 /：别把前缀剥掉
+    # …… 其余同上
+}
+```
+
+带斜杠会让 nginx 剥掉 `/files` 前缀，而 gofs 的 `--path-prefix` 正需要看到它 ——
+剥掉之后页面里生成的链接会少一段，点进去 404。
+
+### unix socket 部署
+
+同机部署时用 socket 更干净，不占端口、也没有「gofs 忘了只监听 127.0.0.1」
+的风险：
+
+```bash
+gofs -b /run/gofs.sock /data -a 'admin:密码@/data:rw'
+```
+
+```nginx
+upstream gofs_backend {
+    server unix:/run/gofs.sock;
+    keepalive 32;
+}
+```
+
+socket 由 gofs 以 `0660` 创建，nginx 运行用户需要有访问权限（同组或改权限）。
+
+### HTTPS
+
+推荐让 nginx 终止 TLS：在 server 块里加 `listen 443 ssl;` 与证书即可。
+gofs 会读 `X-Forwarded-Proto`（`internal/server/up_script.go`）来判断对外
+协议，所以纯 HTTP 上游也能生成 https 的分享链接与脚本地址 —— 这是它采信
+`X-Forwarded-*` 头的前提：**只部署在可信代理之后**。
+
+也可以用 gofs 自带的 `--tls-cert` / `--tls-key` 让上游直接是 https，
+nginx 侧 `proxy_pass https://127.0.0.1:5000;`，或改用 `stream` 模块做四层转发。
+
+> 部署在 nginx 之后就不需要 `--path-prefix` 之外的额外开关了。
+> 唯一的例外是：如果你的代理**必须**改写 Host（比如多域名共享一个后端），
+> 那 `Origin` 与 `Host` 就不同源，写操作会被 CSRF 校验挡住 ——
+> 这种情况用 `--no-csrf-protect` 关闭校验（只影响浏览器发起的跨站请求，
+> curl 等不带 `Origin` 的客户端不受影响）。
 
 ## 操作列的按钮
 

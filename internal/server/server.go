@@ -141,10 +141,16 @@ func (s *Server) restoreSites() {
 
 // Handler 返回配置好中间件的 http.Handler。
 // 中间件由外到内的顺序：
-// 路径前缀 -> 并发闸门 -> 访问日志 -> CORS -> 跨站校验 -> panic 恢复 -> 路由。
+// 路径前缀 -> 分享路径改写 -> 并发闸门 -> 访问日志 -> CORS -> 跨站校验
+// -> panic 恢复 -> 路由。
 //
 // 并发闸门放在最外层，是为了在真正开始干活之前就把多余请求挡掉；
 // 它拒绝的请求不写访问日志 —— 服务过载时再拼命写日志只会雪上加霜。
+//
+// ⚠️ 分享路径改写必须排在**路径前缀之内**。它匹配的是 `/s/<token>/…` 这个
+// 字面前缀，而带前缀部署时请求上来的是 `/files/s/<token>/…` —— 排在前面就
+// 匹配不上（早先正是这么排的，于是前缀部署下路径形式的分享链接一律 404）。
+// 放在里面还有个好处：改写之后，日志、CORS、跨站校验看到的仍是干净路径。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fs/health", s.handleHealth)
@@ -169,10 +175,9 @@ func (s *Server) Handler() http.Handler {
 	h = s.withCORS(h)
 	h = s.withLogging(h)
 	h = s.withConcurrency(h)
-	h = s.withPathPrefix(h)
-	// 放在最外层：先把 /s/<token>/… 改写成真实路径，
-	// 后面所有中间件与路由看到的都是干净的路径。
+	// 先按前缀剥离（/files/s/<token>/… -> /s/<token>/…），再改写分享路径。
 	h = s.withSharePath(h)
+	h = s.withPathPrefix(h)
 	return h
 }
 
@@ -190,6 +195,21 @@ func (s *Server) MountLabels() []string { return s.res.Labels() }
 
 // MultiRoot 表示除主目录外还有附加站点。
 func (s *Server) MultiRoot() bool { return s.res.HasExtras() }
+
+// PathPrefix 返回当前生效的访问路径前缀（"" 表示服务在根）。
+//
+// 它可能被页面上的设置改掉，所以任何要拼链接、写 cookie Path、或做路由
+// 判断的地方都必须**现取**，不能启动时读一次 cfg.PathPrefix 存起来。
+func (s *Server) PathPrefix() string { return s.settings.PathPrefix() }
+
+// ListenBind / ListenPort 返回当前生效的监听地址与端口。
+//
+// 权威值在 runtimeSettings 里（可落盘、可在页面上改）。根包建监听时来问这里，
+// 不自己另存一份 —— 两个来源迟早会对不上。
+func (s *Server) ListenBind() string { return s.settings.ListenBind() }
+
+// ListenPort 见 ListenBind。
+func (s *Server) ListenPort() int { return s.settings.ListenPort() }
 
 // AuthEnabled 表示当前是否存在任何鉴权规则。
 //
@@ -315,12 +335,18 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 // pathPrefixResponseWriter 已由 statusRecorder 取代，此处不再需要额外包装。
 
 // withPathPrefix 处理访问前缀。
+//
+// 前缀是**运行期可改**的（设置 → 常规），所以不能像早先那样在构造中间件时
+// 把它捕获进闭包 —— 那样改过之后路由仍按旧前缀走。也不再有「空前缀直接
+// 透传」的短路：前缀可以随时从空变成非空，透传的中间件就再也装不上剥离逻辑了。
+// 代价是每请求多一次 RLock，可忽略。
 func (s *Server) withPathPrefix(next http.Handler) http.Handler {
-	prefix := s.cfg.PathPrefix
-	if prefix == "" {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := s.PathPrefix()
+		if prefix == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		p := r.URL.Path
 		if p == prefix {
 			http.Redirect(w, r, prefix+"/", http.StatusMovedPermanently)
@@ -414,6 +440,11 @@ func shareTokenOf(r *http.Request) string {
 //
 // Path 限定是关键：这条 cookie 只该在分享到的那棵子树里被带上，
 // 不该跟着用户跑到站点的别处去。
+//
+// ⚠️ scope 是**文件路径**，而 cookie 的 Path 比的是**请求 URL**。带前缀
+// 部署时 URL 是 /files/docs/…，只写 /docs/ 的话浏览器根本不会带上这条
+// cookie，分享页面里的 XHR 就全 401（页面能打开、列表却刷不出来）。
+// 所以要先把访问前缀拼进去。
 func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expires time.Time) {
 	if token == "" {
 		return
@@ -429,7 +460,7 @@ func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expi
 			maxAge = left
 		}
 	}
-	p := strings.TrimSuffix(scope, "/") + "/"
+	p := s.PathPrefix() + strings.TrimSuffix(scope, "/") + "/"
 	if strings.HasPrefix(p, "//") {
 		p = "/"
 	}
@@ -450,11 +481,18 @@ func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expi
 // 浏览器确实会发，但反过来若配了前缀却不写进去，前缀下的请求就收不到它。
 // 带前缀是两种部署都成立的那个写法。
 func (s *Server) sessionCookiePath() string {
-	p := s.cfg.PathPrefix
-	if p == "" {
+	return cookiePathForPrefix(s.PathPrefix())
+}
+
+// cookiePathForPrefix 把访问前缀换算成 cookie 的 Path。
+//
+// 单独抽出来是为了能在前缀变更时算**旧值的** Path —— 那条 cookie 得显式
+// 清掉，否则它会在浏览器的 cookie 罐里一直躺到过期为止。
+func cookiePathForPrefix(prefix string) string {
+	if prefix == "" {
 		return "/"
 	}
-	return p + "/"
+	return prefix + "/"
 }
 
 // setSessionCookie 下发会话 cookie。
@@ -482,10 +520,18 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
 
 // clearSessionCookie 让浏览器丢掉会话 cookie（值留空 + MaxAge<0）。
 func (s *Server) clearSessionCookie(w http.ResponseWriter) {
+	s.clearSessionCookieAt(w, s.sessionCookiePath())
+}
+
+// clearSessionCookieAt 按指定 Path 清掉会话 cookie。
+//
+// 前缀变更时要清的是**旧 Path** 的那条：浏览器的 cookie 是按 (name, domain,
+// path) 三元组存的，新 Path 上那条清不掉旧 Path 上那条。
+func (s *Server) clearSessionCookieAt(w http.ResponseWriter, path string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
-		Path:     s.sessionCookiePath(),
+		Path:     path,
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -785,7 +831,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 
 	// 压缩包预览与解压入口统一走 /fs/extract，这里只做提示。
 	if q.Has("extract") {
-		http.Redirect(w, r, s.cfg.PathPrefix+"/fs/extract?path="+url.QueryEscape(urlPath), http.StatusTemporaryRedirect)
+		http.Redirect(w, r, s.PathPrefix()+"/fs/extract?path="+url.QueryEscape(urlPath), http.StatusTemporaryRedirect)
 		return
 	}
 

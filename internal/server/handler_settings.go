@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/config"
 	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
@@ -39,6 +41,40 @@ type settingsReply struct {
 	Title string `json:"title"`
 	// TitleDefault 为启动参数里的取值，用于「恢复默认」。
 	TitleDefault string `json:"title_default"`
+
+	// PathPrefix 为当前生效的访问路径前缀（"" 表示服务在根）。
+	PathPrefix string `json:"path_prefix"`
+	// PathPrefixDefault 为启动参数里的取值，用于「恢复默认」。
+	PathPrefixDefault string `json:"path_prefix_default"`
+	// PathPrefixLocked 表示启动参数显式指定了前缀，因此**它压过页面上的改动**：
+	// 页面改的本次生效，重启后仍回到参数值。
+	//
+	// 特意做成「参数优先」是因为前缀是本服务唯一会把页面自己锁在门外的设置：
+	// 改成一个反向代理没路由的值之后，页面在两个前缀下都打不开，而页面正是
+	// 改回它的唯一入口 —— 这时只能靠「带 --path-prefix 重启一次」自救。
+	PathPrefixLocked bool `json:"path_prefix_locked"`
+
+	// ListenAddr / ListenPort 为当前生效的监听地址与端口
+	// （"" 表示所有网卡，"/" 开头为 unix socket）。
+	ListenAddr string `json:"listen_addr"`
+	ListenPort int    `json:"listen_port"`
+	// ListenAddrDefault / ListenPortDefault 为启动参数里的取值，用于「恢复默认」。
+	ListenAddrDefault string `json:"listen_addr_default"`
+	ListenPortDefault int    `json:"listen_port_default"`
+	// ListenLocked 表示启动参数显式给过监听地址或端口，因此它压过页面上的改动
+	// （与 PathPrefixLocked 同一个道理：改错了只能靠启动参数救回来）。
+	ListenLocked bool `json:"listen_locked"`
+	// ListenEditable 表示当前能否在页面上改监听 —— 需要注入了 Relistener
+	// **且**服务确实在自己监听（库方式嵌入、由宿主监听的实例改不了）。
+	// 为 false 时界面不显示这一栏。
+	ListenEditable bool `json:"listen_editable"`
+	// ListenJumpURL 是改完之后浏览器应当跳去的绝对地址。
+	//
+	// 由 updateSettings 在**刚改完的那次响应**里给出，其它时候为空。为空表示
+	// 「别跳」：新地址是 unix socket（浏览器够不到），或者当前请求根本不是
+	// 直达监听端口（多半经过了反向代理 —— 那种部署下改监听端口只是改了上游
+	// 那一侧，页面地址不该跟着动）。
+	ListenJumpURL string `json:"listen_jump_url,omitempty"`
 	// MultiRoot 表示当前挂了多个服务目录（此时 URL 带标签前缀，
 	// 且 RootSwitchable 恒为 false）。
 	MultiRoot bool `json:"multi_root"`
@@ -74,6 +110,13 @@ type settingsRequest struct {
 	UploadMaxSize *int64  `json:"upload_max_size"`
 	EditMaxSize   *int64  `json:"edit_max_size"`
 	Title         *string `json:"title"`
+	// PathPrefix 是访问路径前缀；空串表示「服务在根」。
+	// 用指针是为了区分「没传」与「显式改成空前缀」。
+	PathPrefix *string `json:"path_prefix"`
+	// ListenAddr / ListenPort 是监听地址与端口。两个都传才是一次完整的改地址；
+	// 只传端口（很常见）时地址沿用当前值。
+	ListenAddr *string `json:"listen_addr"`
+	ListenPort *int    `json:"listen_port"`
 	// AddSite / RemoveSite 是**即时生效**的站点增删：它们直接改服务端状态
 	// 并落盘，不走「取消 / 保存」那套（那样还得做待定操作与回滚）。
 	AddSite    *siteAddRequest `json:"add_site"`
@@ -116,6 +159,15 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		EditMaxSizeDefault:     s.cfg.EditMaxSize,
 		Title:                  s.settings.Title(),
 		TitleDefault:           s.cfg.Title,
+		PathPrefix:             s.PathPrefix(),
+		PathPrefixDefault:      s.cfg.PathPrefix,
+		PathPrefixLocked:       s.cfg.PathPrefix != "",
+		ListenAddr:             s.ListenBind(),
+		ListenPort:             s.ListenPort(),
+		ListenAddrDefault:      s.cfg.Bind,
+		ListenPortDefault:      s.cfg.Port,
+		ListenLocked:           s.cfg.BindSet || s.cfg.PortSet,
+		ListenEditable:         s.listenEditable(),
 	}
 	if s.cfg.UploadDated() {
 		rep.UploadDateDir = s.cfg.UploadDateDir(time.Now())
@@ -162,10 +214,15 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil &&
-		req.Title == nil && req.AddSite == nil && req.RemoveSite == nil {
+		req.Title == nil && req.PathPrefix == nil &&
+		req.ListenAddr == nil && req.ListenPort == nil &&
+		req.AddSite == nil && req.RemoveSite == nil {
 		http.Error(w, "400 Bad Request: 没有需要修改的设置项", http.StatusBadRequest)
 		return
 	}
+
+	// listenJump 是本请求里改监听后要给前端的跳转地址（没改则空）。
+	var listenJump string
 
 	// ---- 站点增删（即时生效，独立于下面的「取消 / 保存」）----
 	if req.AddSite != nil {
@@ -261,7 +318,150 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			humanSize(old), humanSize(s.settings.EditMaxSize()))
 	}
 
-	s.writeJSON(w, s.buildSettings(true))
+	if req.PathPrefix != nil {
+		prefix, err := config.NormalizePathPrefix(*req.PathPrefix)
+		if err != nil {
+			http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		old := s.PathPrefix()
+		if err := s.settings.SetPathPrefix(prefix); err != nil {
+			s.logger.Errorf("访问前缀落盘失败: %v", err)
+			http.Error(w, "500 Internal Server Error: 前缀已生效，但写入设置文件失败："+
+				err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.logger.Infof("访问路径前缀：%q → %q", old, prefix)
+		if old != prefix {
+			s.migrateSessionCookie(w, r, old, prefix)
+		}
+	}
+
+	if req.ListenAddr != nil || req.ListenPort != nil {
+		jump, ok := s.changeListen(w, r, req)
+		if !ok {
+			return
+		}
+		listenJump = jump
+	}
+
+	rep := s.buildSettings(true)
+	// 只随**本次**响应下发：只有「刚改完」这一次需要跳转，
+	// 之后的 GET 不该再怂恿浏览器换地址。
+	rep.ListenJumpURL = listenJump
+	s.writeJSON(w, rep)
+}
+
+// listenEditable 表示当下能不能在页面上改监听。
+//
+// 注入过 Relistener 还不够：以 Handler 方式嵌在别人的 http.Server 上、
+// 自己从不 Start 的实例也持有实现，但它没有自己的监听可换。所以要问一句
+// CanRelisten —— 界面据此决定显不显示那一栏，免得给一个点了必然失败的按钮。
+func (s *Server) listenEditable() bool {
+	return s.cfg.Relistener != nil && s.cfg.Relistener.CanRelisten()
+}
+
+// changeListen 处理「改监听地址/端口」：校验 → 热重绑 → 落盘。
+//
+// 顺序不能调换：**先重绑成功，才写进 settings.json**。反过来的话，一个建不起来
+// 的地址会被写进文件，下次重启就起不来了 —— 那是最难收拾的一种坏法。
+func (s *Server) changeListen(w http.ResponseWriter, r *http.Request, req settingsRequest) (string, bool) {
+	if !s.listenEditable() {
+		http.Error(w, "409 Conflict: 本服务未启用运行期改监听地址"+
+			"（未注入 Relistener，或以库方式嵌入由宿主监听）", http.StatusConflict)
+		return "", false
+	}
+
+	// 只传其中一项时，另一项沿用当前值。
+	bind, port := s.ListenBind(), s.ListenPort()
+	if req.ListenAddr != nil {
+		bind = *req.ListenAddr
+	}
+	if req.ListenPort != nil {
+		port = *req.ListenPort
+	}
+	bind, port, err := config.NormalizeListen(bind, port)
+	if err != nil {
+		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	if bind == s.ListenBind() && port == s.ListenPort() {
+		return "", true // 没变，什么都不做
+	}
+
+	oldAddr := config.ListenAddr(s.ListenBind(), s.ListenPort())
+	addr, err := s.cfg.Relistener.Relisten(r.Context(), bind, port)
+	if err != nil {
+		// 重绑失败时旧监听原封不动（这是 Relistener 的约定），照实说，
+		// 并把底层错误原样带出来 —— address already in use 这类信息
+		// 比任何我们编的话都有用。
+		s.logger.Errorf("切换监听地址失败（旧地址 %s 未受影响）: %v", oldAddr, err)
+		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	if err := s.settings.SetListen(bind, port); err != nil {
+		s.logger.Errorf("监听地址落盘失败: %v", err)
+		http.Error(w, "500 Internal Server Error: 监听地址已生效（"+addr+
+			"），但写入设置文件失败："+err.Error(), http.StatusInternalServerError)
+		return "", false
+	}
+	s.logger.Infof("监听地址：%s → %s", oldAddr, addr)
+	return listenJumpURL(r, s.PathPrefix(), oldAddr, addr), true
+}
+
+// listenJumpURL 算出「改完监听之后浏览器该跳到哪」，空串表示别跳。
+//
+// 什么情况下不跳：
+//
+//   - 新地址是 unix socket —— 浏览器压根访问不到；
+//   - 当前请求不是直达监听端口（r.Host 的端口与**旧**监听端口对不上）——
+//     几乎可以肯定前面挡着反向代理。这时改监听端口只改了上游那一侧，
+//     把页面地址也改过去只会让人更连不上；该做的是去改代理的 upstream。
+func listenJumpURL(r *http.Request, prefix, oldAddr, newAddr string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	_, newPort, err := net.SplitHostPort(newAddr)
+	if err != nil {
+		return "" // unix socket 之类，没有 host:port
+	}
+	// 用请求里的主机名而不是新监听地址里的那个：页面上填的常是 0.0.0.0，
+	// 而用户当初访问用的域名/IP 才更可能对外可达。
+	reqHost, reqPort, err := net.SplitHostPort(r.Host)
+	if err != nil || reqPort != portOfAddr(oldAddr) {
+		return ""
+	}
+	return scheme + "://" + net.JoinHostPort(reqHost, newPort) + prefix + "/"
+}
+
+// portOfAddr 取出地址里的端口串；取不到返回空串。
+func portOfAddr(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return port
+}
+
+// migrateSessionCookie 在前缀变更后把会话 cookie 搬到新 Path 上。
+//
+// 浏览器的 cookie 是按 (name, domain, path) 三元组存的：Path=/files/ 的那条
+// 在 /data/… 的请求上根本不会被带上，成员会发现自己「莫名其妙被登出了」。
+// 会话本身还活着（会话表按 token 存，与路径无关），所以只要换个 Path 重发一次
+// 就能无感续上；同时把旧 Path 那条清掉，免得它在 cookie 罐里躺到过期。
+//
+// 没有会话 cookie 的请求（curl、Basic 直连的脚本）自然什么都不做。
+func (s *Server) migrateSessionCookie(w http.ResponseWriter, r *http.Request, oldPrefix, newPrefix string) {
+	tok := sessionToken(r)
+	if tok == "" {
+		return
+	}
+	oldPath, newPath := cookiePathForPrefix(oldPrefix), cookiePathForPrefix(newPrefix)
+	if oldPath != newPath {
+		s.clearSessionCookieAt(w, oldPath)
+	}
+	s.setSessionCookie(w, tok)
 }
 
 // maxTitleRunes 是站点标题允许的最大字符数（按字符数，不是字节数）。

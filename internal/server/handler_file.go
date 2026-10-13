@@ -440,7 +440,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 		destPath = u.Path
 	}
 	// 去掉访问前缀。
-	if pre := s.cfg.PathPrefix; pre != "" {
+	if pre := s.PathPrefix(); pre != "" {
 		destPath = strings.TrimPrefix(destPath, pre)
 	}
 	destPath = fsutil.CleanURLPath(destPath)

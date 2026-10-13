@@ -173,7 +173,7 @@ func (s *Server) publicBaseURL(r *http.Request) string {
 			scheme = proto
 		}
 	}
-	return scheme + "://" + r.Host + s.cfg.PathPrefix
+	return scheme + "://" + r.Host + s.PathPrefix()
 }
 
 // shellSingleQuote 把一个值安全地放进单引号里。

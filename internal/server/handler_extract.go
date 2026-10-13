@@ -379,7 +379,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		relSrc, relDest, rep.Files, rep.Dirs, rep.Bytes, rep.Skipped, rep.ElapsedMs)
 	sse.event("done", map[string]any{
 		"report": rep,
-		"url":    s.cfg.PathPrefix + quotePath(relDest) + "/",
+		"url":    s.PathPrefix() + quotePath(relDest) + "/",
 	})
 }
 

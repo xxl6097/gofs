@@ -122,7 +122,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 	return pageData{
 		Version:          s.cfg.Version,
 		Title:            s.settings.Title(),
-		PathPrefix:       s.cfg.PathPrefix,
+		PathPrefix:       s.PathPrefix(),
 		Path:             listing.Path,
 		Name:             listing.Name,
 		Query:            query,
@@ -206,9 +206,9 @@ func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
 	}
 	out := bytes.Replace(s.ui.index, []byte("__GOFS_DATA__"), raw, 1)
 
-	prefix := s.cfg.PathPrefix + "/fs/assets/"
-	out = bytes.ReplaceAll(out, []byte("__GOFS_ASSETS__"), []byte(prefix))
-	out = bytes.ReplaceAll(out, []byte("__GOFS_BASE__"), []byte(s.cfg.PathPrefix))
+	base := s.PathPrefix()
+	out = bytes.ReplaceAll(out, []byte("__GOFS_ASSETS__"), []byte(base+"/fs/assets/"))
+	out = bytes.ReplaceAll(out, []byte("__GOFS_BASE__"), []byte(base))
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -264,7 +264,7 @@ func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath 
 	s.writeHTML(w, pageData{
 		Version:    s.cfg.Version,
 		Title:      s.settings.Title(),
-		PathPrefix: s.cfg.PathPrefix,
+		PathPrefix: s.PathPrefix(),
 		Path:       clean,
 		Name:       "/",
 		Listing:    &fsutil.Listing{Path: clean, Name: "/", IsDir: true, Entries: []fsutil.Entry{}},

@@ -22,9 +22,10 @@ import (
 //   - 站点标题（浏览器标签页与顶栏品牌名）
 //   - 单文件上传上限
 //   - 在线编辑的大小上限
+//   - 访问路径前缀
 //   - 允许切换服务根目录的范围（由启动参数推导，运行期不变）
 //
-// 前三项都会落盘（见 saveSettings）。**但不是无条件写**：值与启动参数
+// 前四项都会落盘（见 saveSettings）。**但不是无条件写**：值与启动参数
 // 相同时不写磁盘（见 saveSettings 的说明）—— 那样运维之后改启动参数
 // 仍然生效，不会被一个「其实等于默认值」的旧记录压住。
 //
@@ -37,6 +38,16 @@ type runtimeSettings struct {
 	uploadMaxSize int64
 	editMaxSize   int64
 	title         string
+	// pathPrefix 是当前生效的访问路径前缀（"" 或 "/xxx"）。
+	pathPrefix string
+	// listenBind / listenPort 是当前生效的监听地址与端口。
+	//
+	// 权威值存在这里（而不是 cfg）有两个原因：一是 cfg 启动后不可写
+	// （见上面的说明）；二是只有这里能落盘，于是「重启后还在」成立。
+	// 根包建监听时也是来问这里（Server.ListenBind/ListenPort），
+	// 不另存一份，免得两个来源各说各话。
+	listenBind string
+	listenPort int
 	// sites 是运行期新增的附加站点（持久化的那份）。
 	sites []siteRecord
 
@@ -76,6 +87,54 @@ func (s *runtimeSettings) SetTitle(v string) error {
 	return s.saveSettings()
 }
 
+// PathPrefix 返回当前生效的访问路径前缀（"" 表示服务在根）。
+//
+// 每次请求都要读它（withPathPrefix、cookie Path、链接生成），所以走 RLock ——
+// 与其它设置项共用同一把锁，改前缀的频率远低于读它的频率。
+func (s *runtimeSettings) PathPrefix() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pathPrefix
+}
+
+// SetPathPrefix 修改访问路径前缀并落盘。
+//
+// 调用方必须先用 config.NormalizePathPrefix 归一化并校验：这里不做校验，
+// 是因为启动参数那条路径也走同一个函数，两处各校验一次容易走岔。
+func (s *runtimeSettings) SetPathPrefix(v string) error {
+	s.mu.Lock()
+	s.pathPrefix = v
+	s.mu.Unlock()
+	return s.saveSettings()
+}
+
+// ListenBind 返回当前生效的监听地址（"" 表示所有网卡，"/" 开头为 unix socket）。
+func (s *runtimeSettings) ListenBind() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listenBind
+}
+
+// ListenPort 返回当前生效的监听端口。
+func (s *runtimeSettings) ListenPort() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listenPort
+}
+
+// SetListen 记下新的监听地址与端口并落盘。
+//
+// ⚠️ 调用方必须**先**把监听真正建起来（Relistener.Relisten）再调它：
+// 反过来的话，一个建不起来的地址会被写进文件，下次重启就起不来了 ——
+// 那正是「把服务改坏」最难看的一种。
+func (s *runtimeSettings) SetListen(bind string, port int) error {
+	s.mu.Lock()
+	s.listenBind = bind
+	s.listenPort = port
+	s.mu.Unlock()
+	return s.saveSettings()
+}
+
 // settingsDoc 是设置文件的磁盘格式。
 //
 // 带 version 是为了以后加字段时能识别旧文件：
@@ -83,16 +142,26 @@ func (s *runtimeSettings) SetTitle(v string) error {
 //	1 只有 title
 //	2 起多了 sites（运行期新增的附加站点）
 //	3 起多了两个上限（upload_max_size / edit_max_size）
+//	4 起多了 path_prefix
+//	5 起多了 listen_bind / listen_port
 //
 // 两个上限用**指针**：上传上限的 0 是有意义的取值（不限制），
 // 用零值当「没存过」会把「不限制」读成「没设置」。
+//
+// path_prefix、listen_bind、listen_port 同样用指针：空串与 0 都是合法取值
+// （服务在根、所有网卡、系统分配端口），用零值当「没存过」就分不出
+// 「显式改成空」与「文件里压根没这项」。
 type settingsDoc struct {
 	Version int          `json:"version"`
 	Title   string       `json:"title,omitempty"`
 	Sites   []siteRecord `json:"sites,omitempty"`
 	// 只在「与启动参数不同」时才写（见 saveSettings）。
-	UploadMaxSize *int64 `json:"upload_max_size,omitempty"`
-	EditMaxSize   *int64 `json:"edit_max_size,omitempty"`
+	UploadMaxSize *int64  `json:"upload_max_size,omitempty"`
+	EditMaxSize   *int64  `json:"edit_max_size,omitempty"`
+	PathPrefix    *string `json:"path_prefix,omitempty"`
+	// 与 path_prefix 同一口径：启动参数显式给过就压过文件里的值。
+	ListenBind *string `json:"listen_bind,omitempty"`
+	ListenPort *int    `json:"listen_port,omitempty"`
 }
 
 // siteRecord 是一个持久化的附加站点。
@@ -135,6 +204,24 @@ func (s *runtimeSettings) loadSettings() {
 	if doc.EditMaxSize != nil && *doc.EditMaxSize > 0 {
 		s.editMaxSize = *doc.EditMaxSize
 	}
+	// 前缀是**唯一**一个「启动参数优先于文件」的项，与上面几项刻意相反。
+	//
+	// 原因是它的失败模式特殊：前缀改成一个 nginx 没路由的值，页面在两个前缀
+	// 下都打不开 —— 而页面正是改回它的唯一入口。这时唯一的自救办法就是
+	// 「用 --path-prefix 重启一次」。若这里让文件压住参数，那条路就断了。
+	// 因此只在参数没给（或给了空值）时才采纳文件里的前缀。
+	if doc.PathPrefix != nil && s.cfg.PathPrefix == "" {
+		s.pathPrefix = *doc.PathPrefix
+	}
+	// 监听地址/端口同理，只是判据用「启动参数有没有显式给过」而不是「值是否为空」——
+	// Port 有默认值 5000，光看值分不出「显式写了 5000」与「默认就是 5000」，
+	// 所以由解析阶段记下 BindSet / PortSet（见 config.Config 的同名字段）。
+	if doc.ListenBind != nil && !s.cfg.BindSet {
+		s.listenBind = *doc.ListenBind
+	}
+	if doc.ListenPort != nil && !s.cfg.PortSet {
+		s.listenPort = *doc.ListenPort
+	}
 }
 
 // Sites 返回持久化的附加站点。
@@ -163,8 +250,8 @@ func (s *runtimeSettings) saveSettings() error {
 	if path == "" {
 		return nil
 	}
-	doc := settingsDoc{Version: 3, Title: s.Title(), Sites: s.Sites()}
-	// 只在**与启动参数不同**时才写这两项。
+	doc := settingsDoc{Version: 5, Title: s.Title(), Sites: s.Sites()}
+	// 只在**与启动参数不同**时才写这几项。
 	//
 	// 为什么不无脑写：那样「恢复启动时的默认值」之后，文件里会留下一份
 	// 等于旧默认值的记录；运维以后把 --upload-max-size 改大，重启却仍被
@@ -174,6 +261,15 @@ func (s *runtimeSettings) saveSettings() error {
 	}
 	if v := s.EditMaxSize(); v != s.cfg.EditMaxSize {
 		doc.EditMaxSize = &v
+	}
+	if v := s.PathPrefix(); v != s.cfg.PathPrefix {
+		doc.PathPrefix = &v
+	}
+	if v := s.ListenBind(); v != s.cfg.Bind {
+		doc.ListenBind = &v
+	}
+	if v := s.ListenPort(); v != s.cfg.Port {
+		doc.ListenPort = &v
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -218,6 +314,9 @@ func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 		uploadMaxSize: cfg.UploadMaxSize,
 		editMaxSize:   cfg.EditMaxSize,
 		title:         cfg.Title,
+		pathPrefix:    cfg.PathPrefix,
+		listenBind:    cfg.Bind,
+		listenPort:    cfg.Port,
 		settingsFile:  cfg.SettingsFile,
 	}
 	rs.loadSettings()

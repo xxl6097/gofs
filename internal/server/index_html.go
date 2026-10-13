@@ -126,7 +126,11 @@ type shareCtxKey struct{}
 // withSharePath 把 /s/<token>/<rest> 改写成 /<rest>，
 // 并把令牌放进请求 context 供 shareTokenOf 取用。
 //
-// 只在路径前缀**刚好匹配**时改写；其余请求原样透传。
+// 前缀匹配不上就原样透传。
+//
+// ⚠️ 这个改写必须发生在**访问前缀剥离之后**（见 Handler 里的中间件顺序）：
+// 这里比的是 `/s/` 这个字面前缀，而带前缀部署时拿到的路径是
+// `/files/s/<token>/…`，排在剥离之前就永远匹配不上。
 func (s *Server) withSharePath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path

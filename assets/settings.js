@@ -250,6 +250,25 @@
     return res.json();
   }
 
+  // waitForOrigin 轮询某个绝对地址上的 /fs/health，最多等 tries 秒。
+  //
+  // 改监听端口之后要用它：新端口刚绑上，浏览器立刻跳过去有可能撞上还没开始
+  // accept 的一瞬间。用裸 fetch 而不是 apiFetch —— health 不需要鉴权，而
+  // apiFetch 遇到 401 会把用户弹到登录框（重启那套里也是这个理由）。
+  //
+  // baseUrl 形如 "http://host:8080/files/"，已含访问前缀，所以拼上
+  // "fs/health" 就是完整的健康检查地址。
+  async function waitForOrigin(baseUrl, tries) {
+    for (var i = 0; i < tries; i++) {
+      try {
+        var res = await fetch(baseUrl + 'fs/health', { cache: 'no-store' });
+        if (res.ok) return true;
+      } catch (e) { /* 还没起来，继续等 */ }
+      await new Promise(function (r) { setTimeout(r, 1000); });
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------- 各标签
 
   // buildSitesField 造「附加站点」那一块：列出已挂的，允许增删。
@@ -420,6 +439,9 @@
     var uploadField = null;
     var editField = null;
     var titleField = null;
+    var prefixField = null;
+    var listenAddrField = null;
+    var listenPortField = null;
 
     function showErr(msg) {
       errBox.hidden = false;
@@ -443,6 +465,68 @@
           '其它已打开的页面要刷新才看得到。'
       });
       el.appendChild(titleField.field);
+
+      // ---- 访问路径前缀 ----
+      //
+      // 放在标题后面：它管的也是「这个站点长什么样」，只是管的是地址那一半。
+      //
+      // 这是本页唯一一个**改错了会把自己锁在门外**的设置 —— 前缀必须与反向
+      // 代理（nginx）的 location 一致，改完不同步改代理的话，新旧两个前缀下的
+      // 页面都打不开，而页面正是改回它的唯一入口。所以提示写得重，保存前还要
+      // 再确认一次（见 save）。
+      prefixField = makeTextField({
+        label: '访问路径前缀',
+        value: cur.path_prefix,
+        def: cur.path_prefix_default,
+        current: function () { return cur.path_prefix; },
+        hintText: '留空表示服务在根路径（/）。挂在 nginx 等反向代理的子路径下时，' +
+          '这里必须与代理的 location 一致；保存后本页会跳到新地址，' +
+          '在代理改好之前它会打不开。'
+      });
+      el.appendChild(prefixField.field);
+      if (cur.path_prefix_locked) {
+        addHint(prefixField.field,
+          '启动参数已指定前缀，重启后以它为准；这里的改动本次生效，重启会回到参数值。' +
+          '这个「参数优先」正是前缀改坏之后的退路。');
+      }
+
+      // ---- 监听地址 / 端口 ----
+      //
+      // 与上一项一样是「改错了会把自己锁在门外」的设置，而且它的连带面更大：
+      // 端口往往还牵着 Docker 端口映射、防火墙、systemd unit、反代的 upstream。
+      // 服务端只在「当前请求确实是直达监听端口」时才给跳转地址（见
+      // listen_jump_url），其余情况（unix socket、前面挡着代理）只提示不跳。
+      if (cur.listen_editable) {
+        listenAddrField = makeTextField({
+          label: '监听地址',
+          value: cur.listen_addr,
+          def: cur.listen_addr_default,
+          current: function () { return cur.listen_addr; },
+          hintText: '留空表示所有网卡（0.0.0.0）。填 / 开头的绝对路径则改为监听 ' +
+            'unix socket（如 /run/gofs.sock）。'
+        });
+        el.appendChild(listenAddrField.field);
+
+        listenPortField = makeTextField({
+          label: '监听端口',
+          value: String(cur.listen_port),
+          def: String(cur.listen_port_default),
+          current: function () { return cur.listen_port; },
+          hintText: '保存后**立即**切到新端口：已在进行的传输不受影响（连接不会断），' +
+            '但新连接都会走新端口。0 表示由系统分配。' +
+            '监听 unix socket 时本项无效。'
+        });
+        el.appendChild(listenPortField.field);
+        if (cur.listen_locked) {
+          addHint(listenPortField.field,
+            '启动参数已指定监听地址或端口，重启后以它为准；这里的改动本次生效，' +
+            '重启会回到参数值。这个「参数优先」正是改坏之后的退路。');
+        }
+      } else {
+        // 不显示那两个输入框，但把原因说清楚 —— 直接消失会让人以为功能没了。
+        addHint(el, '本实例不支持在页面上改监听地址：它没有自己的监听' +
+          '（以库方式嵌在别的 HTTP 服务里，监听归宿主管）。');
+      }
 
       // ---- 服务根目录（主目录）----
       //
@@ -522,6 +606,9 @@
     function dirty() {
       if (!cur) return false;
       if (titleField && titleField.read() !== (cur.title || '')) return true;
+      if (prefixField && prefixField.read() !== (cur.path_prefix || '')) return true;
+      if (listenAddrField && listenAddrField.read() !== (cur.listen_addr || '')) return true;
+      if (listenPortField && listenPortField.read() !== String(cur.listen_port)) return true;
       if (cur.root_switchable && rootInput) {
         var nextRoot = rootInput.value.trim();
         if (nextRoot && nextRoot !== (cur.root || '')) return true;
@@ -548,6 +635,44 @@
         return;
       }
       if (nextTitle !== (cur.title || '')) patch.title = nextTitle;
+
+      var nextPrefix = prefixField ? prefixField.read() : (cur.path_prefix || '');
+      if (nextPrefix !== (cur.path_prefix || '')) {
+        if (nextPrefix && nextPrefix.charAt(0) !== '/') {
+          showErr('访问路径前缀要以 / 开头，或留空表示服务在根路径。');
+          return;
+        }
+        patch.path_prefix = nextPrefix;
+      }
+
+      // 监听地址/端口。校验只做「明显不对」的：真正的规则在服务端
+      // （NormalizeListen），前端只负责别把空白与拼错的数字当成有效输入。
+      if (listenAddrField) {
+        var nextAddr = listenAddrField.read();
+        if (nextAddr !== (cur.listen_addr || '')) {
+          // 地址里不带端口：端口有单独的框，两个地方都能表达它只会让人犯迷糊。
+          if (nextAddr && nextAddr.indexOf('/') !== 0 && nextAddr.indexOf(':') >= 0) {
+            showErr('监听地址里不要写端口，端口请填在「监听端口」里。');
+            return;
+          }
+          patch.listen_addr = nextAddr;
+        }
+      }
+      if (listenPortField) {
+        var nextPortRaw = listenPortField.read();
+        if (nextPortRaw !== String(cur.listen_port)) {
+          if (!/^[0-9]+$/.test(nextPortRaw)) {
+            showErr('监听端口请填 0-65535 的整数（0 表示由系统分配）。');
+            return;
+          }
+          var nextPort = parseInt(nextPortRaw, 10);
+          if (nextPort > 65535) {
+            showErr('监听端口请填 0-65535 的整数（0 表示由系统分配）。');
+            return;
+          }
+          patch.listen_port = nextPort;
+        }
+      }
 
       if (cur.root_switchable) {
         var nextRoot = rootInput.value.trim();
@@ -586,6 +711,43 @@
         return;
       }
 
+      // 前缀的确认框放在**所有校验之后、发请求之前**。
+      //
+      // 必须早于请求：服务端一改，本页所在的那个前缀就不再被路由了，
+      // 那时再让用户「取消」他也回不到改动前的状态。
+      // 也不必更早：前面的校验还可能失败并中止，先让人确认「我要跳转」、
+      // 再告诉他「上传上限填错了」，顺序很别扭。
+      if (patch.path_prefix !== undefined) {
+        var target = patch.path_prefix || '/';
+        var goOn = await G.confirm({
+          title: '确认修改访问路径前缀？',
+          message: '保存后本页会跳到 ' + target + '，服务只会按新地址路由。',
+          detail: '挂在反向代理后面时，必须同步把代理的 location 改成 ' + target +
+            '，否则新旧地址都打不开，页面上的设置也就进不去了。' +
+            '改坏了可以用 --path-prefix 重启一次恢复。',
+          okLabel: '改并跳转',
+          danger: true
+        });
+        if (!goOn) return;
+      }
+
+      // 监听地址/端口的确认框：同样放在最后、发请求之前。
+      if (patch.listen_addr !== undefined || patch.listen_port !== undefined) {
+        var where = (patch.listen_addr !== undefined ? patch.listen_addr : cur.listen_addr) || '所有网卡';
+        var port = patch.listen_port !== undefined ? patch.listen_port : cur.listen_port;
+        var okListen = await G.confirm({
+          title: '确认修改监听地址？',
+          message: '服务将**立即**改到 ' + where + ':' + port + ' 上监听。',
+          detail: '已经在进行的传输不会中断（连接不会被掐断），但**新**连接都会走新地址。' +
+            '端口通常还牵着别的东西：Docker 的端口映射、防火墙规则、systemd unit、' +
+            '反向代理的 upstream —— 这些没同步改，外面就连不上了。' +
+            '改坏了可以用 --bind/--port 重启一次恢复。',
+          okLabel: '改并切换',
+          danger: true
+        });
+        if (!okListen) return;
+      }
+
       var saveBtn = document.getElementById('settings-save');
       if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中…'; }
 
@@ -614,6 +776,42 @@
         var changedRoot = patch.root !== undefined;
         var mm = out.upload_max_size > 0 ? G.fmtSize(out.upload_max_size) : '不限制';
         ctx.close();
+
+        // 监听地址变了 —— 这一支要放在前缀之前：服务端给的跳转地址里已经
+        // 带上了新的访问前缀（前缀分支先执行），所以它是最完整的目标。
+        if (out.listen_jump_url) {
+          var listenLabel = (out.listen_addr || '所有网卡') + ':' + out.listen_port;
+          G.toast('ok', '监听地址已改为 ' + listenLabel + '，正在等待新地址…');
+          // 等它真的能应答再跳，别让用户撞上一个还没起来的端口；等不到也照跳，
+          // 反正旧端口这时已经不接受新连接了，留在原地没有意义。
+          if (!(await waitForOrigin(out.listen_jump_url, 10))) {
+            G.toast('warn', '新地址 10 秒内没有应答，仍将尝试跳转。');
+          }
+          location.assign(out.listen_jump_url);
+          return;
+        }
+        if (patch.listen_addr !== undefined || patch.listen_port !== undefined) {
+          // 服务端没给跳转地址，只有两种可能，都说清楚别让人猜：
+          var why = (out.listen_addr || '').charAt(0) === '/'
+            ? '新地址是 unix socket，浏览器访问不到。'
+            : '当前请求不是直达监听端口（前面多半挡着反向代理），' +
+              '请同步把代理的 upstream 指到新地址。';
+          G.toast('warn', '监听地址已改为 ' +
+            (out.listen_addr || '所有网卡') + ':' + out.listen_port + '。本页不跳转：' + why);
+          return;
+        }
+
+        // 前缀变了：只能整页跳转到新地址。
+        //
+        // 不能用 G.navigate —— 那是走 XHR 的站内跳转，而此刻 BASE 快照、
+        // 前端的接口地址、服务端的路由都已经是新前缀，打在旧前缀上只会 404。
+        // 会话 cookie 服务端已经搬到新 Path 上，跳过去不会掉登录态。
+        if (patch.path_prefix !== undefined) {
+          var base = out.path_prefix || '';
+          G.toast('ok', '访问前缀已改为 ' + (base || '（根路径）') + '，正在跳转…');
+          location.assign(base + '/');
+          return;
+        }
 
         if (changedRoot) {
           G.toast('ok', '服务根目录已切换到 ' + out.root, null, {

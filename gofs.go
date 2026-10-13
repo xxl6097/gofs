@@ -84,6 +84,11 @@ type (
 	//
 	// 未注入时相关接口返回 404，界面上也不显示「重启」按钮。
 	Restarter = config.Restarter
+	// Relistener 由调用方实现「把服务换到另一个监听地址上」（热重绑）。
+	//
+	// gofs 自己 Start 时会自动注入内置实现；以库方式嵌进别人的 HTTP 服务、
+	// 由宿主自己监听时，需要宿主注入，否则页面上不显示监听地址那一栏。
+	Relistener = config.Relistener
 )
 
 // 升级阶段常量，供实现方在 Progress 里使用。
@@ -114,6 +119,15 @@ func WithUpgrader(u Upgrader) Option {
 //	}))
 func WithRestarter(r Restarter) Option {
 	return func(c *Config) { c.Restarter = r }
+}
+
+// WithRelistener 注入「热重绑监听地址」的实现。
+//
+// 通常不需要调它：gofs 自己 Start 时会用内置实现（先建新监听、成功了再关旧的，
+// 失败则旧监听原封不动）。只有「宿主自己监听、gofs 只提供 Handler」的嵌入方式
+// 才需要注入，否则页面上不显示「监听地址/端口」那一栏。
+func WithRelistener(r Relistener) Option {
+	return func(c *Config) { c.Relistener = r }
 }
 
 // RestarterFunc 让普通函数满足 Restarter，省掉一个只为实现接口而存在的类型。
@@ -197,20 +211,34 @@ func WithRoots(paths ...string) Option {
 
 // WithBind 设置监听地址，可为 IP 或 host:port。
 // 传 host:port 时端口以此为准，WithPort 不再生效。
+//
+// 会置上 BindSet：显式指定的监听地址压过 settings.json 里的运行期记录
+// （见 Config.BindSet）。想「以文件里的值为准」就别调它。
 func WithBind(bind string) Option {
-	return func(c *Config) { c.Bind = bind }
+	return func(c *Config) {
+		c.Bind = bind
+		c.BindSet = true
+	}
 }
 
 // WithPort 设置监听端口。传 0 表示由系统分配，
 // 实际端口在 Start 之后通过 Addr 或 URL 获取。
+//
+// 会置上 PortSet，语义同 WithBind。
 func WithPort(port int) Option {
-	return func(c *Config) { c.Port = port }
+	return func(c *Config) {
+		c.Port = port
+		c.PortSet = true
+	}
 }
 
 // WithUnixSocket 改为监听 unix socket。
 // socket 文件会在 Start 时创建（残留文件自动清理），权限为 0660。
 func WithUnixSocket(path string) Option {
-	return func(c *Config) { c.Bind = path }
+	return func(c *Config) {
+		c.Bind = path
+		c.BindSet = true
+	}
 }
 
 // WithPathPrefix 设置访问路径前缀，例如 "/files"。

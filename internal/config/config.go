@@ -244,6 +244,16 @@ type Config struct {
 	Bind string
 	// Port 为监听端口。
 	Port int
+	// BindSet / PortSet 表示监听地址/端口是**显式指定**的（命令行、环境变量
+	// 或 WithBind/WithPort/WithUnixSocket），而不是取的内置默认值。
+	//
+	// 为什么要单独记：监听地址是运行期可在页面上改的，而「改错了怎么回来」
+	// 只有一条路 —— 用启动参数重启一次。所以启动参数必须能压过 settings.json
+	// 里的记录（与 PathPrefix 同一个道理）。而 Port 有默认值 5000，
+	// 光看「值是不是非零」分不出「显式给了 5000」与「默认就是 5000」，
+	// 只能由解析阶段把「用户到底写没写」这件事记下来。
+	BindSet bool
+	PortSet bool
 	// PathPrefix 为访问路径前缀，例如 /dufs。
 	PathPrefix string
 	// Hidden 为目录列表中隐藏的文件名 glob（只匹配文件名，不匹配路径）。
@@ -392,6 +402,13 @@ type Config struct {
 	// 显示「重启」按钮。与 Upgrader 相互独立 —— 只升级不重启、或只重启
 	// 不升级的部署都很常见（见 Restarter 的注释）。
 	Restarter Restarter
+
+	// Relistener 为「把服务换到另一个监听地址上」的实现（热重绑）。
+	//
+	// gofs 自己 Start 时会自动注入内置实现（见根包 New）；以库方式嵌进
+	// 别人的 HTTP 服务时由宿主注入。为 nil 表示这个部署不提供运行期改
+	// 监听地址：相关字段不下发，页面上那一栏也不显示。
+	Relistener Relistener
 }
 
 // DefaultVersion 是未显式配置时的版本号。
@@ -580,6 +597,14 @@ func (c *Config) ApplyEnv() {
 	c.ServePath = envStr("GOFS_SERVE_PATH", c.ServePath)
 	c.Bind = envStr("GOFS_BIND", c.Bind)
 	c.Port = envInt("GOFS_PORT", c.Port)
+	// 环境变量也算「显式指定」—— 但只有真的设过才算，否则 GOFS_PORT 一被
+	// 默认值填上就会把页面上的改动静默压回去。
+	if _, ok := os.LookupEnv("GOFS_BIND"); ok {
+		c.BindSet = true
+	}
+	if _, ok := os.LookupEnv("GOFS_PORT"); ok {
+		c.PortSet = true
+	}
 	c.PathPrefix = envStr("GOFS_PATH_PREFIX", c.PathPrefix)
 	c.Hidden = envList("GOFS_HIDDEN", c.Hidden)
 	c.AuthRules = envAuthList("GOFS_AUTH", c.AuthRules)
@@ -791,6 +816,11 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		cfg.AllowUserManage = false
 	}
 
+	// 记下监听地址/端口是不是用户显式给的：运行期在页面上改过之后，
+	// 只有显式给过的启动参数才压得过 settings.json 里的记录（恢复入口）。
+	cfg.BindSet = cfg.BindSet || specified["b"] || specified["bind"]
+	cfg.PortSet = cfg.PortSet || specified["p"] || specified["port"]
+
 	// -A 是各项权限的并集，真正的展开放在 Normalize 里，
 	// 这样以库方式直接设 AllowAll 的调用方也能享受同样的语义。
 	if !cfg.AllowAll {
@@ -811,6 +841,37 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// NormalizePathPrefix 归一化访问路径前缀，返回 "" 或 "/xxx"（无尾斜杠）。
+//
+// 归一化规则同时用于启动参数与页面上的运行期修改 —— 两处必须一致，
+// 否则「参数里写 /files、页面上写 files」会得到两个不同的前缀。
+//
+// 拒绝的取值：会进入 URL 与 cookie 的 Path，含空白、`?`、`#` 会破坏这两者；
+// `..` 段则可能被用来构造越过前缀的路径。这些与其静默接受再出怪问题，
+// 不如在设置的那一刻就报错。
+func NormalizePathPrefix(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" || p == "/" {
+		return "", nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimSuffix(p, "/")
+	if p == "" {
+		return "", nil
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." || seg == "." {
+			return "", fmt.Errorf("路径前缀不能包含 %q 段: %q", seg, raw)
+		}
+	}
+	if i := strings.IndexAny(p, " \t?#"); i >= 0 {
+		return "", fmt.Errorf("路径前缀不能包含空白、? 或 #: %q", raw)
+	}
+	return p, nil
 }
 
 // Normalize 做参数合法化、归一化与校验。
@@ -861,14 +922,9 @@ func (c *Config) Normalize() error {
 	}
 
 	// 路径前缀统一为 "/xxx" 或空。
-	p := strings.TrimSpace(c.PathPrefix)
-	if p != "" && p != "/" {
-		if !strings.HasPrefix(p, "/") {
-			p = "/" + p
-		}
-		p = strings.TrimSuffix(p, "/")
-	} else {
-		p = ""
+	p, err := NormalizePathPrefix(c.PathPrefix)
+	if err != nil {
+		return err
 	}
 	c.PathPrefix = p
 
@@ -971,21 +1027,62 @@ func (c *Config) UploadDateDir(t time.Time) string {
 	return t.Format(c.UploadDateLayout)
 }
 
-// Addr 返回最终的监听地址。
-func (c *Config) Addr() string {
-	if strings.HasPrefix(c.Bind, "/") {
-		return c.Bind // unix socket
+// ListenAddr 把 bind 与 port 组合成最终监听地址。
+//
+// 独立成函数是因为它有三处调用者：启动时建监听、页面上热重绑、以及展示当前
+// 地址。三处必须用同一套规则，否则「页面上改完显示的地址」与「实际监听的地址」
+// 会对不上 —— 那种不一致只能靠抓包发现。
+//
+// 规则：
+//   - bind 以 "/" 开头 → 就是 unix socket 路径，port 忽略；
+//   - bind 里已含冒号（如 "127.0.0.1:8080"）→ 整个当作地址，port 忽略；
+//   - bind 是纯主机/IP → 拼上 port；
+//   - bind 为空 → 监听所有网卡。
+func ListenAddr(bind string, port int) string {
+	if strings.HasPrefix(bind, "/") {
+		return bind // unix socket
 	}
-	if c.Bind != "" {
-		if strings.Contains(c.Bind, ":") {
-			return c.Bind
+	if bind != "" {
+		if strings.Contains(bind, ":") {
+			return bind
 		}
-		return fmt.Sprintf("%s:%d", c.Bind, c.Port)
+		return fmt.Sprintf("%s:%d", bind, port)
 	}
-	return fmt.Sprintf("0.0.0.0:%d", c.Port)
+	return fmt.Sprintf("0.0.0.0:%d", port)
 }
 
+// NormalizeListen 归一化并校验页面上的「监听地址 + 监听端口」两个字段。
+//
+// 与 ListenAddr 的分工：ListenAddr 是**拼地址**（接受 CLI 那种把端口写进
+// --bind 的写法），这里服务的是页面上分成两个框的取值 —— 所以地址里**不接受**
+// host:port：两个框都能表达端口时，用户不知道该以哪个为准，我们也不该猜。
+//
+// 返回归一化后的 bind 与 port。以 "/" 开头视为 unix socket，此时端口无意义
+// （仍原样返回，便于用户切回 TCP 时不用重填）。
+func NormalizeListen(bind string, port int) (string, int, error) {
+	bind = strings.TrimSpace(bind)
+	if port < 0 || port > 65535 {
+		return "", 0, fmt.Errorf("非法端口 %d：取值 0-65535（0 表示由系统分配）", port)
+	}
+	if bind == "" || strings.HasPrefix(bind, "/") {
+		return bind, port, nil
+	}
+	if strings.Contains(bind, ":") {
+		return "", 0, fmt.Errorf("监听地址里不要写端口（%q），端口请填在下面的「监听端口」里", bind)
+	}
+	if strings.ContainsAny(bind, " \t/?#@") {
+		return "", 0, fmt.Errorf("非法的监听地址 %q", bind)
+	}
+	return bind, port, nil
+}
+
+// Addr 返回最终的监听地址。
+func (c *Config) Addr() string { return ListenAddr(c.Bind, c.Port) }
+
 // IsUnixSocket 判断是否监听 unix socket。
+//
+// ⚠️ 读的是**启动时**的 Bind。运行期热重绑之后它就不再准确了 ——
+// 需要判断当下实际监听类型的地方，应当看实时监听的 Addr().Network()。
 func (c *Config) IsUnixSocket() bool { return strings.HasPrefix(c.Bind, "/") }
 
 // usageText 返回帮助文本。
@@ -1002,7 +1099,10 @@ func usageText() string {
 选项:
   -b, --bind <addrs>         监听地址或 unix socket
   -p, --port <port>          监听端口，默认 5000
+                             （这两项也能在页面的「设置 → 常规」里改，立即重绑；
+                               此处显式给过的值优先，重启后回到参数值）
       --path-prefix <path>   访问路径前缀
+                             （同样可在页面上改；显式给过时优先）
       --hidden <value>       目录列表中隐藏的路径 glob，例如 tmp,*.log
   -a, --auth <rules>         鉴权规则，例如 user:pass@/dir1:rw,/dir2
   -A, --allow-all            允许所有操作
@@ -1121,6 +1221,8 @@ func usageText() string {
   GET    /fs/settings               读取当前设置
   PUT    /fs/settings               请求体 {"root":"/srv/data","upload_max_size":10737418240}
                                           upload_max_size 为 0 表示不限制
+                                          也可改 path_prefix / listen_addr / listen_port
+                                          （改监听是热重绑：先建新监听，成功才关旧的）
   权限   需要对服务根拥有读写权限（否则 403）；受 --no-root-switch /
          --root-allow 约束，可切换范围之外的路径会被拒绝（400）
 
