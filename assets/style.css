@@ -439,8 +439,11 @@ svg {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 6px;
 }
-.search svg {
+/* ⚠️ 必须是直接子选择器：下拉箭头/菜单项图标也是 svg，用后代选择器
+   会把它们一并按「放大镜」绝对定位到输入框左侧。 */
+.search > svg {
   position: absolute;
   left: 9px;
   width: 15px;
@@ -465,6 +468,30 @@ svg {
   width: 260px;
 }
 .search input::-webkit-search-cancel-button { filter: grayscale(1); }
+
+/* 搜索方式按钮：比普通 .btn 更紧凑，与输入框等高。
+   独立类而非 .btn —— 见 index.html 里的说明（窄屏 .btn span 会被隐藏）。 */
+.search-mode { flex: none; }
+.search-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.search-mode-btn:hover { color: var(--text); border-color: var(--accent); }
+.search-mode-btn .caret { width: 11px; height: 11px; opacity: .6; }
+/* 菜单里的当前项：给个勾选的观感（复用 accent 色，不新增图标）。 */
+.search-mode .menu-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.search-mode .menu-pop { min-width: 168px; }
 
 /* ---------------------------------------------------------------- 按钮 */
 
@@ -2016,8 +2043,9 @@ html.booting body::after {
 @media (max-width: 820px) {
   .topbar { flex-wrap: wrap; gap: 10px; }
   .breadcrumb { order: 3; width: 100%; }
-  .search input { width: 130px; }
-  .search input:focus { width: 170px; }
+  /* 搜索框右侧多了「模糊/精确」按钮，输入框相应收窄，一行放得下。 */
+  .search input { width: 110px; }
+  .search input:focus { width: 150px; }
   .col-time { display: none; }
   /* 已经没有时间列了，图标按钮仍要留够位置（最宽的 8 个实测 268px）。 */
   .col-ops { width: 296px; }
@@ -2079,8 +2107,11 @@ html.booting body::after {
   #btn-refresh, .more-toggle, #btn-upload { flex: none; }
 
   .search { flex: 1 1 auto; min-width: 0; }
-  .search input { width: 100%; }
-  .search input:focus { width: 100%; }
+  /* 输入框吃掉剩余宽度，搜索方式按钮固定宽度靠右 —— 不能再给输入框
+     width:100%，否则它和按钮同处一行会溢出。 */
+  .search input { flex: 1 1 auto; width: auto; min-width: 0; }
+  .search input:focus { width: auto; }
+  .search-mode-btn { padding: 7px 6px; }
 
   /* 「更多」要带文字：只有一个「⋯」图标没人知道里面藏着入口，
      权限相关的功能也就会看起来像「不见了」。

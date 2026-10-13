@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -343,6 +344,102 @@ func TestSearchDisabled(t *testing.T) {
 	r := do(t, s, http.MethodGet, "/?q=readme", nil, nil)
 	if r.code != http.StatusForbidden {
 		t.Errorf("状态码 = %d, 期望 403", r.code)
+	}
+}
+
+// searchNames 发一次搜索请求，返回命中的名称。
+//
+// 用 url.Values.Encode 拼查询串：正则里的 [ ] \ ^ 直接写进 target 会被
+// httptest.NewRequest 当成非法请求目标而 panic。
+func searchNames(t *testing.T, s *Server, q, mode string) []string {
+	t.Helper()
+	v := url.Values{}
+	v.Set("q", q)
+	if mode != "" {
+		v.Set("mode", mode)
+	}
+	v.Set("json", "")
+	r := do(t, s, http.MethodGet, "/?"+v.Encode(), nil, nil)
+	if r.code != 200 {
+		t.Fatalf("搜索 %q mode=%q 状态码 = %d, 期望 200：%s", q, mode, r.code, r.body)
+	}
+	var listing struct {
+		Entries []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &listing); err != nil {
+		t.Fatal(err)
+	}
+	// 刻意用 nil 切片而非 make(...)：空结果要能与用例里的 nil 比较。
+	var names []string
+	for _, e := range listing.Entries {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestSearchModes(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	cases := []struct {
+		name string
+		q    string
+		mode string
+		want []string
+	}{
+		// 默认（不带 mode）仍是模糊包含，保证旧行为不变。
+		{"默认模糊", "readme", "", []string{"readme.md"}},
+		{"未知模式回落模糊", "readme", "bogus", []string{"readme.md"}},
+
+		// 精确：只有整体相等才命中，子串不算。
+		{"精确-子串不命中", "readme", "exact", nil},
+		{"精确-全名", "readme.md", "exact", []string{"readme.md"}},
+
+		// 通配符：按名字。
+		{"通配-zip", "*.zip", "wildcard", []string{"sample.zip"}},
+
+		// 正则：锚定 + 忽略大小写。
+		{"正则-锚定", `^notes\.txt$`, "regex", []string{"notes.txt"}},
+
+		// 路径命中：关键字里带目录时按相对路径匹配。
+		{"模糊-路径", "docs/readme", "fuzzy", []string{"readme.md"}},
+		{"精确-路径", "docs/readme.md", "exact", []string{"readme.md"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := searchNames(t, s, c.q, c.mode)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("q=%q mode=%q 命中 = %v, 期望 %v", c.q, c.mode, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSearchBadPatternIs400 非法表达式回 400（不是 500），且错误里说明原因。
+func TestSearchBadPatternIs400(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	cases := []struct{ mode, q, wantWord string }{
+		{"regex", "(", "正则"},
+		{"wildcard", "[", "通配"},
+	}
+	for _, c := range cases {
+		v := url.Values{}
+		v.Set("q", c.q)
+		v.Set("mode", c.mode)
+		r := do(t, s, http.MethodGet, "/?"+v.Encode(), nil, nil)
+		if r.code != http.StatusBadRequest {
+			t.Errorf("mode=%q q=%q 状态码 = %d, 期望 400：%s", c.mode, c.q, r.code, r.body)
+		}
+		if !strings.Contains(r.body, "400") {
+			t.Errorf("mode=%q 响应体未带 400：%s", c.mode, r.body)
+		}
 	}
 }
 

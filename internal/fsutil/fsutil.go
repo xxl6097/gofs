@@ -3,10 +3,12 @@ package fsutil
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +19,12 @@ import (
 
 // ErrEscaped 表示解析出的路径逃逸出了服务根目录。
 var ErrEscaped = errors.New("路径超出了服务根目录")
+
+// ErrBadSearchPattern 表示搜索表达式本身非法（正则/通配符语法错误）。
+//
+// 单独抽出来是因为它与「文件系统出错」性质不同：前者是调用方输入错误，
+// 应当回 400；后者才走 404/403/500。调用方用 errors.Is 区分。
+var ErrBadSearchPattern = errors.New("搜索表达式无效")
 
 // relator 是 ReadDir / Search 真正需要的能力：把磁盘路径转回 URL 路径。
 //
@@ -401,12 +409,133 @@ func isHidden(name string, globs []string) bool {
 	return false
 }
 
-// Search 在指定目录下递归查找名称匹配 pattern 的条目（不区分大小写）。
-// limit 为返回上限，0 表示不限制。
-func Search(res relator, root string, pattern string, hidden []string, limit int) ([]Entry, error) {
-	pattern = strings.ToLower(strings.TrimSpace(pattern))
+// SearchMode 为搜索的匹配方式。
+type SearchMode int
+
+const (
+	// SearchFuzzy 忽略大小写的「包含」匹配（默认，也是历史上唯一的行为）。
+	SearchFuzzy SearchMode = iota
+	// SearchExact 名称或相对路径与关键字完全相等（忽略大小写）。
+	SearchExact
+	// SearchWildcard 用 path.Match 的 glob 语法匹配名称或相对路径。
+	SearchWildcard
+	// SearchRegex 用 Go regexp（RE2，线性时间）匹配名称或相对路径，忽略大小写。
+	SearchRegex
+)
+
+// ParseSearchMode 把请求里的字符串解析成 SearchMode。
+//
+// 未知值与空串一律回落到 SearchFuzzy —— 这样旧客户端不带 mode 时行为不变，
+// 拼错的值也不会变成「一个都不命中」这种更难排查的结果。
+func ParseSearchMode(s string) SearchMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "exact", "equal", "equals":
+		return SearchExact
+	case "wildcard", "glob", "match":
+		return SearchWildcard
+	case "regex", "regexp", "re":
+		return SearchRegex
+	default:
+		return SearchFuzzy
+	}
+}
+
+// SearchOptions 是 Search 的参数。
+//
+// 用结构体而不是一串位置参数：模式是后加的，若继续按位置传，
+// 调用点会变成 Search(res, root, p, mode, hidden, limit) 这种一眼看不懂顺序的调用。
+type SearchOptions struct {
+	// Pattern 为搜索关键字（表达式），必填。
+	Pattern string
+	// Mode 为匹配方式，零值为 SearchFuzzy。
+	Mode SearchMode
+	// Hidden 为文件名 glob 列表，匹配到的条目及其子树会被跳过。
+	Hidden []string
+	// Limit 为返回上限，0 表示不限制。
+	Limit int
+}
+
+// searchMatcher 把一次搜索的表达式预先编译好。
+//
+// 之所以要单独一个类型：正则/通配符的编译是有成本的，遍历前编译一次、
+// 之后每个条目只做匹配，而不是在 WalkDir 里对每个文件重复 Compile。
+type searchMatcher struct {
+	mode   SearchMode
+	needle string         // Fuzzy/Exact 用：小写关键字
+	glob   string         // Wildcard 用：小写 glob
+	re     *regexp.Regexp // Regex 用：已编译（带 (?i)）
+}
+
+// newSearchMatcher 编译表达式；表达式非法时返回 ErrBadSearchPattern。
+func newSearchMatcher(mode SearchMode, pattern string) (*searchMatcher, error) {
+	m := &searchMatcher{mode: mode}
+	switch mode {
+	case SearchExact:
+		m.needle = strings.ToLower(strings.TrimSpace(pattern))
+	case SearchWildcard:
+		m.glob = strings.ToLower(strings.TrimSpace(pattern))
+		// 先拿一个空串试匹配，语法错误会在这里暴露 —— 否则错误要等到
+		// 遍历到第一个条目才出现，白白走一遍文件系统。
+		if _, err := path.Match(m.glob, ""); err != nil {
+			return nil, fmt.Errorf("%w：通配符写法有误（%v）", ErrBadSearchPattern, err)
+		}
+	case SearchRegex:
+		// (?i) 让正则忽略大小写，与其它模式口径一致（本服务的路径匹配
+		// 一律不区分大小写）。Go 的 regexp 是 RE2，不存在灾难性回溯。
+		re, err := regexp.Compile("(?i)" + pattern)
+		if err != nil {
+			return nil, fmt.Errorf("%w：正则表达式有误（%v）", ErrBadSearchPattern, err)
+		}
+		m.re = re
+	default:
+		m.mode = SearchFuzzy
+		m.needle = strings.ToLower(strings.TrimSpace(pattern))
+	}
+	return m, nil
+}
+
+// match 判断某个条目是否命中。name 为条目名，relPath 为相对搜索根的斜杠路径。
+//
+// 每个模式都是「名称 或 相对路径」取或：
+//   - 名称一侧让 `*.log`、`readme` 这类只关心文件名的写法能命中任意目录下的文件；
+//   - 路径一侧让 `docs/*.md`、`docs/readme.md` 这类带目录的写法能用。
+//
+// path.Match 的 `*` 不跨 `/`，所以 `*.log` 天然只会命中名字（路径里带 `/`），
+// `docs/*.md` 天然只会命中路径 —— 两个条件既互补又不会互相误伤。
+func (m *searchMatcher) match(name, relPath string) bool {
+	switch m.mode {
+	case SearchExact:
+		// 只对表达式做 trim（用户手输难免多空格），文件名与路径保持原样 ——
+		// 否则一个名字里真带前导空格的条目会被误判为「完全相等」。
+		return strings.EqualFold(name, m.needle) ||
+			strings.EqualFold(relPath, m.needle)
+	case SearchWildcard:
+		return globMatch(m.glob, name) || globMatch(m.glob, relPath)
+	case SearchRegex:
+		return m.re.MatchString(name) || m.re.MatchString(relPath)
+	default:
+		return strings.Contains(strings.ToLower(name), m.needle) ||
+			strings.Contains(strings.ToLower(relPath), m.needle)
+	}
+}
+
+// globMatch 为已预校验过语法的 glob 做匹配（此处可安全忽略错误）。
+func globMatch(glob, s string) bool {
+	ok, err := path.Match(glob, strings.ToLower(s))
+	return err == nil && ok
+}
+
+// Search 在指定目录下递归查找匹配的条目（不区分大小写）。
+//
+// 匹配目标同时包含文件名与相对路径，具体语义见 SearchMode 与 searchMatcher.match。
+func Search(res relator, root string, opt SearchOptions) ([]Entry, error) {
+	matcher, err := newSearchMatcher(opt.Mode, opt.Pattern)
+	if err != nil {
+		// 表达式非法：直接返回，连目录都不遍历。
+		return nil, err
+	}
 	out := make([]Entry, 0, 32)
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// 单个条目权限不足等情况直接跳过。
 			if d != nil && d.IsDir() {
@@ -414,16 +543,23 @@ func Search(res relator, root string, pattern string, hidden []string, limit int
 			}
 			return nil
 		}
-		if p != root && isHidden(d.Name(), hidden) {
+		// 根目录自身不进结果，但必须继续往下走。先判根再判隐藏：隐藏规则
+		// 只作用于根以下的条目 —— 搜索根的名字恰好命中隐藏 glob 时
+		// （例如 --hidden tmp 时在 tmp 目录里搜），整棵树仍应被遍历。
+		if p == root {
+			return nil
+		}
+		if isHidden(d.Name(), opt.Hidden) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if p == root {
-			return nil
+		relPath := ""
+		if r, rerr := filepath.Rel(root, p); rerr == nil {
+			relPath = filepath.ToSlash(r)
 		}
-		if !strings.Contains(strings.ToLower(d.Name()), pattern) {
+		if !matcher.match(d.Name(), relPath) {
 			return nil
 		}
 		fi, err := d.Info()
@@ -451,7 +587,7 @@ func Search(res relator, root string, pattern string, hidden []string, limit int
 			}
 		}
 		out = append(out, e)
-		if limit > 0 && len(out) >= limit {
+		if opt.Limit > 0 && len(out) >= opt.Limit {
 			return fs.SkipAll
 		}
 		return nil

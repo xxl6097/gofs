@@ -154,10 +154,22 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, listing *fs
 	s.writeHTML(w, s.newPageData(p, listing, "", s.isAdminRequest(r)))
 }
 
-// serveSearch 处理 ?q= 搜索。
+// serveSearch 处理 ?q= 搜索。?mode= 选择匹配方式（fuzzy/exact/wildcard/regex），
+// 缺省或无法识别时按 fuzzy 处理。
 func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPath, pattern string) {
-	entries, err := fsutil.Search(s.res, abs, pattern, s.cfg.Hidden, 3000)
+	entries, err := fsutil.Search(s.res, abs, fsutil.SearchOptions{
+		Pattern: pattern,
+		Mode:    fsutil.ParseSearchMode(r.URL.Query().Get("mode")),
+		Hidden:  s.cfg.Hidden,
+		Limit:   3000,
+	})
 	if err != nil {
+		// 表达式非法（坏正则 / 坏通配符）是调用方的输入错误，回 400。
+		// 不能交给 writeErr —— 它把未知错误一律当 500。
+		if errors.Is(err, fsutil.ErrBadSearchPattern) {
+			http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}

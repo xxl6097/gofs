@@ -134,8 +134,36 @@
     selected: new Set(),
     sortKey: 'name',
     sortDir: 1,
-    busy: false
+    busy: false,
+    // searchMode 为当前搜索方式，取值见 SEARCH_MODES。下面初始化时会用
+    // 持久化的值覆盖它 —— 这里先给默认值，保证读 localStorage 失败时也有值。
+    searchMode: 'fuzzy'
   };
+
+  // 搜索方式：key 传给服务端 ?mode=，label 只用于展示。
+  var SEARCH_MODES = [
+    { key: 'fuzzy', label: '模糊', hint: '包含即命中，不区分大小写' },
+    { key: 'exact', label: '精确', hint: '名称或路径完全相等' },
+    { key: 'wildcard', label: '通配', hint: '通配符 * 与 ?（* 不跨目录）' },
+    { key: 'regex', label: '正则', hint: 'Go 正则表达式，不区分大小写' }
+  ];
+  var SEARCH_MODE_KEY = 'gofs-search-mode';
+
+  // 找不到对应模式就回落到 fuzzy —— 与后端对未知 mode 的处理一致。
+  (function initSearchMode() {
+    var saved = null;
+    try { saved = localStorage.getItem(SEARCH_MODE_KEY); } catch (e) { /* 无痕模式等 */ }
+    for (var i = 0; i < SEARCH_MODES.length; i++) {
+      if (SEARCH_MODES[i].key === saved) { state.searchMode = saved; break; }
+    }
+  })();
+
+  function searchModeLabel(key) {
+    for (var i = 0; i < SEARCH_MODES.length; i++) {
+      if (SEARCH_MODES[i].key === key) return SEARCH_MODES[i].label;
+    }
+    return SEARCH_MODES[0].label;
+  }
 
   // pendingNav 保存「在导航途中又被请求的那一次导航」（只留最后一次）。
   // 见 navigate 里的说明：并发点击不能被静默丢掉。
@@ -1309,7 +1337,9 @@
     $('empty').hidden = list.length > 0 || !state.listing;
     if (list.length === 0 && state.listing) {
       $('empty').textContent = state.query
-        ? '没有匹配「' + state.query + '」的文件'
+        // 带上当前搜索方式：换个方式常有不同结果，空结果时提示一句，
+        // 用户就知道不是「文件真的不存在」，而是匹配口径的问题。
+        ? '没有匹配「' + state.query + '」的文件（' + searchModeLabel(state.searchMode) + '搜索）'
         : '这个目录是空的';
     }
 
@@ -1983,7 +2013,8 @@
   async function doSearch(q) {
     if (!q) { navigate(state.path); return; }
     try {
-      var res = await apiFetch(raw(encPath(state.path)) + '?q=' + encodeURIComponent(q) + '&json');
+      var res = await apiFetch(raw(encPath(state.path)) + '?q=' + encodeURIComponent(q) +
+        '&mode=' + encodeURIComponent(state.searchMode || 'fuzzy') + '&json');
       if (!res.ok) throw new Error(await res.text());
       var data = await res.json();
       state.query = q;
@@ -3730,6 +3761,59 @@
       e.stopPropagation();   // 别让上面的 document 监听立刻把它关掉
       toggleMenu('upload-wrap', 'upload-menu', 'btn-upload');
     };
+
+    // ---- 搜索方式下拉 ----
+    // 菜单项由 SEARCH_MODES 生成（而不是写死在 HTML 里）：模式表只有一处，
+    // 加一种模式不必再回头改 index.html。
+    initSearchModeMenu();
+    $('btn-search-mode').onclick = function (e) {
+      e.stopPropagation();
+      toggleMenu('search-mode-wrap', 'search-mode-menu', 'btn-search-mode');
+    };
+
+    // 用模式表生成菜单项，并同步按钮标签 / 占位符 / 当前项高亮。
+    function initSearchModeMenu() {
+      var menu = $('search-mode-menu');
+      menu.textContent = '';
+      SEARCH_MODES.forEach(function (m) {
+        var item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'menu-item';
+        item.setAttribute('role', 'menuitem');
+        item.dataset.mode = m.key;
+        item.title = m.hint;
+        item.textContent = m.label;
+        item.onclick = function () {
+          setSearchMode(m.key);
+          closeMenu();
+        };
+        menu.appendChild(item);
+      });
+      syncSearchModeUI();
+    }
+
+    function setSearchMode(key) {
+      state.searchMode = key;
+      try { localStorage.setItem(SEARCH_MODE_KEY, key); } catch (e) { /* 忽略 */ }
+      syncSearchModeUI();
+      // 已经处于搜索结果里时，切换方式要立刻重跑 —— 否则点了没反应，
+      // 用户会以为「换个方式还是同样的结果」。只是在浏览目录则不动。
+      var q = $('search-input').value.trim();
+      if (q && state.query) doSearch(q);
+    }
+
+    function syncSearchModeUI() {
+      var cur = state.searchMode || 'fuzzy';
+      $('search-mode-label').textContent = searchModeLabel(cur);
+      $('btn-search-mode').title = '搜索方式：' + searchModeLabel(cur);
+      $('search-input').placeholder = searchModeLabel(cur) + '搜索…';
+      Array.prototype.forEach.call(
+        $('search-mode-menu').querySelectorAll('.menu-item'),
+        function (it) {
+          it.setAttribute('aria-checked', it.dataset.mode === cur ? 'true' : 'false');
+        }
+      );
+    }
     $('btn-upload-file').onclick = function () { closeMenu(); $('file-input').click(); };
     $('btn-upload-dir').onclick = function () { closeMenu(); $('dir-input').click(); };
 
