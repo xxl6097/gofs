@@ -151,7 +151,14 @@ func within(root, p string) bool {
 	if p == root {
 		return true
 	}
-	return strings.HasPrefix(p, root+string(filepath.Separator))
+	// root 无尾分隔符时补一个，避免把 "/srv" 误判成 "/srvx" 的前缀。
+	// 但 root 本身已是分隔符结尾（如文件系统根的 "/"，或 Windows 的 "C:\"）时
+	// 不能再补 —— 补出来是 "//"，HasPrefix 恒为 false，
+	// 结果就是「白名单写了 / 反而谁都不放行」。
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		root += string(filepath.Separator)
+	}
+	return strings.HasPrefix(p, root)
 }
 
 // IsWithin 判断 p 是否位于 base 之内（含 base 本身）。
