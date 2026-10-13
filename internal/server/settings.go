@@ -19,14 +19,17 @@ import (
 // 所以这些可变的取值单独抽出来，用锁保护。
 //
 // 目前有四处：
-//   - 站点标题（浏览器标签页与顶栏品牌名，**会落盘**）
-//   - 单文件上传上限（登录取到管理员后可在页面上调整）
-//   - 在线编辑的大小上限（同上）
+//   - 站点标题（浏览器标签页与顶栏品牌名）
+//   - 单文件上传上限
+//   - 在线编辑的大小上限
 //   - 允许切换服务根目录的范围（由启动参数推导，运行期不变）
 //
-// 为什么只有标题落盘：上限是「临时放宽」性质的运行时覆盖，重启回到启动
-// 参数声明的值才是对的（否则运维临时调大一次就再也回不去了）；标题是标识，
-// 重启后还在才符合预期。
+// 前三项都会落盘（见 saveSettings）。**但不是无条件写**：值与启动参数
+// 相同时不写磁盘（见 saveSettings 的说明）—— 那样运维之后改启动参数
+// 仍然生效，不会被一个「其实等于默认值」的旧记录压住。
+//
+// 服务根目录的切换仍然**不落盘**：那是「这个部署该服务哪个目录」的声明，
+// 属于启动参数，不该被一次页面操作固化。
 type runtimeSettings struct {
 	cfg *config.Config
 
@@ -75,12 +78,21 @@ func (s *runtimeSettings) SetTitle(v string) error {
 
 // settingsDoc 是设置文件的磁盘格式。
 //
-// 带 version 是为了以后加字段时能识别旧文件。version 1 只有 title；
-// version 2 起多了 sites（运行期新增的附加站点）。
+// 带 version 是为了以后加字段时能识别旧文件：
+//
+//	1 只有 title
+//	2 起多了 sites（运行期新增的附加站点）
+//	3 起多了两个上限（upload_max_size / edit_max_size）
+//
+// 两个上限用**指针**：上传上限的 0 是有意义的取值（不限制），
+// 用零值当「没存过」会把「不限制」读成「没设置」。
 type settingsDoc struct {
 	Version int          `json:"version"`
 	Title   string       `json:"title,omitempty"`
 	Sites   []siteRecord `json:"sites,omitempty"`
+	// 只在「与启动参数不同」时才写（见 saveSettings）。
+	UploadMaxSize *int64 `json:"upload_max_size,omitempty"`
+	EditMaxSize   *int64 `json:"edit_max_size,omitempty"`
 }
 
 // siteRecord 是一个持久化的附加站点。
@@ -113,6 +125,16 @@ func (s *runtimeSettings) loadSettings() {
 		s.title = t
 	}
 	s.sites = append([]siteRecord(nil), doc.Sites...)
+	// 文件里的值优先于启动参数 —— 与标题、站点同一个口径。
+	// 上传上限 0 是合法值（不限制），所以只判「有没有存过」。
+	if doc.UploadMaxSize != nil {
+		s.uploadMaxSize = *doc.UploadMaxSize
+	}
+	// 编辑上限没有「不限制」这一档：文件里被手工写成 0/负数时忽略它，
+	// 让它回落到启动参数 —— 否则每个文件都会被判成超限（全都 413）。
+	if doc.EditMaxSize != nil && *doc.EditMaxSize > 0 {
+		s.editMaxSize = *doc.EditMaxSize
+	}
 }
 
 // Sites 返回持久化的附加站点。
@@ -141,7 +163,18 @@ func (s *runtimeSettings) saveSettings() error {
 	if path == "" {
 		return nil
 	}
-	doc := settingsDoc{Version: 2, Title: s.Title(), Sites: s.Sites()}
+	doc := settingsDoc{Version: 3, Title: s.Title(), Sites: s.Sites()}
+	// 只在**与启动参数不同**时才写这两项。
+	//
+	// 为什么不无脑写：那样「恢复启动时的默认值」之后，文件里会留下一份
+	// 等于旧默认值的记录；运维以后把 --upload-max-size 改大，重启却仍被
+	// 那份旧记录压住 —— 参数明明改了却不生效，很难查。
+	if v := s.UploadMaxSize(); v != s.cfg.UploadMaxSize {
+		doc.UploadMaxSize = &v
+	}
+	if v := s.EditMaxSize(); v != s.cfg.EditMaxSize {
+		doc.EditMaxSize = &v
+	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -247,14 +280,18 @@ func (s *runtimeSettings) UploadMaxSize() int64 {
 	return s.uploadMaxSize
 }
 
-// SetUploadMaxSize 修改单文件上传上限。负值会被归一化为 0（不限制）。
-func (s *runtimeSettings) SetUploadMaxSize(n int64) {
+// SetUploadMaxSize 修改单文件上传上限并落盘。负值会被归一化为 0（不限制）。
+//
+// 落盘失败不影响本次生效（内存里已经是新值），但要把错误回给调用方 ——
+// 否则管理员会以为「设好了」，重启后才发现又变回去了。
+func (s *runtimeSettings) SetUploadMaxSize(n int64) error {
 	if n < 0 {
 		n = 0
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.uploadMaxSize = n
+	s.mu.Unlock()
+	return s.saveSettings()
 }
 
 // EditMaxSize 返回当前生效的在线编辑大小上限（恒为正数）。
@@ -267,17 +304,18 @@ func (s *runtimeSettings) EditMaxSize() int64 {
 	return s.editMaxSize
 }
 
-// SetEditMaxSize 修改在线编辑大小上限。
+// SetEditMaxSize 修改在线编辑大小上限并落盘。
 //
 // 非正值会被归一化为默认值 —— 调用方（handler_settings）已经先校验过，
 // 这里只是兜底，避免出现「上限为 0」把每个文件都判成超限。
-func (s *runtimeSettings) SetEditMaxSize(n int64) {
+func (s *runtimeSettings) SetEditMaxSize(n int64) error {
 	if n <= 0 {
 		n = config.DefaultEditMaxSize
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.editMaxSize = n
+	s.mu.Unlock()
+	return s.saveSettings()
 }
 
 // AllowRoots 返回允许切换到的路径前缀（供界面展示）。

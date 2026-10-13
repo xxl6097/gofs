@@ -165,3 +165,152 @@ func TestTitleDefaultsToGofs(t *testing.T) {
 		t.Errorf("Normalize 后标题 = %q，期望 %q", c.Title, config.DefaultTitle)
 	}
 }
+
+// TestLimitsNotPersistedUntilChanged 确认「没改过就不写盘」。
+//
+// 这条不是洁癖：如果无条件把当前值写进文件，「恢复启动时的默认值」之后
+// 文件里会留下一份等于旧默认值的记录，运维以后改 --upload-max-size 就
+// 会被它压住 —— 参数改了却不生效，很难查。
+func TestLimitsNotPersistedUntilChanged(t *testing.T) {
+	sf := filepath.Join(t.TempDir(), "settings.json")
+	cfg := testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw",
+		"--upload-max-size", "1073741824", "--edit-max-size", "1048576")
+	cfg.SettingsFile = sf
+	s := newTestServer(t, cfg)
+	hdr := adminSettingsHdr()
+
+	// 只改标题：文件里不该出现两个上限。
+	if got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"title":"只改标题"}`), hdr); got.code != http.StatusOK {
+		t.Fatalf("改标题返回 %d：%s", got.code, got.body)
+	}
+	raw, err := os.ReadFile(sf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"upload_max_size", "edit_max_size"} {
+		if strings.Contains(string(raw), unwanted) {
+			t.Errorf("没改过的上限不该写进文件：%s", raw)
+		}
+	}
+}
+
+// TestLimitsRoundTripAndPersist 覆盖上限的落盘与重启恢复。
+func TestLimitsRoundTripAndPersist(t *testing.T) {
+	sf := filepath.Join(t.TempDir(), "settings.json")
+	root := t.TempDir()
+	cfg := testConfig(t, root, "-A", "-a", "boss:pw@/:rw",
+		"--upload-max-size", "1073741824", "--edit-max-size", "1048576")
+	cfg.SettingsFile = sf
+	s := newTestServer(t, cfg)
+	hdr := adminSettingsHdr()
+
+	put := func(body string) resp {
+		return do(t, s, http.MethodPut, "/fs/settings", strings.NewReader(body), hdr)
+	}
+	if got := put(`{"upload_max_size":10485760}`); got.code != http.StatusOK {
+		t.Fatalf("改上传上限返回 %d：%s", got.code, got.body)
+	}
+	if got := put(`{"edit_max_size":5242880}`); got.code != http.StatusOK {
+		t.Fatalf("改编辑上限返回 %d：%s", got.code, got.body)
+	}
+
+	// 文件里应当只有这两项（外加标题）。
+	raw, err := os.ReadFile(sf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"upload_max_size": 10485760`, `"edit_max_size": 5242880`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("设置文件里缺少 %s：%s", want, raw)
+		}
+	}
+
+	// 新实例（＝重启）用同一份文件与**同样的启动参数**：文件里的值胜出。
+	cfg2 := testConfig(t, root, "-A", "-a", "boss:pw@/:rw",
+		"--upload-max-size", "1073741824", "--edit-max-size", "1048576")
+	cfg2.SettingsFile = sf
+	s2 := newTestServer(t, cfg2)
+	if got := s2.settings.UploadMaxSize(); got != 10485760 {
+		t.Errorf("重启后上传上限 = %d，期望 10485760（文件优先）", got)
+	}
+	if got := s2.settings.EditMaxSize(); got != 5242880 {
+		t.Errorf("重启后编辑上限 = %d，期望 5242880（文件优先）", got)
+	}
+}
+
+// TestUploadMaxSizeZeroPersisted 确认「不限制」（0）能存能读 —— 这是两个上限
+// 必须用指针而不是零值判断的原因。
+func TestUploadMaxSizeZeroPersisted(t *testing.T) {
+	sf := filepath.Join(t.TempDir(), "settings.json")
+	root := t.TempDir()
+	cfg := testConfig(t, root, "-A", "-a", "boss:pw@/:rw")
+	cfg.SettingsFile = sf
+	s := newTestServer(t, cfg)
+
+	if got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"upload_max_size":0}`), adminSettingsHdr()); got.code != http.StatusOK {
+		t.Fatalf("设为不限制返回 %d：%s", got.code, got.body)
+	}
+	raw, _ := os.ReadFile(sf)
+	if !strings.Contains(string(raw), `"upload_max_size": 0`) {
+		t.Fatalf("「不限制」没写进文件：%s", raw)
+	}
+
+	cfg2 := testConfig(t, root, "-A", "-a", "boss:pw@/:rw") // 启动参数是默认 10GiB
+	cfg2.SettingsFile = sf
+	s2 := newTestServer(t, cfg2)
+	if got := s2.settings.UploadMaxSize(); got != 0 {
+		t.Errorf("重启后上传上限 = %d，期望 0（不限制）", got)
+	}
+}
+
+// TestEditMaxSizeZeroInFileIgnored 确认文件里被手工写成 0 的编辑上限被忽略。
+//
+// 0 会让每个文件都判成超限（全都 413），是个能把服务用死的值，
+// 所以宁可回落到启动参数。
+func TestEditMaxSizeZeroInFileIgnored(t *testing.T) {
+	sf := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(sf, []byte(`{"version":3,"edit_max_size":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw", "--edit-max-size", "2097152")
+	cfg.SettingsFile = sf
+	s := newTestServer(t, cfg)
+
+	if got := s.settings.EditMaxSize(); got != 2097152 {
+		t.Errorf("编辑上限 = %d，期望回落到启动参数 2097152", got)
+	}
+}
+
+// TestRestoreDefaultClearsPersistedLimit 确认「恢复启动时的默认值」之后，
+// 文件里不再留那条记录 —— 于是运维之后改启动参数能生效。
+func TestRestoreDefaultClearsPersistedLimit(t *testing.T) {
+	sf := filepath.Join(t.TempDir(), "settings.json")
+	root := t.TempDir()
+	cfg := testConfig(t, root, "-A", "-a", "boss:pw@/:rw", "--upload-max-size", "1073741824")
+	cfg.SettingsFile = sf
+	s := newTestServer(t, cfg)
+	hdr := adminSettingsHdr()
+
+	if got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"upload_max_size":10485760}`), hdr); got.code != http.StatusOK {
+		t.Fatalf("改动返回 %d", got.code)
+	}
+	// 恢复成启动参数的值。
+	if got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"upload_max_size":1073741824}`), hdr); got.code != http.StatusOK {
+		t.Fatalf("恢复默认返回 %d", got.code)
+	}
+	raw, _ := os.ReadFile(sf)
+	if strings.Contains(string(raw), "upload_max_size") {
+		t.Errorf("恢复默认后不该再留记录：%s", raw)
+	}
+
+	// 于是把启动参数改大，重启就生效（不被旧记录压住）。
+	cfg2 := testConfig(t, root, "-A", "-a", "boss:pw@/:rw", "--upload-max-size", "2147483648")
+	cfg2.SettingsFile = sf
+	if got := newTestServer(t, cfg2).settings.UploadMaxSize(); got != 2147483648 {
+		t.Errorf("改启动参数没生效：%d", got)
+	}
+}

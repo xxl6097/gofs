@@ -227,7 +227,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		old := s.settings.UploadMaxSize()
-		s.settings.SetUploadMaxSize(*req.UploadMaxSize)
+		if err := s.settings.SetUploadMaxSize(*req.UploadMaxSize); err != nil {
+			// 与标题同理：内存里已经生效，只是没落盘 —— 照实说，
+			// 别让管理员以为「重启后还在」。
+			s.logger.Errorf("上传上限落盘失败: %v", err)
+			http.Error(w, "500 Internal Server Error: 上限已生效，但写入设置文件失败："+
+				err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.logger.Infof("单文件上传上限：%s → %s",
 			humanSize(old), humanSize(s.settings.UploadMaxSize()))
 	}
@@ -244,7 +251,12 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		old := s.settings.EditMaxSize()
-		s.settings.SetEditMaxSize(*req.EditMaxSize)
+		if err := s.settings.SetEditMaxSize(*req.EditMaxSize); err != nil {
+			s.logger.Errorf("编辑上限落盘失败: %v", err)
+			http.Error(w, "500 Internal Server Error: 上限已生效，但写入设置文件失败："+
+				err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.logger.Infof("在线编辑上限：%s → %s",
 			humanSize(old), humanSize(s.settings.EditMaxSize()))
 	}

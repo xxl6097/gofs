@@ -119,6 +119,9 @@
       hint.appendChild(b);
       hint.appendChild(document.createTextNode(
         '　·　启动参数默认值：' + fmt(opts.def)));
+      if (opts.persistHint) {
+        hint.appendChild(document.createTextNode('　·　' + opts.persistHint));
+      }
 
       var quick = document.createElement('button');
       quick.type = 'button';
@@ -489,7 +492,8 @@
         current: function () { return cur.upload_max_size; },
         placeholder: '例如 10',
         unlimitedHint: '不限制单文件大小 —— 只要磁盘放得下就能传。',
-        limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。'
+        limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。',
+        persistHint: '改过之后会记住，重启仍生效。'
       });
       el.appendChild(uploadField.field);
 
@@ -506,7 +510,8 @@
         // 编辑上限没有「不限制」：打开文件要把整份内容读进内存，
         // 放开等于给一个几 GB 的「文本」文件留个口子。服务端也只收正整数。
         allowUnlimited: false,
-        limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。'
+        limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。',
+        persistHint: '改过之后会记住，重启仍生效。'
       });
       el.appendChild(editField.field);
 
