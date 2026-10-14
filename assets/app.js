@@ -2682,6 +2682,10 @@
     wrap.appendChild(cur);
     body.appendChild(wrap);
 
+    // 计时从弹窗出现那一刻算起，也就是用户看到「开始上传」之后 ——
+    // 之前的确认框（传大量文件时）不该算进上传耗时里。
+    var started = Date.now();
+
     var m = openModal({
       title: (isTree ? '上传文件夹' : '上传 ' + jobs.length + ' 个文件'),
       body: body,
@@ -2699,7 +2703,10 @@
     function repaint(name, seq) {
       var pct = totalBytes > 0 ? Math.min(100, (loadedTotal / totalBytes) * 100) : 0;
       bar.style.width = pct.toFixed(1) + '%';
-      metaL.textContent = Math.round(pct) + '%';
+      // 百分比旁边记上已用时间：右侧那半是「还剩多久」，左侧这半是
+      // 「已经花了多久」。速度读数会随瞬时波动跳，耗时是单调的，更能说明
+      // 到底卡了还是真在跑。
+      metaL.textContent = Math.round(pct) + '%　·　已用 ' + fmtDuration(Date.now() - started);
       metaR.textContent = fmtSize(loadedTotal) + ' / ' + fmtSize(totalBytes) +
         speedSuffix(sp.sample(loadedTotal, totalBytes));
       // 传文件夹时把「第几个 / 共几个」和当前相对路径都写出来，
@@ -2741,12 +2748,13 @@
     poolDone = true;
 
     var okCount = jobs.length - failures.length;
+    var elapsedMs = Date.now() - started;
     bar.style.width = '100%';
     if (!failures.length) bar.style.background = 'var(--ok)';
     m.close();
 
     var msg = (cancelled ? '已取消，' : '') + '已上传 ' + okCount + '/' + jobs.length + ' 个文件（共 ' +
-      fmtSize(totalBytes) + '）';
+      fmtSize(totalBytes) + '，耗时 ' + fmtDuration(elapsedMs) + '）';
     if (destDir !== targetDir) msg += '\n存入 ' + destDir + '/';
     if (cancelled) msg += '\n余下 ' + (jobs.length - finished) + ' 个文件未上传';
     if (failures.length) {
