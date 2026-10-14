@@ -875,6 +875,33 @@
     return { el: p.el, footerItems: p.buttons || [] };
   }
 
+  // ---------------------------------------------------------------- 等服务回来
+
+  // healthOK 探一次 /fs/health，返回服务是否已经能响应。
+  //
+  // 用裸 fetch 而不是 G.apiFetch：这个接口不需要鉴权，而 apiFetch 遇到 401
+  // 会把用户弹到登录框 —— 服务刚重启、内存里的会话表被清空时，正需要避开它。
+  async function healthOK() {
+    try {
+      var res = await fetch(EP_HEALTH, { cache: 'no-store' });
+      return res.ok;
+    } catch (e) {
+      return false;   // 连不上：多半还没起来
+    }
+  }
+
+  // waitUntilBack 每 intervalMs 探一次，最多 tries 次，返回服务是否恢复。
+  //
+  // 先等再探（而不是先探）：升级/重启刚发出去的那一刻服务往往还活着，
+  // 立刻探会立刻「成功」，等于没等 —— 而它下一秒才真的开始换进程。
+  async function waitUntilBack(tries, intervalMs) {
+    for (var i = 0; i < tries; i++) {
+      await new Promise(function (r) { setTimeout(r, intervalMs); });
+      if (await healthOK()) return true;
+    }
+    return false;
+  }
+
   function buildUpgradeTab() {
     var el = document.createElement('div');
     // 三块互相独立：注入了 Upgrader 才有「检查更新」，注入了 Restarter
@@ -1051,9 +1078,8 @@
             prog.textContent = '升级失败：' + payload.message;
             btn.disabled = false;
           } else if (name === 'done') {
-            prog.className = 'upgrade-progress ok';
-            prog.textContent = payload.message || '升级完成';
             btn.textContent = '已升级';
+            reloadAfterUpgrade(prog, payload.message);
           }
         });
       }).catch(function (e) {
@@ -1061,6 +1087,31 @@
         prog.textContent = '升级失败：' + e.message;
         btn.disabled = false;
       });
+    }
+
+    // reloadAfterUpgrade 把「升级完成」显示出来，等服务就绪后**自动刷新一次**页面。
+    //
+    // 为什么不能收到 done 就直接 location.reload()：
+    //   1) 实现方常常在升级末尾把进程换掉（原地重执行，或交给 supervisor 拉起），
+    //      那一刻连接是断的。立刻刷只会刷到一个连不上的页面 —— 浏览器弹
+    //      「无法访问」，看起来就像升级把服务搞挂了。
+    //   2) 刷得太快也看不清结果，用户只看到弹窗凭空消失。
+    // 所以先等服务重新能响应（waitUntilBack 已经先等一秒再探，没换进程的实现
+    // 也会等够这一秒），再刷。
+    //
+    // 服务 60 秒都没回来时**不刷**：这时候刷过去就是一个连不上的页面，
+    // 停在原地把话说清楚，比刷一个死页面强。
+    async function reloadAfterUpgrade(prog, msg) {
+      var text = msg || '升级完成';
+      prog.className = 'upgrade-progress ok';
+      prog.textContent = text + '　正在等服务就绪，随后自动刷新页面…';
+      if (!(await waitUntilBack(60, 1000))) {
+        prog.className = 'upgrade-progress err';
+        prog.textContent = text + '，但服务 60 秒内没有响应，请手动刷新页面确认。';
+        return;
+      }
+      prog.textContent = text + '　服务已就绪，正在刷新页面…';
+      setTimeout(function () { location.reload(); }, 600);
     }
 
     return box;
@@ -1139,18 +1190,11 @@
     }
 
     async function waitForBack() {
-      // 最多等 60 秒。用裸 fetch 而不是 apiFetch：这个接口不需要鉴权，
-      // 而 apiFetch 遇到 401 会把用户弹到登录框 —— 重启期间正需要避开它。
-      for (var i = 0; i < 60; i++) {
-        await new Promise(function (r) { setTimeout(r, 1000); });
-        try {
-          var res = await fetch(EP_HEALTH, { cache: 'no-store' });
-          if (res.ok) {
-            say('服务已重启，正在刷新页面…', 'ok');
-            setTimeout(function () { location.reload(); }, 800);
-            return;
-          }
-        } catch (e) { /* 还没起来，继续等 */ }
+      // 最多等 60 秒（见 waitUntilBack）。
+      if (await waitUntilBack(60, 1000)) {
+        say('服务已重启，正在刷新页面…', 'ok');
+        setTimeout(function () { location.reload(); }, 800);
+        return;
       }
       say('等了 60 秒服务仍未恢复，请手动刷新页面确认。', 'err');
       btn.disabled = false;
