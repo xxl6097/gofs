@@ -658,9 +658,18 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	if tok := shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil &&
 			k.IsShare() && k.AllowsPath(urlPath) {
-			// 首次用 `?share=` 打开时下发 cookie，让页面后续的 XHR 也认得出。
-			// 只认查询参数那一次，避免每次请求都重设 Max-Age。
-			if r.URL.Query().Get("share") != "" {
+			// 首次拿到令牌的那一次就下发 cookie，之后靠它认人。
+			//
+			// ⚠️ 判据不能只看 `?share=`。分享地址有**两种形式**，而「分享」
+			// 按钮生成出来的偏偏是没有查询串的那种（/s/<token>/…，为了 wget
+			// 递归下来文件名干净）。只认查询串的话，路径形式打开的页面拿不到
+			// cookie —— 页面本身照样能渲染（初始数据是服务端注入的），但页面里
+			// 随后的每一个 XHR（列子目录、预览、上传、删除）都会 401，
+			// 前端收到 401 就弹登录框：表现为「点任何一个操作都跳登录页」。
+			//
+			// 所以判据改成「这次用的令牌不是从 cookie 来的」：两种形式都覆盖，
+			// 而已经在用 cookie 的请求不再重设，避免每个 XHR 都带一次 Set-Cookie。
+			if c, err := r.Cookie(shareCookieName); err != nil || c.Value != tok {
 				s.setShareCookie(w, tok, k.Scope, k.ExpiresAt)
 			}
 			return permResult{

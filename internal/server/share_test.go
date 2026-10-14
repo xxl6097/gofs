@@ -557,3 +557,57 @@ func TestCannotMintShareBeyondOwnPerm(t *testing.T) {
 		t.Fatalf("可写范围签发可读写分享返回 %d，期望 201：%s", got.code, got.body)
 	}
 }
+
+// TestShareCookieForSPAOnPathForm 钉住一个很容易漏掉的方向。
+//
+// 分享地址有两种形式，而**「分享」按钮生成的是路径形式**（/s/<token>/…，
+// 为了 wget 递归下来文件名干净）。SPA 打开后会把地址栏里的 /s/<token>/ 前缀
+// 丢掉（它按 state.path 拼 URL），后续的 XHR 全是 /docs/… 这种普通路径 ——
+// 那些请求只能靠这条 cookie 认人。
+//
+// 早先只在 `?share=` 形式下发 cookie，于是路径形式打开的分享页表现为
+// 「页面能看，但点什么都跳登录页」：列子目录、预览、上传、删除全部 401，
+// 前端收到 401 就弹登录框。可读写分享把这个 bug 暴露得最明显
+// （点删除/上传立刻就撞上），但只读分享同样中招，只是不容易发现。
+func TestShareCookieForSPAOnPathForm(t *testing.T) {
+	s, _ := shareServer(t)
+	tok := newShareRW(t, s, "/docs")
+
+	// 第一步：路径形式的页面请求要下发 cookie。
+	r := httptest.NewRequest(http.MethodGet, "/s/"+tok+"/docs/?json", nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("返回 %d，期望 200", res.StatusCode)
+	}
+	var ck *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == shareCookieName {
+			ck = c
+		}
+	}
+	if ck == nil {
+		t.Fatal("路径形式的分享页没有下发 cookie —— 页面里的 XHR 会全部 401")
+	}
+	if !strings.HasPrefix(ck.Path, "/docs") {
+		t.Errorf("cookie Path = %q，应当限定在 /docs 内", ck.Path)
+	}
+
+	// 第二步（真正的回归点）：**不带令牌、只靠 cookie** 去写，必须成功。
+	// 这就是 SPA 的处境 —— 它发的是 /docs/… 普通路径，URL 里没有令牌。
+	cookie := map[string]string{"Cookie": shareCookieName + "=" + tok}
+	put := do(t, s, http.MethodPut, "/docs/via-cookie.txt", strings.NewReader("x"), cookie)
+	if put.code != http.StatusCreated && put.code != http.StatusOK {
+		t.Fatalf("只靠 cookie 的上传返回 %d，期望 2xx：%s", put.code, put.body)
+	}
+	del := do(t, s, http.MethodDelete, "/docs/via-cookie.txt", nil, cookie)
+	if del.code >= 400 {
+		t.Fatalf("只靠 cookie 的删除返回 %d：%s", del.code, del.body)
+	}
+	// 子目录列举（只读分享也走的同一条路）同样不能 401。
+	if got := do(t, s, http.MethodGet, "/docs/sub/?json", nil, cookie); got.code != http.StatusOK {
+		t.Fatalf("只靠 cookie 列子目录返回 %d", got.code)
+	}
+}
