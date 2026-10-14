@@ -331,6 +331,37 @@ func withReadProgress(w http.ResponseWriter, r *http.Request, d time.Duration) {
 	r.Body = &progressReader{r: r.Body, rc: rc, timeout: d}
 }
 
+// uploadCopyBuf 是搬运上传请求体时单次读写的字节数。
+//
+// io.Copy 默认一次只搬 32KB —— 一个 1GiB 的文件就是三万余次 write(2)。
+// 在本机（页缓存把所有写都吸收掉）这看不出问题，但落到「每次写都有固定开销」
+// 的存储上（限速的云盘、网络卷、日志落在慢盘的日志式文件系统）差别就大了：
+// 实测过一台这样的服务器，**读**能跑到 30–55 MiB/s，**上传**却始终卡在
+// ~3.3 MiB/s，而服务端文件大小的增长曲线与客户端发送速率严丝合缝
+// （说明阻塞点不在网络，而在 write(2)）。把单次写入放大到 1MiB，
+// 写入系统调用少 32 倍，文件系统也才有机会把相邻的写合并成顺序落盘。
+const uploadCopyBuf = 1 << 20
+
+// uploadBufPool 复用缓冲区：上传是长连接，每次请求现分配 1MiB 没必要，
+// 而并发闸门允许同时有几百个上传，真按峰值分配就是几百 MiB 的垃圾。
+var uploadBufPool = sync.Pool{New: func() any { return make([]byte, uploadCopyBuf) }}
+
+// onlyWriter 只暴露 Write，把底层类型实现的其它接口统统藏起来。
+//
+// ⚠️ 这层包装不是多余的：*os.File 实现了 io.ReaderFrom，io.Copy 会改走
+// f.ReadFrom(r)，我们准备的缓冲区会被**无声忽略**（ReadFrom 内部自己开
+// 32KB），看起来改了其实没改。包一层之后 io.Copy 才会用我们的缓冲区。
+type onlyWriter struct{ w io.Writer }
+
+func (w onlyWriter) Write(p []byte) (int, error) { return w.w.Write(p) }
+
+// copyUpload 把上传的请求体搬进目标文件，用池化的大缓冲区（见 uploadCopyBuf）。
+func copyUpload(dst io.Writer, src io.Reader) (int64, error) {
+	buf := uploadBufPool.Get().([]byte)
+	defer uploadBufPool.Put(buf)
+	return io.CopyBuffer(onlyWriter{dst}, src, buf)
+}
+
 // requestBody 给请求体套上大小上限。
 //
 // 返回 false 表示请求过大、已经写出响应，调用方应立即返回。

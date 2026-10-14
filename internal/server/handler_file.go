@@ -138,7 +138,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	}
 	defer f.Close()
 
-	n, err := io.Copy(f, r.Body)
+	n, err := copyUpload(f, r.Body)
 	if err != nil {
 		// 超限时 MaxBytesReader 会以这个错误中断读取。
 		if isBodyTooLarge(err) {
@@ -340,7 +340,7 @@ func writeAll(dst string, src io.Reader) error {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, src)
+	_, err = copyUpload(f, src)
 	return err
 }
 
