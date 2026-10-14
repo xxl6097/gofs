@@ -20,6 +20,35 @@
   var ASSETS = BASE + '/fs/assets/';
   var API = BASE + '/fs/extract';
 
+  // shareToken 是当前页面所属分享链接的令牌；不在分享页时是空串。
+  //
+  // 为什么要把它记下来：分享地址是**路径形式**（/s/<token>/docs/…），
+  // 而 SPA 内部一律按 state.path（/docs/…）拼 URL。不加回前缀的话，
+  // 一进子目录地址栏就退化成 /docs/sub/ —— 把地址复制给别人，对方打开
+  // 看到的是登录框（那条路径根本不属于任何分享）；页面里的 XHR 也跟着
+  // 丢掉令牌。所以：
+  //   - 文件空间的 URL 一律带上前缀（见 fileURL / dirURL）；
+  //   - 接口调用带上 ?share=（见 apiFetch）—— /fs/* 不在分享路径下面，
+  //     路径形式覆盖不到它，只能靠查询串认。
+  //
+  // 两种分享地址形式都要认：路径形式（复制出来的是这种）与 ?share= 查询串。
+  var shareToken = (function () {
+    var p = location.pathname;
+    if (BASE && p.indexOf(BASE) === 0) p = p.slice(BASE.length);
+    var m = /^\/s\/([^/]+)/.exec(p);
+    if (m) {
+      try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+    }
+    try {
+      return new URLSearchParams(location.search).get('share') || '';
+    } catch (e) {
+      return '';
+    }
+  })();
+
+  // sharePath 返回分享地址的路径前缀（形如 /s/<token>），不在分享页时为空串。
+  function sharePath() { return shareToken ? '/s/' + encodeURIComponent(shareToken) : ''; }
+
   // ------------------------------------------------------------ 权限与配置
   //
   // 这些值会随登录状态变化：未登录时服务端只下发一张空壳（权限位全 false、
@@ -280,9 +309,22 @@
   }
 
   // apiFetch 是所有请求的统一入口：自动带凭据，401 时转交登录流程。
+  // withShare 给接口地址补上分享令牌。
+  //
+  // 为什么接口这一路不能靠 cookie：那条 cookie 的 Path 限定在分享范围内
+  // （/docs/），而 /fs/* 压根不在那棵子树下面 —— 浏览器根本不会带上它。
+  // 漏掉这一步的表现就是「在分享页里点开一个文件 → 弹登录框」：
+  // 编辑器走的是 /fs/text、Office 预览走 /fs/office、解压走 /fs/extract，
+  // 全是 /fs/ 开头的，401 之后前端就弹登录了。
+  function withShare(url) {
+    if (!shareToken || /[?&]share=/.test(url)) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'share=' + encodeURIComponent(shareToken);
+  }
+
   async function apiFetch(url, opts) {
     opts = opts || {};
     opts.headers = authHeaders(opts.headers);
+    url = withShare(url);
     var res;
     try {
       res = await fetch(url, opts);
@@ -922,7 +964,13 @@
     return String(p).split('/').map(encodeURIComponent).join('/');
   }
   function raw(p) { return BASE + p; }
-  function fileURL(p) { return raw(encPath(p)); }
+  // fileURL 拼的是**文件空间**的地址，所以要带上分享前缀。
+  //
+  // 带前缀有两个作用：地址栏一进子目录不会丢掉 /s/<token>/（复制出去
+  // 仍然是能直接打开的分享地址），以及请求自带令牌 —— 下载、预览、
+  // <img>/<video> 这些**不走 apiFetch** 的直接地址因此也认得出来。
+  // ⚠️ 不要往 raw() 里加前缀：它同时拼 /fs/… 接口，那些路径不在分享下面。
+  function fileURL(p) { return raw(sharePath() + encPath(p)); }
 
   // dirURL 返回目录的规范 URL：**恰好一个**结尾斜杠。
   //
@@ -4249,6 +4297,11 @@
   function pathFromLocation() {
     var p = decodeURIComponent(location.pathname);
     if (BASE && p.indexOf(BASE) === 0) p = p.slice(BASE.length);
+    // 分享页的地址是 /s/<token>/docs/…，而 state.path 只认 /docs/…。
+    // 前缀不去掉的话，走到这一支时会把整条分享路径当成目录去查列表。
+    var sp = sharePath();
+    if (sp && p.indexOf(sp + '/') === 0) p = p.slice(sp.length);
+    else if (sp && p === sp) p = '/';
     return p || '/';
   }
 
