@@ -3574,3 +3574,53 @@ func TestTextReadRejectsInvalidUTF8(t *testing.T) {
 		t.Errorf("状态码 = %d, 期望 415；%s", code, body)
 	}
 }
+
+// TestSearchReportsTruncation 确认搜索被截断时**如实上报**。
+//
+// 命中数超过上限时，响应必须带 truncated 与 total_all（真实命中数），
+// 前端据此显示「共 N 项命中，仅列出前 M 项」。
+// 早先这两项都没置 —— 命中一万条只回 3000，界面上却和「一共 3000 条」
+// 长得一模一样，用户以为那就是全部。目录列举早就是这么报的，搜索漏了。
+func TestSearchReportsTruncation(t *testing.T) {
+	root := t.TempDir()
+	// 造出比上限更多的命中（上限 3000，这里 3100 个小文件）。
+	for i := 0; i < 3100; i++ {
+		writeFile(t, filepath.Join(root, "hit-"+itoa4(i)+".txt"), []byte("x"))
+	}
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	body := do(t, s, http.MethodGet, "/?json&q=hit-", nil, nil).body
+	var d map[string]any
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := d["entries"].([]any)
+	if len(entries) != 3000 {
+		t.Errorf("返回 %d 条，期望被截断到 3000", len(entries))
+	}
+	if d["truncated"] != true {
+		t.Errorf("没有标记 truncated：%v", d["truncated"])
+	}
+	if got, _ := d["total_all"].(float64); int(got) != 3100 {
+		t.Errorf("total_all = %v，期望 3100（真实命中数）", d["total_all"])
+	}
+
+	// 没到上限时不该冒充截断。
+	body2 := do(t, s, http.MethodGet, "/?json&q=hit-0001", nil, nil).body
+	var d2 map[string]any
+	if err := json.Unmarshal([]byte(body2), &d2); err != nil {
+		t.Fatal(err)
+	}
+	if d2["truncated"] == true {
+		t.Error("只命中几条却标了 truncated")
+	}
+}
+
+func itoa4(n int) string {
+	s := ""
+	for i := 0; i < 4; i++ {
+		s = string(rune('0'+n%10)) + s
+		n /= 10
+	}
+	return s
+}

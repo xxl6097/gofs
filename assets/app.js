@@ -1326,7 +1326,11 @@
     if (size > 0) out += narrow ? ' · ' + fmtSize(size) : ' · 文件合计 ' + fmtSize(size);
 
     if (l.truncated) {
-      out += '　·　已截断：该目录共 ' + (l.total_all || 0) + ' 项，仅列出前 ' + listed + ' 项';
+      // 搜索结果的「总数」是命中数，不是目录里的条目数 —— 同一句文案
+      // 在两种语境下都得读得通。
+      out += state.query
+        ? '　·　已截断：共 ' + (l.total_all || 0) + ' 项命中，仅列出前 ' + listed + ' 项'
+        : '　·　已截断：该目录共 ' + (l.total_all || 0) + ' 项，仅列出前 ' + listed + ' 项';
     }
     return out;
   }
@@ -2015,21 +2019,66 @@
     return true;
   }
 
-  async function doSearch(q) {
-    if (!q) { navigate(state.path); return; }
+  // searchSeq 让**只有最新那次搜索**的结果能落地。
+  //
+  // 两个搜索同时在路上是常态：快速输入、切换匹配方式、以及输入法先发一次拼音
+  // 再发一次中文。而回包顺序没有任何保证 —— 旧结果后到就会覆盖新结果，
+  // 更糟的是它会把**那一次的关键字写回输入框**：用户确认的中文被替换成拼音，
+  // 看起来就像「搜完中文自己变成了拼音搜索」。
+  var searchSeq = 0;
+
+  // setSearchBusy 切换搜索框上的「正在搜索」反馈。
+  //
+  // 搜索是网络往返，慢的时候（大目录、远程盘）几百毫秒到几秒都可能；
+  // 这期间界面上必须有个东西在动，否则用户只会以为「点了没反应」。
+  // 只做视觉与 aria，不动结果列表 —— 旧结果留到新结果回来再换，避免闪一下空白。
+  function setSearchBusy(on) {
+    var box = document.querySelector('.search');
+    if (!box) return;
+    if (on) {
+      box.classList.add('searching');
+      box.setAttribute('data-searching', '1');
+      box.setAttribute('aria-busy', 'true');
+    } else {
+      box.classList.remove('searching');
+      box.removeAttribute('data-searching');
+      box.removeAttribute('aria-busy');
+    }
+  }
+
+  // doSearch 执行一次搜索。
+  //
+  // syncInput 表示「要不要把关键字写回输入框」：只有**不是用户在那个框里敲出来的**
+  // 搜索（切换匹配方式时重跑等）才需要写回。用户正在编辑时写回是有害的 ——
+  // 输入法确认中文之后、响应回来之前，用户可能已经又改了内容，
+  // 这时按旧关键字回写就会把他刚输入的东西顶掉。
+  async function doSearch(q, syncInput) {
+    if (!q) {
+      // 清空搜索：作废在飞的那次，回目录列表。
+      searchSeq++;
+      setSearchBusy(false);
+      navigate(state.path);
+      return;
+    }
+    var seq = ++searchSeq;
+    setSearchBusy(true);
     try {
       var res = await apiFetch(raw(encPath(state.path)) + '?q=' + encodeURIComponent(q) +
         '&mode=' + encodeURIComponent(state.searchMode || 'fuzzy') + '&json');
       if (!res.ok) throw new Error(await res.text());
       var data = await res.json();
+      if (seq !== searchSeq) return; // 已经有更新的搜索了，这次的结果作废
       state.query = q;
       state.entries = data.entries || [];
       state.listing = data;
       state.selected.clear();
       render();
-      $('search-input').value = q;
+      if (syncInput) $('search-input').value = q;
     } catch (err) {
-      toast('err', '搜索失败：' + err.message);
+      // 过期的失败也不必打扰用户 —— 他关心的是最新那次。
+      if (seq === searchSeq) toast('err', '搜索失败：' + err.message);
+    } finally {
+      if (seq === searchSeq) setSearchBusy(false);
     }
   }
 
@@ -3834,7 +3883,9 @@
       // 已经处于搜索结果里时，切换方式要立刻重跑 —— 否则点了没反应，
       // 用户会以为「换个方式还是同样的结果」。只是在浏览目录则不动。
       var q = $('search-input').value.trim();
-      if (q && state.query) doSearch(q);
+      // 换方式就重跑一次。这里**不**回写输入框：框里的内容本来就是用户的，
+      // 回写只会在「用户边打字边切方式」时把他的输入顶掉。
+      if (q && state.query) doSearch(q, false);
     }
 
     function syncSearchModeUI() {
@@ -3935,12 +3986,36 @@
     });
 
     // 搜索：输入防抖
+    //
+    // ⚠️ 必须等输入法**确认**之后再搜。中文/日文/韩文输入时，浏览器会在
+    // 合成期间不停地发 input 事件，而那时输入框里是拼音字母（如 "xiangmu"）。
+    // 早先没管这件事，后果有两个：防抖一过就拿拼音去搜（结果当然对不上），
+    // 而且那次搜索的响应会把拼音写回输入框 —— 用户确认的中文被顶掉，
+    // 表现就是「搜完中文，输入框和结果又变成拼音」。
+    //
+    // 两道判断都要：compositionstart/end 是主路（覆盖所有浏览器），
+    // e.isComposing 兜住「只发 input 不发 composition 事件」的实现。
     var timer = null;
-    $('search-input').oninput = function (e) {
-      var v = e.target.value.trim();
+    var composing = false;
+    function scheduleSearch() {
       clearTimeout(timer);
-      timer = setTimeout(function () { doSearch(v); }, 260);
+      timer = setTimeout(function () {
+        doSearch($('search-input').value.trim(), false);
+      }, 260);
+    }
+    $('search-input').oninput = function (e) {
+      if (composing || e.isComposing) return; // 还在选词，别搜
+      scheduleSearch();
     };
+    $('search-input').addEventListener('compositionstart', function () {
+      composing = true;
+    });
+    $('search-input').addEventListener('compositionend', function () {
+      composing = false;
+      // 用确认后的文本搜一次。浏览器普遍在 compositionend 之后还会再补一个
+      // input 事件，两次都会走到 scheduleSearch —— 防抖会把它们合成一次。
+      scheduleSearch();
+    });
     $('search-input').onkeydown = function (e) {
       if (e.key === 'Escape') { e.target.value = ''; doSearch(''); }
     };

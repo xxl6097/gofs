@@ -469,6 +469,30 @@ svg {
 }
 .search input::-webkit-search-cancel-button { filter: grayscale(1); }
 
+/* 搜索进行中：框内右侧转一圈，表示「请求在路上」。
+   搜索是网络往返，大目录 / 远程盘上可能要等一会儿；没有这个反馈，
+   用户只会觉得「点了没反应」。结果列表刻意不动 —— 旧结果留到新结果
+   回来再换，免得先闪一下空白。
+   放在右侧（放大镜在左），并给输入框补一段右内边距，避免盖住文字末尾。 */
+.search.searching input { padding-right: 30px; }
+.search.searching::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: boot-spin .7s linear infinite;
+}
+/* 「减少动态效果」下保留静态圆环作为等待提示，但不转
+   （与启动转圈同一口径，见文件末尾那段 media query）。 */
+@media (prefers-reduced-motion: reduce) {
+  .search.searching::after { animation: none; }
+}
+
 /* 搜索方式按钮：比普通 .btn 更紧凑，与输入框等高。
    独立类而非 .btn —— 见 index.html 里的说明（窄屏 .btn span 会被隐藏）。 */
 .search-mode { flex: none; }

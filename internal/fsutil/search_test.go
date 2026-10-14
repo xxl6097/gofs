@@ -40,7 +40,7 @@ func runSearch(t *testing.T, mode SearchMode, pattern string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Search(res, root, SearchOptions{Pattern: pattern, Mode: mode})
+	got, _, err := Search(res, root, SearchOptions{Pattern: pattern, Mode: mode})
 	if err != nil {
 		t.Fatalf("Search(%v, %q) 报错: %v", mode, pattern, err)
 	}
@@ -128,7 +128,7 @@ func TestSearchBadPattern(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = Search(res, root, SearchOptions{Pattern: c.pattern, Mode: c.mode})
+			_, _, err = Search(res, root, SearchOptions{Pattern: c.pattern, Mode: c.mode})
 			if !errors.Is(err, ErrBadSearchPattern) {
 				t.Fatalf("Search(%v, %q) 错误 = %v，期望 ErrBadSearchPattern", c.mode, c.pattern, err)
 			}
@@ -175,7 +175,7 @@ func TestSearchHiddenRootIsStillWalked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Search(res, root, SearchOptions{
+	got, _, err := Search(res, root, SearchOptions{
 		Pattern: "target",
 		Mode:    SearchFuzzy,
 		Hidden:  []string{"node_modules"},
@@ -199,12 +199,27 @@ func TestSearchLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Search(res, root, SearchOptions{Pattern: "", Mode: SearchFuzzy, Limit: 2})
+	got, total, err := Search(res, root, SearchOptions{Pattern: "", Mode: SearchFuzzy, Limit: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("Limit=2 时返回 %d 条，期望 2", len(got))
+	}
+	// 关键：total 必须是**命中总数**，而不是返回条数。
+	//
+	// 早先到上限就 SkipAll 停掉，调用方拿不到真实总数，于是界面上
+	// 「命中一万条只显示前 3000」看起来跟「一共就 3000 条」一模一样 ——
+	// 这种静默截断正是本仓库一直在避免的。
+	_, all, err := Search(res, root, SearchOptions{Pattern: "", Mode: SearchFuzzy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != all {
+		t.Errorf("Limit=2 时报的命中总数 %d，与不限流时的 %d 不一致", total, all)
+	}
+	if total <= 2 {
+		t.Errorf("用例需要一个大于上限的命中数，实际 %d", total)
 	}
 }
 

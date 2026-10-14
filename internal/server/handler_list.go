@@ -159,14 +159,21 @@ func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, listing *fs
 	s.writeHTML(w, s.newPageData(p, listing, "", s.isAdminRequest(r)))
 }
 
+// searchMaxEntries 是单次搜索最多回多少条。
+//
+// 与目录列举的上限分开（那个是 --list-max-entries）：搜索要跨整棵子树，
+// 一次命中上万条很常见，而前端的表格也渲染不了那么多。
+// 超出的部分由 Listing.Truncated / TotalAll 如实告知用户。
+const searchMaxEntries = 3000
+
 // serveSearch 处理 ?q= 搜索。?mode= 选择匹配方式（fuzzy/exact/wildcard/regex），
 // 缺省或无法识别时按 fuzzy 处理。
 func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPath, pattern string) {
-	entries, err := fsutil.Search(s.res, abs, fsutil.SearchOptions{
+	entries, total, err := fsutil.Search(s.res, abs, fsutil.SearchOptions{
 		Pattern: pattern,
 		Mode:    fsutil.ParseSearchMode(r.URL.Query().Get("mode")),
 		Hidden:  s.cfg.Hidden,
-		Limit:   3000,
+		Limit:   searchMaxEntries,
 	})
 	if err != nil {
 		// 表达式非法（坏正则 / 坏通配符）是调用方的输入错误，回 400。
@@ -179,12 +186,17 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 		return
 	}
 	p, _ := s.authorize(w, r, urlPath)
+	// 截断要如实上报：TotalAll 是命中总数、Truncated 表示只回了一部分。
+	// 少这两个字段的话，命中一万条只显示前 3000，界面上却看不出被截断 ——
+	// 用户会以为「就这么多」。目录列举早就是这么做的，搜索照同一口径。
 	listing := &fsutil.Listing{
-		Path:    fsutil.CleanURLPath(urlPath),
-		Name:    "搜索: " + pattern,
-		IsDir:   true,
-		Entries: entries,
-		Total:   len(entries),
+		Path:      fsutil.CleanURLPath(urlPath),
+		Name:      "搜索: " + pattern,
+		IsDir:     true,
+		Entries:   entries,
+		Total:     len(entries),
+		TotalAll:  total,
+		Truncated: total > len(entries),
 	}
 	for _, e := range entries {
 		if e.IsDir {

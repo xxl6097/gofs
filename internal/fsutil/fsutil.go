@@ -590,11 +590,17 @@ func globMatch(glob, s string) bool {
 // Search 在指定目录下递归查找匹配的条目（不区分大小写）。
 //
 // 匹配目标同时包含文件名与相对路径，具体语义见 SearchMode 与 searchMatcher.match。
-func Search(res relator, root string, opt SearchOptions) ([]Entry, error) {
+//
+// 返回 entries 与**命中总数** total。达到 Limit 之后仍会把剩下的目录走完，
+// 但只计数、不再构造 Entry —— 否则调用方没法如实告诉用户「共 N 项命中，
+// 只列出前 M 项」。早先是到了上限直接 SkipAll 停掉，于是 5000 个命中只回
+// 3000，而界面上一点被截断的迹象都没有：用户以为那就是全部。
+// 多走一遍不额外分配内存，代价只是遍历本身（实测 5000 文件 20ms）。
+func Search(res relator, root string, opt SearchOptions) (entries []Entry, total int, err error) {
 	matcher, err := newSearchMatcher(opt.Mode, opt.Pattern)
 	if err != nil {
 		// 表达式非法：直接返回，连目录都不遍历。
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]Entry, 0, 32)
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -648,14 +654,16 @@ func Search(res relator, root string, opt SearchOptions) ([]Entry, error) {
 				e.Lang = lang
 			}
 		}
-		out = append(out, e)
+		total++
 		if opt.Limit > 0 && len(out) >= opt.Limit {
-			return fs.SkipAll
+			// 到上限了：继续走完，但只计数（见上面的说明）。
+			return nil
 		}
+		out = append(out, e)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
@@ -663,7 +671,7 @@ func Search(res relator, root string, opt SearchOptions) ([]Entry, error) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	return out, nil
+	return out, total, nil
 }
 
 // archiveSuffixes 为支持在线解压的扩展名（长后缀优先）。
