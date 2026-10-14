@@ -45,7 +45,8 @@ type keyCreateRequest struct {
 	Scope      string `json:"scope"`
 	TTLSeconds int64  `json:"ttl_seconds"` // 0 表示永不过期
 	Note       string `json:"note"`
-	// Kind 为凭证类型："upload"（默认）或 "read"（分享链接）。
+	// Kind 为凭证类型："upload"（默认）、"read"（只读分享链接）
+	// 或 "readwrite"（可读写分享链接）。
 	Kind string `json:"kind"`
 }
 
@@ -145,15 +146,22 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	// 作用范围必须落在创建者自己够得着的地方，否则等于把权限借给了自己够不到的地方。
 	//
 	// 要求的权限按类型区分：上传密钥要**写**权限（能传才能授），
-	// 分享链接要**读**权限（能看才能分享）。两边的共同原则都是
-	// 「只能授出自己有的」。
+	// 只读分享要**读**权限（能看才能分享），可读写分享要**读写**权限
+	// （授出写权限自己就得先有）。三者的共同原则都是「只能授出自己有的」。
 	kind := uploadkey.KindUpload
 	need := auth.PermReadWrite
 	needDesc := "写"
-	if req.Kind == uploadkey.KindRead {
+	switch req.Kind {
+	case uploadkey.KindRead:
 		kind = uploadkey.KindRead
 		need = auth.PermRead
 		needDesc = "读"
+	case uploadkey.KindReadWrite:
+		// 只读账号不能签发可读写分享 —— 那等于绕过「只能授出自己有的」
+		// 把自己没有的写权限借出去。
+		kind = uploadkey.KindReadWrite
+		need = auth.PermReadWrite
+		needDesc = "读写"
 	}
 	scope := fsutil.CleanURLPath(req.Scope)
 	if sp := s.checkPerm(r, scope); sp < need {
@@ -163,8 +171,8 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	}
 	// 分享链接会把内容**公开**出去（拿到链接的人不需要登录），
 	// 所以额外要求服务开启了上传/共享能力，避免在一个只读实例上
-	// 悄悄开出一条公开通道。
-	if kind == uploadkey.KindRead && !s.cfg.AllowUpload && !s.cfg.AllowKeys {
+	// 悄悄开出一条公开通道。两种分享都算。
+	if uploadkey.IsShareKind(kind) && !s.cfg.AllowUpload && !s.cfg.AllowKeys {
 		http.Error(w, "403 Forbidden: 本服务未开启任何可写的功能，无法创建分享链接",
 			http.StatusForbidden)
 		return
@@ -187,8 +195,15 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	if !k.Permanent() {
 		ttlDesc = "有效期至 " + k.ExpiresAt.Format(time.RFC3339)
 	}
-	if kind == uploadkey.KindRead {
-		s.logger.Infof("创建分享链接 %s（范围 %s，%s，创建者 %s）", k.Prefix, k.Scope, ttlDesc, creator)
+	if uploadkey.IsShareKind(kind) {
+		// 权限级别写进日志：事后审计「这条链接当初是只读还是可读写」
+		// 只能靠这里，明文与摘要都不含这个信息。
+		lvl := "只读"
+		if k.ReadWrite() {
+			lvl = "可读写"
+		}
+		s.logger.Infof("创建分享链接 %s（%s，范围 %s，%s，创建者 %s）",
+			k.Prefix, lvl, k.Scope, ttlDesc, creator)
 	} else {
 		s.logger.Infof("签发上传密钥 %s（%s，范围 %s，%s，创建者 %s）",
 			k.Prefix, k.Name, k.Scope, ttlDesc, creator)

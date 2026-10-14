@@ -142,10 +142,13 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		UploadDateDir:    s.cfg.UploadDateDir(time.Now()),
 		UploadDateLayout: s.cfg.UploadDateLayout,
 		EditMaxSize:      s.settings.EditMaxSize(),
-		AllowKeys:        s.cfg.AllowKeys && p.Perm == auth.PermReadWrite,
-		UploadMaxSize:    s.settings.UploadMaxSize(),
-		AllowSettings:    admin,
-		AllowUsers:       s.cfg.AllowUserManage && s.auth.Enabled() && admin,
+		// 密钥面板要排除分享令牌：管理密钥的接口只认账号凭据
+		// （见 handleKeys），所以对分享访客来说那个入口点进去必然 401。
+		// 一个「亮着但用不了」的入口比直接不给更糟。
+		AllowKeys:     s.cfg.AllowKeys && p.Perm == auth.PermReadWrite && !p.Share,
+		UploadMaxSize: s.settings.UploadMaxSize(),
+		AllowSettings: admin,
+		AllowUsers:    s.cfg.AllowUserManage && s.auth.Enabled() && admin,
 		Extract: extractLimits{
 			MaxTotalBytes: s.cfg.ExtractMaxTotal,
 			MaxFiles:      s.cfg.ExtractMaxFiles,

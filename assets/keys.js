@@ -32,6 +32,14 @@
     return '不到 1 分钟后过期';
   }
 
+  // kindLabel 把后端的凭证类型翻成列表里显示的人话。
+  // 认不出来的类型按上传密钥显示 —— 与后端「缺省即上传」的归一化一致。
+  function kindLabel(kind) {
+    if (kind === 'readwrite') return '分享链接（可读写）';
+    if (kind === 'read') return '分享链接（只读）';
+    return '上传密钥';
+  }
+
   // copyText 复用 app.js 导出的实现，避免同一段逻辑维护两份。
   var copyText = G.copyText;
 
@@ -285,6 +293,9 @@
 
         var details = [
           '范围 ' + k.scope,
+          // 类型必须写出来：列表里「只读分享」和「可读写分享」长得一模一样，
+          // 而后者拿到链接的人能删目录里的东西 —— 撤销哪一条得能一眼分清。
+          '类型 ' + kindLabel(k.kind),
           '创建者 ' + (k.creator || '—'),
           '创建于 ' + G.fmtTime(k.created_at),
           k.permanent ? '永不过期' : '有效期至 ' + G.fmtTime(k.expires_at) +

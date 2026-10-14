@@ -333,3 +333,48 @@ func TestFlushWithoutChanges(t *testing.T) {
 		t.Errorf("无改动时 Flush 不应报错: %v", err)
 	}
 }
+
+// TestKindOf 钉住三种凭证类型的归一化，以及「历史数据当作上传密钥」这条兼容。
+func TestKindOf(t *testing.T) {
+	cases := []struct {
+		kind      string
+		want      string
+		wantShare bool
+		wantRW    bool
+	}{
+		{KindUpload, KindUpload, false, false},
+		{"", KindUpload, false, false}, // 历史数据没有 kind 字段
+		{KindRead, KindRead, true, false},
+		{KindReadWrite, KindReadWrite, true, true},
+		{"乱写的", KindUpload, false, false},
+	}
+	for _, c := range cases {
+		k := &Key{Kind: c.kind}
+		if got := k.KindOf(); got != c.want {
+			t.Errorf("Kind=%q → KindOf=%q，期望 %q", c.kind, got, c.want)
+		}
+		if got := k.IsShare(); got != c.wantShare {
+			t.Errorf("Kind=%q → IsShare=%v，期望 %v", c.kind, got, c.wantShare)
+		}
+		if got := k.ReadWrite(); got != c.wantRW {
+			t.Errorf("Kind=%q → ReadWrite=%v，期望 %v", c.kind, got, c.wantRW)
+		}
+	}
+}
+
+// TestShareKindsGetDefaultName 确认两种分享都有「分享链接」这个默认名。
+func TestShareKindsGetDefaultName(t *testing.T) {
+	s, err := New("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{KindRead, KindReadWrite} {
+		k, _, err := s.Create(CreateOptions{Scope: "/x", Kind: kind})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", kind, err)
+		}
+		if k.Name != "分享链接" {
+			t.Errorf("kind=%s 的默认名 = %q，期望「分享链接」", kind, k.Name)
+		}
+	}
+}

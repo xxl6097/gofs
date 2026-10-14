@@ -35,6 +35,11 @@
   --radius: 10px;
   --radius-sm: 7px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* 下拉箭头。原生 select 的箭头由系统画：macOS 是个浅灰小三角（深色主题下
+     几乎看不见），Windows 又是另一个样子。换成自家这个 chevron —— 和按钮里
+     的 .caret 同一个形状，全平台一个样，也跟着主题走。
+     颜色写死在 data URI 里，所以要在每个主题块里各给一份。 */
+  --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 @media (prefers-color-scheme: dark) {
@@ -67,6 +72,7 @@
   --op-danger: #f87171;
   --danger-text: #2a0b0b;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+    --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   }
 }
 
@@ -89,6 +95,7 @@
   --ok: #4ade80;
   --warn: #fbbf24;
   --zip: #fbbf24;
+  --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --op-open: #60a5fa;
   --op-preview: #a5b4fc;
   --op-download: #22d3ee;
@@ -1082,12 +1089,28 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .settings-panel .checkbox { flex: none; }
 .settings-panel .hint b { color: var(--text); }
 
+/* ---- 设置弹窗的宽度 ----
+
+   设置页的内容**就该铺满自己的弹窗**，散的不是宽度，是弹窗开得比内容宽。
+   早先这里给每种元素都挂了一个 480px 的 max-width（输入框、下拉、说明、
+   卡片、站点录入行…），结果是：弹窗 720px、内容 480px，右边空出 230px 一条
+   永远填不满的沟；而且名单漏掉谁，谁就单独顶到整宽，成了这一页里的异类
+   （「新增站点」那一行就是这么冒出来的，冲出去之后还被迫折了行）。
+
+   正确的做法只有一条：**把弹窗收到内容需要的宽度**（见 .modal.settings-modal，
+   600px / 内容 570px），让各处原有的 width:100% 与 flex:1 自己铺满。
+   界面上其它表单弹窗（新建、重命名）本来就是这个做法 —— 输入框占满 460px
+   的弹窗，从来没人觉得散。
+
+   ⚠️ 所以这里**不要**再加 max-width 名单。要调整疏密就调弹窗宽度，
+   一个数管住整页；挂了名单就会重新长出一条沟和若干「异类」。 */
+
 .select {
   flex: none;
   padding: 9px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--bg);
+  background-color: var(--bg);
   color: var(--text);
   font-size: 13.5px;
   font-family: inherit;
@@ -1207,6 +1230,20 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 }
 .field input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field .hint { font-size: 11.5px; color: var(--text-mute); margin-top: 5px; }
+
+/* 直接摆在 .field 里的下拉：**不铺满**，但要彼此对齐。
+   select 的宽度天然由选项文字撑出来，同一张表单里会出现
+   「一个 227px、一个 75px」的错位（分享弹窗的「访问权限 / 有效期」就是）。
+   铺满整行（width:100%）是过头了 —— 400 多像素宽的下拉把箭头甩到对角线另一端，
+   文字和箭头之间空一大片。这里改用一个共同的最小宽度：两个都落在同一个值上，
+   既对齐又不空旷，最长的那条选项也放得下（实测 227px，240 留了余量）。
+   ⚠️ 必须是直接子选择器：`.field .row > .select`（「数值 + 单位」那种并排组合，
+   见 settings.js 的上限输入）不能被撑开，否则会把输入框挤出这一行。 */
+.field > .select {
+  width: auto;
+  min-width: 240px;
+  max-width: 100%;
+}
 .field .row { display: flex; align-items: center; gap: 8px; }
 .field .row input[type=text] { flex: 1; }
 
@@ -1550,6 +1587,18 @@ html.booting body::after {
   height: 92vh;
   max-height: 92vh;
 }
+
+/* 设置弹窗收窄回一个「对话框」的尺寸。
+   .full 那档 1500px 是**编辑器**要的（代码行需要横向空间），设置页跟着沾光
+   就变成 1900px 画布上摆一列控件 —— 右边一大片空白，看着很散。
+   600px 比常规弹窗（.modal，460px）宽一点点：设置页的说明句子更长，
+   给到 570px 内容区正好一行放得下，又不至于空出一大块。
+   内容**铺满**这一列就对了 —— 界面上其它表单弹窗（新建 / 重命名）本来就是
+   输入框占满 460px 那个弹窗的，用户对那几张没意见；散的原因从来不是「占满」，
+   而是「对话框比内容宽出一截，右边空着」。
+   ⚠️ 必须写在 .modal.full **之后**：两个选择器特异度一样（各两个类），
+   谁在后面谁生效。 */
+.modal.settings-modal { max-width: min(600px, 96vw); }
 .modal.full .modal-body {
   flex: 1;
   display: flex;
@@ -1894,6 +1943,31 @@ html.booting body::after {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+
+/* ---- 下拉箭头（全站的 select 用同一个）----
+
+   拿掉系统画的那个三角，换成 --select-caret 里的 chevron，右边留出它的位子。
+   ⚠️ 位置有讲究：它必须排在上面 `.select` 与 `.key-input, .key-select` 之后 ——
+   那两块用的是 `background` **简写**，简写会把 background-image 一并重置，
+   写在前面会被无声吃掉（箭头根本不出现）。 */
+.select,
+.key-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: var(--select-caret);
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+}
+/* 两个前缀都不认的浏览器（老 Safari 只认 -webkit- 那个）：那时候系统箭头
+   还在，再叠一个自绘的就是双箭头，宁可退回原生箭头。
+   ⚠️ 这里要 `or` 上 -webkit- 前缀版：老 Safari 不认无前缀的 appearance，
+   只判无前缀的话它会被误判成「不支持」而白白丢掉自绘箭头。 */
+@supports not ((appearance: none) or (-webkit-appearance: none)) {
+  .select, .key-select { background-image: none; padding-right: 10px; }
+}
+
 .key-hint { font-size: 11.5px; color: var(--text-mute); }
 
 .key-list-title {

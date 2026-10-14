@@ -186,7 +186,9 @@
 
     function refresh() {
       hint.textContent = '';
-      hint.appendChild(document.createTextNode(opts.hintText));
+      // 走 setRichText：这些说明里带着 `**立即**` 这类强调标记，
+      // 用 createTextNode 贴上去用户看到的是两颗星号（见 app.js 的说明）。
+      G.setRichText(hint, opts.hintText);
       hint.appendChild(document.createTextNode('　当前生效：'));
       var b = document.createElement('b');
       b.textContent = opts.current() || '（默认）';
@@ -227,7 +229,9 @@
   function addHint(wrap, text) {
     var d = document.createElement('div');
     d.className = 'hint';
-    d.textContent = text;
+    // 统一走 setRichText：说明文字里的 `**强调**` 要渲染成加粗，
+    // 而不是把两颗星号原样摆给用户看（见 app.js 的说明）。
+    G.setRichText(d, text);
     wrap.appendChild(d);
     return d;
   }
@@ -398,11 +402,11 @@
       form.hidden = !editable;
       // 可挂范围：没配白名单就是不限制（门槛是管理员），配了才显示出来。
       var roots = data.site_roots || [];
-      siteHint.textContent = editable
+      G.setRichText(siteHint, editable
         ? '新增的目录挂在 /<标签>/ 下，**立即生效**（不必点保存）。' +
           (roots.length ? '可挂范围：' + roots.join('、') : '可挂任意已存在的目录') +
           '　·　注意：标签会遮蔽主目录下的同名子目录。'
-        : '本服务已通过 --no-root-switch 禁止运行期改动服务目录。';
+        : '本服务已通过 --no-root-switch 禁止运行期改动服务目录。');
 
       if (onChanged) onChanged(data);
     }
@@ -1392,6 +1396,7 @@
       title: defs.length === 1 ? defs[0].label : '设置',
       body: body,
       full: true,
+      cls: 'settings-modal',
       beforeClose: guardClose
     });
 

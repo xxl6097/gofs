@@ -415,3 +415,145 @@ func TestShareTokenCannotUpload(t *testing.T) {
 		t.Error("文件竟然真的写进去了")
 	}
 }
+
+// newShareRW 建一条**可读写**的分享链接，返回明文令牌。
+func newShareRW(t *testing.T, s *Server, scope string) string {
+	t.Helper()
+	k, token, err := s.keys.Create(uploadkey.CreateOptions{
+		Name: scope, Scope: scope, Kind: uploadkey.KindReadWrite,
+	})
+	if err != nil {
+		t.Fatalf("建可读写分享: %v", err)
+	}
+	if k.KindOf() != uploadkey.KindReadWrite {
+		t.Fatalf("类型 = %q，期望 readwrite", k.KindOf())
+	}
+	if !k.ReadWrite() || !k.IsShare() {
+		t.Fatalf("ReadWrite=%v IsShare=%v，都该是 true", k.ReadWrite(), k.IsShare())
+	}
+	return token
+}
+
+// TestShareLinkReadWrite 确认可读写分享能在范围内写，且**仅限**范围内。
+func TestShareLinkReadWrite(t *testing.T) {
+	s, root := shareServer(t)
+	tok := newShareRW(t, s, "/docs")
+
+	t.Run("范围内可上传", func(t *testing.T) {
+		put := do(t, s, http.MethodPut, "/docs/new.txt?share="+tok,
+			strings.NewReader("x"), nil)
+		if put.code != http.StatusCreated && put.code != http.StatusOK {
+			t.Fatalf("可读写分享上传返回 %d：%s", put.code, put.body)
+		}
+		if _, err := os.Stat(filepath.Join(root, "docs", "new.txt")); err != nil {
+			t.Fatal("文件没写进去")
+		}
+	})
+
+	t.Run("范围内可删除", func(t *testing.T) {
+		del := do(t, s, http.MethodDelete, "/docs/readme.txt?share="+tok, nil, nil)
+		if del.code >= 400 {
+			t.Fatalf("可读写分享删除返回 %d：%s", del.code, del.body)
+		}
+		if _, err := os.Stat(filepath.Join(root, "docs", "readme.txt")); err == nil {
+			t.Fatal("文件没被删掉")
+		}
+	})
+
+	// 给了写权限不等于给了整棵树：范围判定与只读分享走的是同一条路径。
+	t.Run("范围外仍不能写", func(t *testing.T) {
+		put := do(t, s, http.MethodPut, "/other/evil.txt?share="+tok,
+			strings.NewReader("x"), nil)
+		if put.code == http.StatusOK || put.code == http.StatusCreated {
+			t.Fatalf("越界写入被放行：%d", put.code)
+		}
+		if _, err := os.Stat(filepath.Join(root, "other", "evil.txt")); err == nil {
+			t.Fatal("文件被写到范围外了")
+		}
+	})
+}
+
+// TestReadWriteShareIsNotAdmin 是这次改动最要紧的一条回归。
+//
+// 可读写分享在范围内的权限就是 PermReadWrite，而 isAdminRequest 是按
+// **请求路径**算「对根有没有读写权限」的 —— 不特意排除分享令牌的话，
+// 一条 scope 为 / 的可读写分享会直接解锁服务设置（换服务根目录、重启、
+// 卸载）与用户管理。那不是「能改几个文件」，是把整个服务交出去。
+func TestReadWriteShareIsNotAdmin(t *testing.T) {
+	s, _ := shareServer(t)
+	tok := newShareRW(t, s, "/") // 范围是整个服务：最坏的情况
+
+	t.Run("页面不给设置入口", func(t *testing.T) {
+		got := do(t, s, http.MethodGet, "/?share="+tok, nil,
+			map[string]string{"Accept": "text/html"})
+		if got.code != http.StatusOK {
+			t.Fatalf("打开页面返回 %d", got.code)
+		}
+		for _, bad := range []string{
+			`"allow_settings":true`, `"allow_users":true`, `"allow_keys":true`,
+		} {
+			if strings.Contains(got.body, bad) {
+				t.Errorf("分享访客的页面里出现了 %s", bad)
+			}
+		}
+		// 反面也要钉住：读写权限本身是给了的，别把整个分享功能一起改坏。
+		if !strings.Contains(got.body, `"write":true`) {
+			t.Errorf("可读写分享的页面里没有写权限：%.400s", got.body)
+		}
+	})
+
+	t.Run("改服务设置被拒", func(t *testing.T) {
+		got := do(t, s, http.MethodPost, "/fs/settings?share="+tok,
+			strings.NewReader(`{"upload_max_size":1024}`),
+			map[string]string{"Content-Type": "application/json"})
+		if got.code < 400 {
+			t.Fatalf("分享访客改动了服务设置：%d %s", got.code, got.body)
+		}
+	})
+
+	t.Run("重启被拒", func(t *testing.T) {
+		got := do(t, s, http.MethodPost, "/fs/restart?share="+tok, nil, nil)
+		if got.code < 400 {
+			t.Fatalf("分享访客重启了服务：%d", got.code)
+		}
+	})
+
+	t.Run("用户管理被拒", func(t *testing.T) {
+		got := do(t, s, http.MethodGet, "/fs/users?share="+tok, nil, nil)
+		if got.code < 400 {
+			t.Fatalf("分享访客读到了用户列表：%d", got.code)
+		}
+	})
+}
+
+// TestCannotMintShareBeyondOwnPerm 钉住「只能授出自己有的」。
+//
+// 一个只在 /read 上有读权限的账号不能签发 /read 的可读写分享 ——
+// 那等于把自己没有的写权限借出去。它在 /write 上确实能写，所以那里可以。
+func TestCannotMintShareBeyondOwnPerm(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "read", "a.txt"), []byte("x"))
+	writeFile(t, filepath.Join(root, "write", "b.txt"), []byte("x"))
+	s := newTestServer(t, testConfig(t, root, "-A",
+		"-a", "u:pw@/write:rw,/read:r"))
+
+	post := func(kind, scope string) resp {
+		t.Helper()
+		return do(t, s, http.MethodPost, "/fs/keys",
+			strings.NewReader(`{"kind":"`+kind+`","name":"t","scope":"`+scope+`"}`),
+			map[string]string{
+				"Content-Type":  "application/json",
+				"Authorization": basicAuth("u", "pw"),
+			})
+	}
+
+	if got := post(uploadkey.KindReadWrite, "/read"); got.code != http.StatusForbidden {
+		t.Fatalf("只读范围签发可读写分享返回 %d，期望 403：%s", got.code, got.body)
+	}
+	if got := post(uploadkey.KindRead, "/read"); got.code != http.StatusCreated {
+		t.Fatalf("只读范围签发只读分享返回 %d，期望 201：%s", got.code, got.body)
+	}
+	if got := post(uploadkey.KindReadWrite, "/write"); got.code != http.StatusCreated {
+		t.Fatalf("可写范围签发可读写分享返回 %d，期望 201：%s", got.code, got.body)
+	}
+}

@@ -384,6 +384,24 @@ type permResult struct {
 	Authenticated bool
 	// UploadKey 非 nil 表示本次请求由上传密钥授权，而非账号密码。
 	UploadKey *uploadkey.Key
+	// Share 表示本次请求由分享令牌授权。
+	//
+	// 单独记一笔是因为**权限级别不足以描述它**：可读写分享在范围内的
+	// Perm 也是 PermReadWrite，与「对根有读写权限的账号」一模一样。
+	// 不看这个标志，那些「按 rw 判断是不是管理员」的地方就会把
+	// 一个拿到链接的陌生人当成管理员放行。
+	Share bool
+}
+
+// sharePerm 把分享链接映射成它在范围内授予的权限级别。
+//
+// 独立的函数而不是内联在 permOf/authorize 里：这两处必须永远一致，
+// 一处改了另一处漏掉就会「页面按只读渲染、写请求却放行」。
+func sharePerm(k *uploadkey.Key) auth.Permission {
+	if k.ReadWrite() {
+		return auth.PermReadWrite
+	}
+	return auth.PermRead
 }
 
 // credentials 从请求中提取凭据，优先 Basic 头，其次查询参数。
@@ -423,7 +441,7 @@ const sessionCookieName = "gofs_sid"
 // 下发一个 Path 限定在分享范围内的 cookie，后续请求就会自动带上。
 //
 // 它和会话 cookie 是两回事：这条只代表「某个分享链接被打开过」，
-// 权限恒为只读，且严格限制在链接自身的范围内。
+// 权限级别照抄令牌（只读或可读写），且严格限制在链接自身的范围内。
 const shareCookieName = "gofs_share"
 
 // shareTokenOf 取出请求里的分享令牌：查询参数优先，其次是 cookie。
@@ -577,7 +595,8 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 
 // permOf 按请求身份计算对 urlPath 的权限。
 func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
-	// 分享令牌：换来的只是「不用登录」，权限恒为只读，且严格限制在令牌范围内。
+	// 分享令牌：换来的只是「不用登录」，权限级别由令牌自己定（只读 / 可读写），
+	// 且严格限制在令牌范围内。
 	//
 	// ⚠️ 这一支必须放在这里（而不是只放在 authorize 里）：
 	// checkPerm 走的就是 permOf，而它决定了**页面数据**里的 perms 与
@@ -585,8 +604,8 @@ func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, 
 	// 「需要登录、权限全无」的空壳 —— 前端会弹登录框，正好是分享要避免的事。
 	if tok := shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil &&
-			k.KindOf() == uploadkey.KindRead && k.AllowsPath(urlPath) {
-			return auth.PermRead, "share:" + k.Prefix, true
+			k.IsShare() && k.AllowsPath(urlPath) {
+			return sharePerm(k), "share:" + k.Prefix, true
 		}
 	}
 
@@ -626,23 +645,30 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		return permResult{}, false
 	}
 
-	// 分享链接：带 `?share=<token>`（或那条 cookie）的请求，按令牌授予**只读**权限。
+	// 分享链接：带 `?share=<token>`（或那条 cookie）的请求，按令牌授予权限。
 	//
 	// 它换来的只是「不用登录」，不是「能读任何东西」—— 令牌自身限定了范围，
 	// 超出范围的请求会退回去走正常鉴权（于是拿到 401，而不是悄悄放行）。
+	//
+	// 权限级别由令牌决定：只读令牌写操作会被 requireWrite 挡下；可读写令牌
+	// 则在范围内与一个读写账号等价 —— 但**不等于管理员**，见 isAdminRequest。
 	//
 	// 写到权限判定之前，是因为这就是一次正常的鉴权判定，
 	// 只是凭据从「账号密码」换成了「分享令牌」。
 	if tok := shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil &&
-			k.KindOf() == uploadkey.KindRead && k.AllowsPath(urlPath) {
+			k.IsShare() && k.AllowsPath(urlPath) {
 			// 首次用 `?share=` 打开时下发 cookie，让页面后续的 XHR 也认得出。
 			// 只认查询参数那一次，避免每次请求都重设 Max-Age。
 			if r.URL.Query().Get("share") != "" {
 				s.setShareCookie(w, tok, k.Scope, k.ExpiresAt)
 			}
-			// 恒为只读：写操作会被 requireWrite 挡下。
-			return permResult{Perm: auth.PermRead, User: "share:" + k.Prefix, Authenticated: true}, true
+			return permResult{
+				Perm:          sharePerm(k),
+				User:          "share:" + k.Prefix,
+				Authenticated: true,
+				Share:         true,
+			}, true
 		}
 	}
 

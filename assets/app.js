@@ -622,11 +622,47 @@
     { label: '30 天', seconds: 2592000 }
   ];
 
+  // SHARE_PERMS 是分享链接可选的权限级别，kind 直接对应后端的凭证类型。
+  //
+  // 只读排在第一位（= 默认选中）：默认值应当是能给出去的最小权限。
+  // 可读写给的是**不需要登录的写权限** —— 对方能删你目录里的东西，
+  // 所以它是红框提示、而且需要用户显式选一次。
+  var SHARE_PERMS = [
+    { kind: 'read', label: '只读（可浏览、下载）' },
+    { kind: 'readwrite', label: '可读写（可上传、修改、删除）' }
+  ];
+
+  // sharePermLabel 把 kind 翻成人话，用于生成成功后的提示。
+  function sharePermLabel(kind) {
+    return kind === 'readwrite' ? '可读写' : '只读';
+  }
+
   // openShareDialog 生成一条**免登录**的分享链接。
   //
   // 与 copyEntryLink（复制普通链接，仍需登录）是两件事，刻意分开：
   // 「变公开」必须是一次显式动作，否则很容易把公开地址当成内部地址发出去。
   async function openShareDialog(entry) {
+    // 权限级别：默认**只读**。
+    //
+    // 默认值定成能给出去的最小那个：「能删文件」必须是一次显式选择，
+    // 而不是勾选框忘改就带出去的默认项。
+    var permSel = document.createElement('select');
+    permSel.className = 'select';
+    SHARE_PERMS.forEach(function (o, i) {
+      var opt = document.createElement('option');
+      opt.value = o.kind;
+      opt.textContent = o.label;
+      if (i === 0) opt.selected = true; // 只读
+      permSel.appendChild(opt);
+    });
+
+    var permField = document.createElement('div');
+    permField.className = 'field';
+    var plb = document.createElement('label');
+    plb.textContent = '访问权限';
+    permField.appendChild(plb);
+    permField.appendChild(permSel);
+
     var sel = document.createElement('select');
     sel.className = 'select';
     SHARE_TTLS.forEach(function (o, i) {
@@ -637,23 +673,42 @@
       sel.appendChild(opt);
     });
 
-    var field = document.createElement('div');
-    field.className = 'field';
+    var ttlField = document.createElement('div');
+    ttlField.className = 'field';
     var lb = document.createElement('label');
     lb.textContent = '链接有效期';
-    field.appendChild(lb);
-    field.appendChild(sel);
+    ttlField.appendChild(lb);
+    ttlField.appendChild(sel);
 
+    // 说明块是**整个分享**的说明，不属于「有效期」那一栏，所以单独摆一行。
+    // 挂在 ttlField 里面时，它看起来像是在解释「7 天」是什么意思。
     var hint = document.createElement('div');
-    hint.className = 'hint';
-    hint.textContent = '任何拿到这条链接的人都能' +
-      (entry.is_dir ? '浏览该目录及其全部子目录' : '下载这个文件') +
-      '，**不需要登录**。链接到期自动失效，也可以随时在「密钥」面板里撤销。';
-    field.appendChild(hint);
+    hint.className = 'hint-box';
+
+    // 说明随权限级别实时改写：可读写要红框提示，因为它能删文件。
+    function syncHint() {
+      var rw = permSel.value === 'readwrite';
+      hint.className = 'hint-box' + (rw ? ' danger' : '');
+      // 走 setRichText 而不是 textContent：文案里的 **不需要登录** 是要
+      // 加粗给人看的，直接贴上去用户会看见两颗星号。
+      setRichText(hint, '任何拿到这条链接的人都能' +
+        (entry.is_dir ? '浏览该目录及其全部子目录' : '下载这个文件') +
+        '，**不需要登录**。' +
+        (rw ? '可读写：对方还能上传、新建、重命名、删除其中的内容，' +
+          '请只发给你信任的人。' : '') +
+        '链接到期自动失效，也可以随时在「密钥」面板里撤销。');
+    }
+    permSel.onchange = syncHint;
+    syncHint();
+
+    var body = document.createElement('div');
+    body.appendChild(permField);
+    body.appendChild(ttlField);
+    body.appendChild(hint);
 
     var m = openModal({
       title: '分享链接',
-      body: field,
+      body: body,
       footer: modalFoot([
         { label: '取消', onClick: function () { m.close(); } },
         { label: '生成并复制', cls: 'primary', onClick: function () { submit(); } }
@@ -668,7 +723,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            kind: 'read',
+            kind: permSel.value,
             name: entry.name,
             scope: entry.path,
             ttl_seconds: parseInt(sel.value, 10) || 0
@@ -685,6 +740,9 @@
         var url = location.origin +
           raw('/s/' + encodeURIComponent(data.token) + encPath(entry.path));
         var ttlText = sel.options[sel.selectedIndex].textContent;
+        // 提示里带上权限级别：生成完只报「7 天内有效」的话，用户看不出
+        // 刚才那条是只读还是能删文件，事后也回想不起来。
+        var desc = sharePermLabel(data.key && data.key.kind) + ' · ' + ttlText;
 
         // ⚠️ 链接这时候**已经在服务端建好了**，而明文只此一次、之后只剩摘要。
         // 所以复制失败绝不能当成「生成失败」——那样链接既在生效，用户又拿不到，
@@ -692,10 +750,10 @@
         try {
           await copyText(url);
           m.close();
-          toast('ok', '分享链接已复制（' + ttlText + '内有效）', 5000);
+          toast('ok', '分享链接已复制（' + desc + '）', 5000);
           return;
         } catch (e) {
-          showShareLink(m, url, ttlText, e.message);
+          showShareLink(m, url, desc, e.message);
         }
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = '生成并复制'; }
@@ -709,7 +767,7 @@
   // 这一步是必需的：链接已经生效，而明文只在这一次返回里给过 ——
   // 不显示出来，这条链接就等于「已经公开但没人知道地址」，
   // 用户只能去密钥面板撤销。
-  function showShareLink(prev, url, ttlText, why) {
+  function showShareLink(prev, url, desc, why) {
     var box = document.createElement('div');
 
     var warn = document.createElement('div');
@@ -728,7 +786,7 @@
 
     var note = document.createElement('div');
     note.className = 'hint';
-    note.textContent = '有效期：' + ttlText + '。可以在「密钥」面板里随时撤销。';
+    note.textContent = '权限与有效期：' + desc + '。可以在「密钥」面板里随时撤销。';
     box.appendChild(note);
 
     prev.close();
@@ -1070,7 +1128,10 @@
     mask.className = 'modal-mask';
 
     var box = document.createElement('div');
-    box.className = 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : '');
+    // cls 是给调用方留的口子：同一个 .full 尺寸（编辑器要的宽度）下，
+    // 设置弹窗想单独收窄，只能靠一个额外的类名去覆盖 max-width。
+    box.className = 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : '') +
+      (opts.cls ? ' ' + opts.cls : '');
 
     var head = document.createElement('div');
     head.className = 'modal-head';
@@ -1163,6 +1224,32 @@
     return foot;
   }
 
+  // setRichText 把文案写进元素，并把 `**这样**` 的部分渲染成加粗。
+  //
+  // 为什么需要它：界面里不少说明文字是按 markdown 的习惯写下来的
+  // （`**不需要登录**`、`保存后**立即**生效`），但渲染一律走 textContent ——
+  // 于是用户真的在页面上看到那两颗星号。要么统一去掉标记，要么统一认它；
+  // 这里选后者：这些强调都是「别漏看这一句」的意思，去掉可惜。
+  //
+  // ⚠️ 全程 createElement + textContent 拼装，**不碰 innerHTML**：
+  // 这些文案是拼接出来的（端口、监听到的地址、目录名都会进串），
+  // 让它走一遍 HTML 解析就等于给配置值开一个注入口。
+  function setRichText(el, text) {
+    el.textContent = '';
+    var parts = String(text == null ? '' : text).split('**');
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      if (i % 2 === 1) {
+        var b = document.createElement('b');
+        b.textContent = parts[i];
+        el.appendChild(b);
+      } else {
+        el.appendChild(document.createTextNode(parts[i]));
+      }
+    }
+    return el;
+  }
+
   // confirmDialog 是 Promise 化的确认弹窗，替代原生 confirm
   // （原生的样式割裂、无法承载富文本，且会阻塞渲染）。
   //
@@ -1182,14 +1269,14 @@
       if (opts.message) {
         var p = document.createElement('div');
         p.style.lineHeight = '1.8';
-        p.textContent = opts.message;
+        setRichText(p, opts.message);
         body.appendChild(p);
       }
       if (opts.detail) {
         var d = document.createElement('div');
         d.className = 'hint-box';
         d.style.marginTop = '12px';
-        d.textContent = opts.detail;
+        setRichText(d, opts.detail);
         body.appendChild(d);
       }
       var m = openModal({
@@ -4226,6 +4313,8 @@
   G.apiFetch = apiFetch;
   G.authHeaders = authHeaders;
   G.toast = toast;
+  // 设置面板与密钥面板的说明文字同样带着 ** 标记，交给同一个渲染器。
+  G.setRichText = setRichText;
   G.progressToast = progressToast;
   G.openModal = openModal;
   G.modalFoot = modalFoot;

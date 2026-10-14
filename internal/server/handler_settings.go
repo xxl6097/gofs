@@ -695,6 +695,19 @@ func (s *Server) isAdminRequest(r *http.Request) bool {
 	if !s.auth.Enabled() {
 		return true
 	}
+	// ⚠️ 分享令牌一律不是管理员，与它的权限级别无关。
+	//
+	// 这一条是必须的：可读写分享在范围内的 Perm 就是 PermReadWrite，而
+	// permOf(r, "/") 是按**请求路径**算的 —— 一条 scope 为 / 的可读写分享
+	// 会在这里算出 PermReadWrite，于是拿到链接的陌生人直接解锁「服务设置」
+	// （换服务根目录、重启、卸载）、用户管理与密钥面板。那不是「能改几个
+	// 文件」，而是把整个服务交出去。
+	//
+	// 换成更贴切的判据：管理员意味着「有身份、且这个身份对根有读写权限」。
+	// 分享令牌带的是「范围 + 级别」，从头到尾没有身份，所以永远出局。
+	if shareTokenOf(r) != "" {
+		return false
+	}
 	perm, _, _ := s.permOf(r, "/")
 	return perm == auth.PermReadWrite
 }

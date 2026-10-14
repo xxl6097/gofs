@@ -99,18 +99,40 @@ const (
 	KindUpload = "upload"
 	// KindRead 是分享链接：只能读 Scope 下的内容，**不需要登录**。
 	KindRead = "read"
+	// KindReadWrite 是分享链接，但把写入也一起给出去：拿到链接的人
+	// 不需要登录就能在 Scope 内上传、新建、重命名、删除。
+	//
+	// 它与 KindUpload 是两回事，别混：上传密钥**只能写**、且走另一条
+	// 认证分支（X-Gofs-Upload-Key）；这一种是**能读能写**的公开地址。
+	KindReadWrite = "readwrite"
 )
+
+// IsShareKind 判断某个 kind 取值是不是分享链接（只读或可读写）。
+//
+// 归一化之前先判，是因为 keyCreate 拿到的还是请求里的原始字符串。
+func IsShareKind(kind string) bool {
+	return kind == KindRead || kind == KindReadWrite
+}
 
 // KindOf 返回归一化后的类型。
 //
 // 历史数据里没有 kind 字段，一律当作上传密钥 —— 它们本来就是上传用的，
 // 不能因为加了这个字段就把老密钥的语义变掉。
 func (k *Key) KindOf() string {
-	if k.Kind == KindRead {
-		return KindRead
+	if IsShareKind(k.Kind) {
+		return k.Kind
 	}
 	return KindUpload
 }
+
+// IsShare 报告这把凭证是不是分享链接（只读或可读写）。
+//
+// 判断「是不是分享」必须走这里，不要写 KindOf() == KindRead —— 加了
+// 可读写分享之后，那种写法会把 KindReadWrite 归到「不是分享」里去。
+func (k *Key) IsShare() bool { return IsShareKind(k.KindOf()) }
+
+// ReadWrite 报告分享链接是否把写入也一起授出。
+func (k *Key) ReadWrite() bool { return k.KindOf() == KindReadWrite }
 
 // CreateOptions 是创建密钥的参数。
 type CreateOptions struct {
@@ -271,10 +293,12 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 	}
 
 	kind := opts.Kind
-	if kind != KindRead {
+	if !IsShareKind(kind) {
 		kind = KindUpload
 	}
-	if name == "未命名密钥" && kind == KindRead {
+	// 两种分享都是「分享链接」，默认名相同 —— 权限级别由 KindOf 体现，
+	// 不必在名字上再分一遍（用户自己填的备注优先）。
+	if name == "未命名密钥" && IsShareKind(kind) {
 		name = "分享链接"
 	}
 
