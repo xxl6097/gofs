@@ -40,6 +40,27 @@
     <span>gofs</span>
   </a>
 
+  <!-- 文件管理器式的导航：后退 / 前进 / 上一级。
+       三个按钮共用浏览器的历史栈 —— app.js 在 navigate() 里把「第几跳」
+       写进 history.state.idx，所以地址栏、浏览器返回键、这几颗按钮永远同源，
+       不会出现「按钮说能后退、浏览器却退不出去」的分裂。
+       窄屏（≤820px）跟着全局的 `.btn span{display:none}` 收成纯图标，
+       更窄时路径仍由面包屑承担，手机另有系统返回手势。 -->
+  <div class="nav-btns" id="nav-btns">
+    <button class="btn icon" id="btn-back" type="button" title="后退" aria-label="后退">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+      <span>后退</span>
+    </button>
+    <button class="btn icon" id="btn-forward" type="button" title="前进" aria-label="前进">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      <span>前进</span>
+    </button>
+    <button class="btn icon" id="btn-up" type="button" title="上一级" aria-label="上一级">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+      <span>上一级</span>
+    </button>
+  </div>
+
   <nav class="breadcrumb" id="breadcrumb" aria-label="路径"></nav>
 
   <div class="topbar-actions">
@@ -160,6 +181,25 @@
     </div>
   </div>
 
+  <!-- 常驻的拖拽投放区。
+       只靠「拖进来时才出现的浮层」不够：用户在没有开始拖之前，
+       根本不知道这个页面支持拖拽上传。这里把能力写在页面上，
+       并明确标出文件会落到哪个目录。
+
+       位置在列表**上方**：它原本排在长列表之后，一屏之外的入口等于不存在 ——
+       目录一长就得先滚到底才知道页面支持拖拽。放在前面还能顺带说清落点。
+       手机端（触摸、窄屏）改写成一条紧凑的可点横条，那句「拖到这里」是错的，
+       但「点一下就能选文件」依然成立。文案由 renderDropZone() 按屏宽生成。 -->
+  <div class="drop-zone" id="drop-zone" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
+    <div class="drop-zone-text">
+      <strong id="drop-zone-lead">把文件或文件夹拖到这里即可上传</strong>
+      <span id="drop-zone-target">当前目录</span>
+    </div>
+    <button class="btn" id="drop-zone-pick" type="button">选择文件…</button>
+    <button class="btn" id="drop-zone-dir" type="button">选择文件夹…</button>
+  </div>
+
   <div class="table-wrap">
     <table class="listing" id="table">
       <thead>
@@ -174,24 +214,6 @@
       <tbody id="tbody"></tbody>
     </table>
     <div class="empty" id="empty" hidden></div>
-  </div>
-
-  <!-- 常驻的拖拽投放区。
-       只靠「拖进来时才出现的浮层」不够：用户在没有开始拖之前，
-       根本不知道这个页面支持拖拽上传。这里把能力写在页面上，
-       并明确标出文件会落到哪个目录。
-
-       手机端（触摸、窄屏）改写成一条紧凑的可点横条，并挪到列表上方：
-       手机不可能拖拽，原来那句「拖到这里」是错的；而且它原本排在长列表
-       之后，一屏之外的入口等于不存在。文案由 renderDropZone() 按屏宽生成。 -->
-  <div class="drop-zone" id="drop-zone" hidden>
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
-    <div class="drop-zone-text">
-      <strong id="drop-zone-lead">把文件或文件夹拖到这里即可上传</strong>
-      <span id="drop-zone-target">当前目录</span>
-    </div>
-    <button class="btn" id="drop-zone-pick" type="button">选择文件…</button>
-    <button class="btn" id="drop-zone-dir" type="button">选择文件夹…</button>
   </div>
 </main>
 

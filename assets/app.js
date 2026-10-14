@@ -174,6 +174,31 @@
   // 见 navigate 里的说明：并发点击不能被静默丢掉。
   var pendingNav = null;
 
+  // navMax 是本会话内到过的最大历史下标，用来判断「前进」还有没有货。
+  //
+  // 浏览器不暴露「前面还有几条历史」，所以只能自己记账：每次 push 时
+  // 新下标 = 当前下标 + 1，并把它记为新的 navMax（push 会砍掉原有的前进分支，
+  // 这正是后按下标必然 ≤ navMax 的原因）。启动时用 history.state.idx 把它
+  // 初始化，刷新页面后「后退」才不会凭空变成灰的。
+  //
+  // 已知不精确之处：刷新后若浏览器仍留着更靠前的历史条目，我们无从得知，
+  // 「前进」会显示成不可用 —— 宁可少亮一颗按钮，也不给一个点了没反应的按钮。
+  var navMax = 0;
+
+  // navIndex 取当前这条历史记录的下标。老记录（本次改动之前推入的、
+  // 或页面首次加载）没有 idx 字段，按 0 处理。
+  function navIndex() {
+    var s = window.history && history.state;
+    return (s && typeof s.idx === 'number') ? s.idx : 0;
+  }
+
+  // parentPath 返回上一级目录："/a/b" → "/a"，"/a" → "/"，"/" → "/"。
+  function parentPath(p) {
+    var parts = (p || '/').split('/').filter(Boolean);
+    parts.pop();
+    return '/' + parts.join('/');
+  }
+
   var $ = function (id) { return document.getElementById(id); };
 
   // ================================================================ 凭据管理
@@ -1220,6 +1245,22 @@
     bc.scrollLeft = bc.scrollWidth;
   }
 
+  // syncNavButtons 按当前历史下标刷新「后退 / 前进 / 上一级」的可用状态。
+  //
+  // 这几颗按钮绝不能「亮着却点不出反应」——那比直接置灰更让人反复点。
+  // 所以判断依据不是「页面上有没有这些按钮」，而是各自真实的可达性：
+  //   后退：不在历史栈底（下标 > 0）才可点；
+  //   前进：下标还没到本会话的最深处（< navMax）才可点；
+  //   上一级：不在根目录才可点。
+  function syncNavButtons() {
+    var back = $('btn-back');
+    if (!back) return;
+    var i = navIndex();
+    back.disabled = i <= 0;
+    $('btn-forward').disabled = i >= navMax;
+    $('btn-up').disabled = state.path === '/' || !state.path;
+  }
+
   // 名称比较器：文件管理器的通行规则 ——
   //   - 自然序：文件名里的数字按数值比，"file2" 排在 "file10" 前面
   //     （而不是按字符逐个比，否则会出现 file10 < file2 的错觉）；
@@ -1935,6 +1976,7 @@
 
   function render() {
     renderBreadcrumb();
+    syncNavButtons();
     renderTable();
     renderPerms();
     applySiteTitle();
@@ -1995,7 +2037,10 @@
         // 万一 pushState 因为任何原因失败（URL 构造问题、跨源限制、
         // 浏览器历史条目上限），也应该照常把列表渲染出来。
         try {
-          history.pushState({ path: state.path }, '', dirURL(state.path));
+          // 连带把下标推进去，syncNavButtons 才有依据 —— 见 navMax 的说明。
+          var idx = navIndex() + 1;
+          navMax = idx;
+          history.pushState({ path: state.path, idx: idx }, '', dirURL(state.path));
         } catch (e) {
           if (window.console && console.warn) console.warn('更新地址栏失败：', e);
         }
@@ -3919,6 +3964,19 @@
     };
 
     $('btn-refresh').onclick = function () { navigate(state.path, false); };
+
+    // 后退 / 前进直接借浏览器的历史栈，不另起一套 —— 地址栏、浏览器返回键
+    // 与这两颗按钮因此永远同步（popstate 已经接在下面同一段里）。
+    // 「上一级」和点面包屑一样是**一次普通导航**，照常入栈：
+    // 上跳之后还能用「后退」回到刚才那个子目录，这正是资源管理器的直觉
+    // （若不入栈，上跳就会把子目录挤出历史，后退直接跳没一级）。
+    navMax = navIndex();
+    $('btn-back').onclick = function () { history.back(); };
+    $('btn-forward').onclick = function () { history.forward(); };
+    $('btn-up').onclick = function () {
+      var up = parentPath(state.path);
+      if (up !== state.path) navigate(up);
+    };
 
     // 打包下载：默认打包整个目录；一旦勾选了条目，就只打包所选。
     $('btn-zip').onclick = function () {

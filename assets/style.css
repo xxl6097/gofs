@@ -392,6 +392,19 @@ svg {
 
 .brand svg { width: 20px; height: 20px; color: var(--accent); }
 
+/* 后退 / 前进 / 上一级。
+   flex: none —— 固定成内容宽度，把可伸缩的余地全留给右侧的 breadcrumb
+   （它是 flex:1 + min-width:0，放不下时自己滚动）。否则这三个会先被压扁，
+   路径反而撑开，等于把「看得见的当前位置」让给了几颗图标按钮。
+   三颗都是 .btn.icon，所以 ≤820px 的 `.btn span{display:none}` 会自动
+   把文字收掉、只留图标，不必再写一条断点。 */
+.nav-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
 .breadcrumb {
   display: flex;
   align-items: center;
@@ -983,12 +996,13 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 /* ------------------------------------------------------- 拖拽投放区（常驻） */
 
 /* 把「支持拖拽上传」写在页面上，并标明落点。
-   只靠拖拽时才出现的浮层是不够的 —— 那等于没提前告诉任何人这个能力。 */
+   只靠拖拽时才出现的浮层是不够的 —— 那等于没提前告诉任何人这个能力。
+   常驻在列表上方（见 index.html），所以要的是下外边距而不是上外边距。 */
 .drop-zone {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 14px;
+  margin-bottom: 14px;
   padding: 12px 16px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius);
@@ -2114,10 +2128,13 @@ html.booting body::after {
   /* 只留图标：把宽度让给路径面包屑（窄屏上它比品牌名有用得多）。 */
   .brand span { display: none; }
   .brand { order: 1; padding-right: 0; border-right: none; }
-  .breadcrumb { order: 2; width: auto; flex: 1 1 auto; }
-  #user-chip { order: 3; }
+  /* 导航按钮紧跟在品牌图标之后、面包屑之前 —— 与桌面端同一顺序，
+     读起来就是「[图标] ← → ↑ 路径 …… [账号]」。 */
+  .nav-btns { order: 2; }
+  .breadcrumb { order: 3; width: auto; flex: 1 1 auto; }
+  #user-chip { order: 4; }
   .topbar-actions {
-    order: 4;
+    order: 5;
     flex: 1 1 100%;
     flex-wrap: nowrap;
     justify-content: flex-start;
@@ -2235,12 +2252,9 @@ html.booting body::after {
   .toolbar-right { margin-left: auto; }
   .stat { font-size: 12px; }
 
-  /* 把投放区挪到列表**上方**：手机不能拖拽，它的价值是
-     「一行之内说清传到哪、上限多少，并且点一下就能选文件」。
-     排在长列表之后等于不存在。 */
-  .content { display: flex; flex-direction: column; }
-  #drop-zone { order: 1; margin: 0 0 10px; }
-  .table-wrap { order: 2; }
+  /* 投放区常驻在列表上方（桌面端也一样，见 index.html），这里只收紧间距：
+     手机上它的价值是「一行之内说清传到哪、上限多少，并且点一下就能选文件」。 */
+  #drop-zone { margin-bottom: 10px; }
   .drop-zone { padding: 10px 12px; gap: 10px; }
   .drop-zone > svg { width: 18px; height: 18px; }
   /* 手机上一行说清就够：那句「拖到这里」在触摸屏上是错的，
