@@ -99,6 +99,19 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Infof("登录成功：%s", user)
 
+	// 登录后该落到哪个目录、哪些上级地址读得到。
+	//
+	// 只被授予 /docs 的账号站在根目录上什么都读不到，而前端把这次失败当成
+	// 401（服务端对「匿名也没权限的路径」回的就是 401）→ 判定为「登录已失效」
+	// → 清凭据 + 重新弹登录框。表现就是「新建一个限制在子目录的账号，
+	// 登录进去就提示打开目录失败」，而且怎么登都进不去。
+	//
+	// home_path 让前端换乘到它自己的目录；read_paths 让它别把必被拒绝的
+	// 上级（面包屑上的「根目录」、「上一级」按钮）画成能点的链接 ——
+	// 那两处是同一个坑的另一半。
+	home := s.auth.HomePath(user, pass, true)
+	readPaths := s.auth.ReadPaths(user, pass, true)
+
 	// 除了权限，还要把「未登录外壳里刻意没下发」的配置一并补齐，
 	// 否则前端登录后仍然不知道上传归档、在线编辑、密钥等能力是否可用。
 	//
@@ -127,6 +140,9 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"allow_uninstall": s.canUninstall(),
 		// 多根模式：界面据此把「服务根目录」那一项变成只读的挂载列表。
 		"multi_root": s.MultiRoot(),
+		// 落地目录与可达路径，见上面 home 的说明。
+		"home_path":  home,
+		"read_paths": readPaths,
 	}
 	if s.cfg.UploadDated() {
 		reply["upload_date_dir"] = s.cfg.UploadDateDir(time.Now())

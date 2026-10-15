@@ -378,6 +378,19 @@ func (a *Authenticator) HasAnyWrite(username, password string, authenticated boo
 	return false
 }
 
+// accountFor 取出这组凭据对应的账号：具名账号（密码不对即视为不存在）
+// 或匿名账号（未携带凭据时）。调用方需持有锁。
+func (a *Authenticator) accountFor(username, password string, authenticated bool) *account {
+	if !authenticated {
+		return a.anonAcc
+	}
+	acc := a.lookupAccount(username)
+	if acc == nil || !a.passwordMatches(acc, password) {
+		return nil
+	}
+	return acc
+}
+
 // Lookup 在提供的凭据下计算 urlPath 的权限。
 // 若未配置鉴权，返回 PermReadWrite（由全局开关再收敛）。
 func (a *Authenticator) Lookup(urlPath, username, password string, authenticated bool) Permission {
@@ -388,20 +401,68 @@ func (a *Authenticator) Lookup(urlPath, username, password string, authenticated
 	defer a.mu.RUnlock()
 
 	// 先尝试具名账号，再回落到匿名规则。
-	if authenticated {
-		acc := a.lookupAccount(username)
-		if acc == nil {
-			return PermNone
-		}
-		if !a.passwordMatches(acc, password) {
-			return PermNone
-		}
+	if acc := a.accountFor(username, password, authenticated); acc != nil {
 		return acc.match(urlPath)
 	}
-	if a.anonAcc != nil {
-		return a.anonAcc.match(urlPath)
-	}
 	return PermNone
+}
+
+// HomePath 返回账号登录后应当落地的目录：它有权限的、最靠上的那一层。
+//
+// 为什么需要它：只被授予 /docs 的账号站在 / 上什么都读不到，而在前端看来
+// 那是一次 401 —— 被当成「登录已失效」，于是刚登录就被弹回登录框。换乘到
+// 自己的目录才能让登录真正落得下去。前端用它替换地址栏里那个读不到的路径。
+//
+// 选择顺序：可读写的优先（那才是这个账号真正能干活的地方），
+// 同为读写或同为只读时取路径最短的（最靠上的一层）。
+// 没有任何可读路径时返回空串。
+func (a *Authenticator) HomePath(username, password string, authenticated bool) string {
+	if a == nil || !a.Enabled() {
+		// 未启用鉴权：到处都能读，落在哪儿都一样。
+		return "/"
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	acc := a.accountFor(username, password, authenticated)
+	if acc == nil {
+		return ""
+	}
+	best := ""
+	bestPerm := PermNone
+	for _, r := range acc.Rules {
+		if r.Perm == PermNone {
+			continue
+		}
+		if best == "" || r.Perm > bestPerm || (r.Perm == bestPerm && len(r.Path) < len(best)) {
+			best, bestPerm = r.Path, r.Perm
+		}
+	}
+	return best
+}
+
+// ReadPaths 返回账号可读的规则路径（长的在前），供前端判断某个地址是否
+// 可达 —— 面包屑与「上一级」不该把一个必被拒绝的地址画成能点的链接。
+//
+// 未启用鉴权或账号不可用时返回 nil，调用方应把 nil 当作「不做限制」。
+func (a *Authenticator) ReadPaths(username, password string, authenticated bool) []string {
+	if a == nil || !a.Enabled() {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	acc := a.accountFor(username, password, authenticated)
+	if acc == nil {
+		return nil
+	}
+	out := make([]string, 0, len(acc.Rules))
+	for _, r := range acc.Rules {
+		if r.Perm != PermNone {
+			out = append(out, r.Path)
+		}
+	}
+	return out
 }
 
 // NeedsAuth 判断该路径是否要求客户端提供凭据（用于决定是否回 401 挑战）。

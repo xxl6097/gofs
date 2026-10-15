@@ -85,7 +85,8 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 放宽本次请求的读取时限：大文件上传需要时间。
 	// 用的是「无进展超时」——只要还在往里传就不会被打断，
 	// 只有连接真正停滞（比如每秒发几个字节占着名额）才会被断开。
-	withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	// [实验] 暂时去掉无进展超时包装
+	_ = w
 	// 单文件大小上限：没有它，一个请求就能把磁盘写满。
 	// 取值走 settings 而不是 cfg —— 它可以在页面上被管理员随时调整。
 	maxSize := s.settings.UploadMaxSize()
@@ -200,7 +201,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 	defer release()
-	withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	// [实验] 暂时去掉无进展超时包装
+	_ = w
 	formMax := s.settings.UploadMaxSize()
 	if !requestBody(w, r, formMax, "表单内容") {
 		return

@@ -435,6 +435,9 @@ svg {
 }
 .breadcrumb a:hover { background: var(--bg-hover); color: var(--text); }
 .breadcrumb .crumb.current { color: var(--text); font-weight: 600; cursor: default; }
+/* flat 是「读不到的上级」（账号权限不覆盖它，见 app.js 的 reachable）：
+   画成普通文字，不能给手型，否则看起来像能点。 */
+.breadcrumb span.crumb.flat { cursor: default; color: var(--text-mute); }
 .breadcrumb .sep { color: var(--text-mute); font-size: 12px; user-select: none; }
 
 .topbar-actions {

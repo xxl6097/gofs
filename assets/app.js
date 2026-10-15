@@ -110,8 +110,49 @@
     // 多站点模式：站点集合是运行期可变的，登录响应里已经带了这个标记，
     // 前端一直没接 —— 不接的话从登录框进来的页面要等下次请求才知道模式。
     if (typeof info.multi_root === 'boolean') DATA.multi_root = info.multi_root;
+    // 落地目录与可达路径（见 reachable 与 landingPath）。
+    if (typeof info.home_path === 'string') DATA.home_path = info.home_path;
+    if (Object.prototype.toString.call(info.read_paths) === '[object Array]') {
+      DATA.read_paths = info.read_paths;
+    }
     if (info.user !== undefined) DATA.user = info.user;
     if (typeof info.auth_on === 'boolean') DATA.auth_on = info.auth_on;
+  }
+
+  // homePath 返回该账号登录后应当落地的目录（服务端算好的）。
+  // 没有这个信息时按根目录处理 —— 那是未启用鉴权时的正确答案。
+  function homePath() { return DATA.home_path || '/'; }
+
+  // reachable 判断某个地址该账号读不读得到。
+  //
+  // 依据是服务端在登录响应里下发的 read_paths（该账号可读的规则路径）。
+  // 没有这份数据时（未登录、未启用鉴权、匿名外壳）一律按「可达」处理：
+  // 那时候也没有需要挡住的上级目录，保持原来的行为。
+  //
+  // 为什么必须挡住：只被授予 /docs 的账号点一下面包屑上的「根目录」，
+  // 服务端回的是 401（对「连匿名都没权限」的路径它就是这么回的），
+  // 而 apiFetch 把 401 一律当成「登录已失效」—— 结果是清凭据、弹登录框，
+  // 看起来像被踢下线。那是个必被拒绝的地址，就不该画成能点的链接。
+  function reachable(p) {
+    if (!DATA.read_paths || !DATA.read_paths.length) return true;
+    // 去掉尾部斜杠（根目录除外），否则 "/docs/" 与规则 "/docs" 比不相等。
+    var path = (p || '/').replace(/\/+$/, '') || '/';
+    for (var i = 0; i < DATA.read_paths.length; i++) {
+      var r = DATA.read_paths[i];
+      // 根目录可读就是「哪儿都能去」，不用再逐条比。
+      if (r === '/') return true;
+      if (path === r || path.indexOf(r + '/') === 0) return true;
+    }
+    return false;
+  }
+
+  // landingPath 返回登录成功 / 会话恢复之后应当落地的目录。
+  //
+  // 地址栏里那个路径未必读得到：页面外壳是在未登录时就渲染出来的，
+  // 锚定在请求的 URL 上（多半是 /）。读不到就换乘到 home_path。
+  function landingPath() {
+    var cur = state.path || '/';
+    return reachable(cur) ? cur : homePath();
   }
 
   // canEdit 判断条目能否在线编辑：类型、权限、体积三重条件。
@@ -525,7 +566,9 @@
   // 未登录时服务端只返回一张空壳，任何文件信息都要自己拉。
   async function onAuthenticated() {
     renderPerms();
-    return navigate(state.path || '/', false);
+    // ⚠️ 不能直接用 state.path：一个只被授予 /docs 的账号登录前停在 / 上，
+    // 照原样去拉列表只会被拒（见 landingPath）。
+    return navigate(landingPath(), false);
   }
 
   // resumeSession 用本地保存的凭据换取真实的身份与权限。
@@ -1353,10 +1396,16 @@
     var bc = $('breadcrumb');
     bc.textContent = '';
 
-    var rootCrumb = document.createElement('a');
+    // 不可达的上级渲染成普通文字而不是链接：它点下去必被服务端拒绝，
+    // 而前端会把那次失败当成「登录已失效」（见 reachable 的说明）。
+    var rootOK = reachable('/');
+    var rootCrumb = document.createElement(rootOK ? 'a' : 'span');
     rootCrumb.textContent = '根目录';
-    rootCrumb.href = raw('/');
-    rootCrumb.onclick = function (e) { e.preventDefault(); navigate('/'); };
+    rootCrumb.className = rootOK ? '' : 'crumb flat';
+    if (rootOK) {
+      rootCrumb.href = raw('/');
+      rootCrumb.onclick = function (e) { e.preventDefault(); navigate('/'); };
+    }
     bc.appendChild(rootCrumb);
 
     var parts = state.path.split('/').filter(Boolean);
@@ -1368,10 +1417,11 @@
 
       var isLast = i === parts.length - 1;
       var target = '/' + parts.slice(0, i + 1).join('/');
-      var el = document.createElement(isLast ? 'span' : 'a');
+      var linkable = !isLast && reachable(target);
+      var el = document.createElement(linkable ? 'a' : 'span');
       el.textContent = part;
-      el.className = 'crumb' + (isLast ? ' current' : '');
-      if (!isLast) {
+      el.className = 'crumb' + (isLast ? ' current' : (linkable ? '' : ' flat'));
+      if (linkable) {
         el.href = raw(encPath(target) + '/');
         el.onclick = function (e) { e.preventDefault(); navigate(target); };
       }
@@ -1386,14 +1436,16 @@
   // 所以判断依据不是「页面上有没有这些按钮」，而是各自真实的可达性：
   //   后退：不在历史栈底（下标 > 0）才可点；
   //   前进：下标还没到本会话的最深处（< navMax）才可点；
-  //   上一级：不在根目录才可点。
+  //   上一级：不在根目录、且上一级读得到才可点 —— 一个只被授予 /docs 的
+  //   账号站在 /docs 上，上一级是没有权限的 /，按钮亮着只会点出一句报错。
   function syncNavButtons() {
     var back = $('btn-back');
     if (!back) return;
     var i = navIndex();
     back.disabled = i <= 0;
     $('btn-forward').disabled = i >= navMax;
-    $('btn-up').disabled = state.path === '/' || !state.path;
+    $('btn-up').disabled = state.path === '/' || !state.path ||
+      !reachable(parentPath(state.path));
   }
 
   // 名称比较器：文件管理器的通行规则 ——
@@ -4351,7 +4403,10 @@
         // 等列表回来又整个换掉 —— 就是刷新时闪过的那一下。
         // navigate 内部吞掉了失败（只弹 toast），所以两个回调都要放行，
         // 否则拉取失败时页面会一直藏着等 4 秒兜底。
-        navigate(state.path || '/', false).then(endBoot, endBoot);
+        //
+        // 路径要过一遍 landingPath：刷新时地址栏未必停在自己读得到的目录上
+        // （分享页展开的 / 就是这样），照原样拉只会被拒。
+        navigate(landingPath(), false).then(endBoot, endBoot);
       }, function () {
         // resumeSession 自己吞掉了网络错误，这里只兜住意料之外的异常，
         // 免得遮挡卡死在那儿等 4 秒兜底。
