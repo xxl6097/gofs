@@ -406,21 +406,36 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %s", v, units[i])
 }
 
+// nameTooLong 报告路径里第一段超长的名称及其字节数（limit <= 0 表示不限制）。
+//
+// 抽成不写响应的纯函数，是为了让批量重命名接口复用**同一套上限与同一句文案**：
+// 两处各写一遍，迟早会出现「上传拒绝、改名放行」这种自相矛盾的判定。
+func (s *Server) nameTooLong(urlPath string) (string, int, bool) {
+	limit := s.cfg.MaxNameBytes
+	if limit <= 0 {
+		return "", 0, false
+	}
+	for _, seg := range strings.Split(strings.Trim(urlPath, "/"), "/") {
+		if len(seg) > limit {
+			return seg, len(seg), true
+		}
+	}
+	return "", 0, false
+}
+
+// nameTooLongMsg 是超长名称的统一文案（上传与重命名共用）。
+func (s *Server) nameTooLongMsg(n int) string {
+	return fmt.Sprintf("文件名过长（%d 字节，上限 %d 字节）", n, s.cfg.MaxNameBytes)
+}
+
 // checkNameLength 校验路径中每一段的长度。
 //
 // 超长文件名如果直接交给文件系统，得到的是一句 ENAMETOOLONG，
 // 透出去就是 500 —— 那看起来像服务端出故障，实际是请求本身不合法。
 func (s *Server) checkNameLength(w http.ResponseWriter, urlPath string) bool {
-	limit := s.cfg.MaxNameBytes
-	if limit <= 0 {
-		return true
-	}
-	for _, seg := range strings.Split(strings.Trim(urlPath, "/"), "/") {
-		if len(seg) > limit {
-			http.Error(w, fmt.Sprintf("400 Bad Request: 文件名过长（%d 字节，上限 %d 字节）",
-				len(seg), limit), http.StatusBadRequest)
-			return false
-		}
+	if _, n, ok := s.nameTooLong(urlPath); ok {
+		http.Error(w, "400 Bad Request: "+s.nameTooLongMsg(n), http.StatusBadRequest)
+		return false
 	}
 	return true
 }

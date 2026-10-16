@@ -2010,6 +2010,18 @@
     btnMove.hidden = !(can('write') && n > 0);
     if (n > 0) btnMove.querySelector('span').textContent = '移动所选 (' + n + ')';
 
+    // 批量重命名：条件与移动一致，但站点条目不算数 —— 它们代表的是**另一个
+    // 挂载根**，服务端按 Roots.IsRoot 一律 403（见行操作菜单里对 e.site 的
+    // 处理）。整批都是站点条目时按钮直接不显示：亮着一个点下去必然报错的按钮
+    // 不如不显示。
+    var renamable = 0;
+    if (can('write') && n > 0) {
+      renamable = pickedEntries().filter(function (e) { return !e.site; }).length;
+    }
+    var btnRename = $('btn-rename-sel');
+    btnRename.hidden = renamable === 0;
+    if (renamable > 0) btnRename.querySelector('span').textContent = '重命名所选 (' + renamable + ')';
+
     // 打包按钮跟着选中数变脸：0 项时是「打包下载」（整个目录），
     // 有选中时是「打包所选 (n)」，点击前就能看出会打包什么。
     var btnZip = $('btn-zip');
@@ -2968,6 +2980,532 @@
     }
 
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
+  }
+
+  // ---------------------------------------------------------------- 批量重命名
+
+  // 对选中的条目做「查找替换」。整个流程是：填规则 → 实时预览 → 一次性提交。
+  //
+  // 「预览即提交内容」是这个对话框的全部要点：预览里每一行的新名字就是服务端将要
+  // 写下的名字，所以规则一变就重算（不发请求、不用点「预览」按钮），提交时只发送
+  // 勾选且状态为 ok 的那些行。
+  //
+  // 冲突在预览里就标红并自动取消勾选。但**前端预检是体验，后端才是保证** ——
+  // 当前目录之外的冲突（列表被截断、隐藏文件）前端看不到，那种情况由服务端整批
+  // 拒掉并给出逐项原因。
+
+  // RENAME_OPTS_KEY 记住上次用过的规则开关。
+  // 批量改名常常是连着做几批的，每次都重新勾「正则」「区分大小写」很烦
+  //（PowerRename 之类的工具同样会记住）。
+  var RENAME_OPTS_KEY = 'gofs-rename-opts';
+
+  function loadRenameOpts() {
+    var o = { regex: false, caseSensitive: false, scope: 'base' };
+    try {
+      var saved = JSON.parse(localStorage.getItem(RENAME_OPTS_KEY) || 'null');
+      if (saved && typeof saved === 'object') {
+        if (typeof saved.regex === 'boolean') o.regex = saved.regex;
+        if (typeof saved.caseSensitive === 'boolean') o.caseSensitive = saved.caseSensitive;
+        if (saved.scope === 'full') o.scope = 'full';
+      }
+    } catch (e) { /* 无痕模式或数据损坏：用默认值 */ }
+    return o;
+  }
+
+  function saveRenameOpts(rule) {
+    try {
+      localStorage.setItem(RENAME_OPTS_KEY, JSON.stringify({
+        regex: rule.regex, caseSensitive: rule.caseSensitive, scope: rule.scope
+      }));
+    } catch (e) { /* 存不下不影响这次操作 */ }
+  }
+
+  // escapeRegExp 把一段文本变成「只匹配它自己」的正则。
+  // 不区分大小写的**字面量**替换要借道正则（JS 没有带 flag 的字符串替换），
+  // 而用户填的查找串里可能有 . * + 之类的元字符。
+  function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  // splitName 按 selectBaseName 的口径拆出「主名 + 扩展名」。
+  //
+  // 口径必须与单条重命名一致（最后一个点之前是主名、之后是扩展名；点在最前或
+  // 没有点时整个名字都是主名），否则同一个文件在单条改和批量改里「扩展名」指的
+  // 不是同一回事。
+  function splitName(name) {
+    var dot = name.lastIndexOf('.');
+    if (dot <= 0) return { base: name, ext: '' };
+    return { base: name.slice(0, dot), ext: name.slice(dot) };
+  }
+
+  // applyRenameRule 按规则算出一个新名字。
+  //
+  // rule = { find, repl, regex, caseSensitive, scope }，scope 为 'base'（不含
+  // 扩展名，默认）或 'full'。正则写错时返回 { invalid }，由调用方去提示。
+  //
+  // 以后要加「序列编号」「加前后缀」这类规则，就是在这里多一个分支：预览与提交
+  // 都只认这个函数的结果。
+  function applyRenameRule(name, rule) {
+    // 查找串为空 = 什么都不改。**必须先挡住**：空串在 split/join 与正则里都
+    // 会「在每个字符之间匹配一次」，把名字拆得面目全非。
+    if (!rule.find) return { name: name };
+    var parts = splitName(name);
+    var target = rule.scope === 'full' ? name : parts.base;
+    var out;
+    try {
+      if (rule.regex) {
+        // 正则模式走 String.replace，于是 $1 / $& 这类反向引用天然可用
+        //（与 PowerRename 一致）。
+        out = target.replace(new RegExp(rule.find, rule.caseSensitive ? 'g' : 'gi'), rule.repl);
+      } else if (rule.caseSensitive) {
+        // 字面量替换**不能用 replace**：替换串里的 $ 在那里同样有特殊含义，
+        // 用户输入「$5」会被悄悄吃掉。split/join 才是真正的「当纯文本」。
+        out = target.split(rule.find).join(rule.repl);
+      } else {
+        // 不区分大小写：JS 没有「带 flag 的字符串替换」，只能把查找串转义后当
+        // 正则用，并用函数返回值把替换串还原成纯文本。
+        out = target.replace(new RegExp(escapeRegExp(rule.find), 'gi'), function () {
+          return rule.repl;
+        });
+      }
+    } catch (e) {
+      return { invalid: e.message || '正则表达式不合法' };
+    }
+    return { name: rule.scope === 'full' ? out : out + parts.ext };
+  }
+
+  // splitUnits 把字符串切成「不该被拆开的最小单元」。
+  //
+  // 预览要高亮「改动的那一段」，切分点必须落在字素边界上：按 UTF-16 单元切会把
+  // emoji 与代理对劈成半个，渲染出乱码。有 Intl.Segmenter 就用字素簇（连写的
+  // emoji 也算一个单元），没有就退到码点 —— 至少不劈代理对。
+  function splitUnits(s) {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      var seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      return Array.from(seg.segment(s), function (x) { return x.segment; });
+    }
+    return Array.from(s);
+  }
+
+  // diffParts 找出旧名与新名的公共前缀与后缀，中间那段就是「改动」。
+  function diffParts(oldName, newName) {
+    var o = splitUnits(oldName), n = splitUnits(newName);
+    var p = 0;
+    while (p < o.length && p < n.length && o[p] === n[p]) p++;
+    var s = 0;
+    while (s < o.length - p && s < n.length - p && o[o.length - 1 - s] === n[n.length - 1 - s]) s++;
+    return {
+      prefix: o.slice(0, p).join(''),
+      oldMid: o.slice(p, o.length - s).join(''),
+      newMid: n.slice(p, n.length - s).join(''),
+      suffix: o.slice(o.length - s).join('')
+    };
+  }
+
+  // renderNameDiff 把「前后缀照常、改动高亮」的一行名字画进 cell。
+  //
+  // 全程 createElement + textContent，**绝不 innerHTML** —— 文件名是用户可控
+  // 内容（这是个文件服务器），整个文件都守着这条纪律。
+  function renderNameDiff(cell, parts, kind) {
+    var mid = kind === 'old' ? parts.oldMid : parts.newMid;
+    cell.textContent = '';
+    if (parts.prefix) cell.appendChild(document.createTextNode(parts.prefix));
+    if (mid) {
+      var mark = document.createElement('mark');
+      mark.className = kind === 'old' ? 'rn-del' : 'rn-add';
+      mark.textContent = mid;
+      cell.appendChild(mark);
+    }
+    if (parts.suffix) cell.appendChild(document.createTextNode(parts.suffix));
+  }
+
+  // batchRenamePreview 算出预览的每一行：旧名、新名、能不能改、不能改是为什么。
+  //
+  // 冲突判据与后端 planRenameItem 对齐（目标恒为同目录下的兄弟名）：
+  //   - 目标落在「本次会改走的源」里 → 那是让位（互换、链式改名），放行；
+  //   - 目标就是这一项自己（只改大小写，大小写不敏感的文件系统上会撞到自己）→ 放行；
+  //   - 其余同名已存在 → 冲突，自动取消勾选。
+  function batchRenamePreview(entries, rule) {
+    var rows = [];
+    var byNewName = {};
+    var vacating = {}; // 本次会离开当前位置的源路径
+    var existing = {}; // 小写名 → 条目：大小写不敏感地比一次，与后端 EqualFold 对齐
+
+    var i, e, res, row;
+    for (i = 0; i < state.entries.length; i++) {
+      existing[state.entries[i].name.toLowerCase()] = state.entries[i];
+    }
+    for (i = 0; i < entries.length; i++) {
+      e = entries[i];
+      row = { entry: e, name: e.name, oldName: e.name, reason: '', ok: false, checked: false };
+      res = applyRenameRule(e.name, rule);
+      if (res.invalid) {
+        row.reason = '正则表达式不合法';
+      } else if (res.name === e.name) {
+        row.reason = '名称未改变';
+      } else if (!res.name) {
+        row.reason = '新名称不能为空';
+      } else if (res.name.indexOf('/') >= 0) {
+        row.reason = '新名称不能包含 /';
+      } else {
+        row.name = res.name;
+        row.ok = true;
+        row.checked = true;
+        vacating[e.path] = true;
+        var key = res.name.toLowerCase();
+        (byNewName[key] = byNewName[key] || []).push(row);
+      }
+      rows.push(row);
+    }
+
+    // 两项改成同一个新名：必然有一个要覆盖另一个，两个都不能放行。
+    Object.keys(byNewName).forEach(function (k) {
+      if (byNewName[k].length < 2) return;
+      byNewName[k].forEach(function (r) {
+        r.ok = false;
+        r.checked = false;
+        r.reason = '与本次的其它项重名（都改成了这个新名）';
+      });
+    });
+
+    rows.forEach(function (r) {
+      if (!r.ok) return;
+      var hit = existing[r.name.toLowerCase()];
+      if (!hit) return;
+      if (hit === r.entry) return;      // 就是它自己（只改大小写）
+      if (vacating[hit.path]) return;   // 占着它的是本次会让位的项
+      r.ok = false;
+      r.checked = false;
+      r.reason = '目标同名已存在（未覆盖）';
+    });
+    return rows;
+  }
+
+  // renameBatchLimit 是一次能提交的项数上限，与服务端的 maxRenameBatch 对齐。
+  var renameBatchLimit = 1000;
+  // renamePreviewLimit 是最多渲染多少行。一千行的 DOM 会把弹窗拖到卡顿，
+  // 而用户也不会逐行看 —— 超出的部分在表尾明说还有多少项。
+  var renamePreviewLimit = 500;
+
+  function openBatchRenameDialog(entries) {
+    var rule = loadRenameOpts();
+    var targets = entries.slice(0, renameBatchLimit);
+    var dropped = entries.length - targets.length;
+    var rows = [];
+    var regexErr = '';
+
+    var body = document.createElement('div');
+
+    // ---- 规则区
+    var form = document.createElement('div');
+    form.className = 'rn-form';
+
+    function textInput(placeholder) {
+      var el = document.createElement('input');
+      el.type = 'text';
+      el.spellcheck = false;
+      el.autocomplete = 'off';
+      el.placeholder = placeholder;
+      return el;
+    }
+    function formRow(labelText, control) {
+      var wrap = document.createElement('div');
+      wrap.className = 'rn-field';
+      var lb = document.createElement('label');
+      lb.textContent = labelText;
+      wrap.appendChild(lb);
+      wrap.appendChild(control);
+      return wrap;
+    }
+    function checkBox(labelText, checked) {
+      var label = document.createElement('label');
+      label.className = 'checkbox';
+      var input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = !!checked;
+      label.appendChild(input);
+      var span = document.createElement('span');
+      span.textContent = labelText;
+      label.appendChild(span);
+      return { label: label, input: input };
+    }
+
+    var findInput = textInput('例如 IMG_');
+    var replInput = textInput('例如 2024-');
+    form.appendChild(formRow('查找内容', findInput));
+    form.appendChild(formRow('替换为', replInput));
+
+    var cbRegex = checkBox('正则表达式', rule.regex);
+    var cbCase = checkBox('区分大小写', rule.caseSensitive);
+    var scopeSel = document.createElement('select');
+    // 复用既有的 .select：下拉的箭头、内边距、聚焦描边全站一套。少了这个类，
+    // 它在手机上只有 19px 高（原生 select 不给内边距），是个按不准的细条。
+    scopeSel.className = 'select';
+    [['base', '名称（不含扩展名）'], ['full', '名称和扩展名']].forEach(function (o) {
+      var opt = document.createElement('option');
+      opt.value = o[0];
+      opt.textContent = o[1];
+      scopeSel.appendChild(opt);
+    });
+    scopeSel.value = rule.scope;
+
+    var opts = document.createElement('div');
+    opts.className = 'rn-opts';
+    opts.appendChild(cbRegex.label);
+    opts.appendChild(cbCase.label);
+    form.appendChild(opts);
+
+    var scopeRow = document.createElement('div');
+    scopeRow.className = 'rn-field';
+    var scopeLabel = document.createElement('label');
+    scopeLabel.textContent = '作用范围';
+    scopeRow.appendChild(scopeLabel);
+    scopeRow.appendChild(scopeSel);
+    form.appendChild(scopeRow);
+
+    // 正则的说明与报错共用一行：写错时它整行变红字，改回来又变回提示。
+    var regexHint = document.createElement('div');
+    regexHint.className = 'hint';
+    form.appendChild(regexHint);
+    body.appendChild(form);
+
+    // ---- 预览区
+    var banner = document.createElement('div');
+    banner.className = 'hint-box danger';
+    banner.hidden = true;
+    body.appendChild(banner);
+
+    var summary = document.createElement('div');
+    summary.className = 'rn-summary';
+    body.appendChild(summary);
+
+    var table = document.createElement('div');
+    table.className = 'rn-table';
+    body.appendChild(table);
+
+    var m = openModal({
+      title: '批量重命名',
+      wide: true,
+      body: body,
+      footer: modalFoot([
+        // 刷新只在「服务端拒了、而本地看起来没问题」时才有意义（多半是文件刚被
+        // 别人动过），所以平时藏着。
+        { label: '刷新列表', id: 'rn-reload', onClick: function () { refreshList(); } },
+        { label: '取消', onClick: function () { m.close(); } },
+        { label: '重命名', cls: 'primary', id: 'rn-ok', disabled: true, onClick: function () { submit(); } }
+      ])
+    });
+    var okBtn = $('rn-ok');
+    var reloadBtn = $('rn-reload');
+    reloadBtn.hidden = true;
+
+    // 打开对话框时把光标和焦点放在「查找内容」上：所有批量改名都从填它开始。
+    findInput.focus();
+
+    function setRegexError(msg) {
+      regexErr = msg;
+      findInput.classList.toggle('invalid', !!msg);
+      regexHint.textContent = msg
+        ? '正则表达式不合法：' + msg
+        : '正则模式下，「替换为」里可以用 $1、$& 引用匹配到的内容';
+      regexHint.classList.toggle('err', !!msg);
+    }
+
+    function renderRows() {
+      var box = document.createElement('div');
+      table.textContent = '';
+      rows.slice(0, renamePreviewLimit).forEach(function (row) {
+        var line = document.createElement('div');
+        line.className = 'rn-row' + (row.ok ? '' : (row.reason === '名称未改变' ? ' noop' : ' bad'));
+
+        // 复选框包一层 label：15px 的方框本身在手机上按不准，和列表里的
+        // .check-hit 同一个理由。
+        var hit = document.createElement('label');
+        hit.className = 'rn-check';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = row.checked;
+        cb.disabled = !row.ok;
+        cb.onchange = function () {
+          row.checked = cb.checked;
+          updateSummary();
+        };
+        hit.appendChild(cb);
+        line.appendChild(hit);
+
+        var parts = diffParts(row.oldName, row.name);
+        var oldCell = document.createElement('div');
+        oldCell.className = 'rn-name';
+        renderNameDiff(oldCell, parts, 'old');
+        line.appendChild(oldCell);
+
+        var arrow = document.createElement('div');
+        arrow.className = 'rn-arrow';
+        arrow.textContent = '→';
+        line.appendChild(arrow);
+
+        var newCell = document.createElement('div');
+        newCell.className = 'rn-name new';
+        renderNameDiff(newCell, parts, 'new');
+        line.appendChild(newCell);
+
+        if (row.reason) {
+          var why = document.createElement('div');
+          why.className = 'rn-why';
+          why.textContent = row.reason;
+          line.appendChild(why);
+        }
+        box.appendChild(line);
+      });
+      if (rows.length > renamePreviewLimit) {
+        var more = document.createElement('div');
+        more.className = 'rn-row noop';
+        more.textContent = '… 另有 ' + (rows.length - renamePreviewLimit) + ' 项未显示';
+        box.appendChild(more);
+      }
+      table.appendChild(box);
+    }
+
+    function updateSummary() {
+      var n = 0;
+      rows.forEach(function (r) { if (r.ok && r.checked) n++; });
+      var skip = rows.length - n;
+
+      summary.textContent = '';
+      summary.appendChild(document.createTextNode('将重命名 '));
+      var strong = document.createElement('b');
+      strong.textContent = String(n);
+      summary.appendChild(strong);
+      summary.appendChild(document.createTextNode(' 项'));
+      if (skip > 0) summary.appendChild(document.createTextNode(' · 跳过 ' + skip + ' 项'));
+      // 界面里的截断必须说出来，否则用户以为全改了。
+      if (dropped > 0) {
+        summary.appendChild(document.createTextNode('（已只处理前 ' + renameBatchLimit + ' 项，另有 ' + dropped + ' 项未包含）'));
+      }
+
+      okBtn.textContent = n > 0 ? '重命名 ' + n + ' 项' : '重命名';
+      okBtn.disabled = n === 0 || !!regexErr;
+    }
+
+    function recompute() {
+      rule.find = findInput.value;
+      rule.repl = replInput.value;
+      rule.regex = cbRegex.input.checked;
+      rule.caseSensitive = cbCase.input.checked;
+      rule.scope = scopeSel.value;
+
+      // 正则写错时**保留上一次合法的预览**：边打边看的时候，中途的半截正则必然
+      // 非法，清空列表会让人没法对着看。
+      var err = '';
+      if (rule.regex && rule.find) {
+        try {
+          new RegExp(rule.find, rule.caseSensitive ? 'g' : 'gi');
+        } catch (e) {
+          err = e.message || '正则表达式不合法';
+        }
+      }
+      setRegexError(err);
+      if (!err) {
+        rows = batchRenamePreview(targets, rule);
+        renderRows();
+      }
+      saveRenameOpts(rule);
+      updateSummary();
+    }
+
+    var timer = null;
+    function scheduleRecompute() {
+      // 防抖：输入框每敲一下都重算会在长列表上卡手。
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () { timer = null; recompute(); }, 120);
+    }
+
+    [findInput, replInput].forEach(function (el) {
+      el.oninput = scheduleRecompute;
+      el.onkeydown = function (ev) { if (ev.key === 'Enter') submit(); };
+    });
+    [cbRegex.input, cbCase.input].forEach(function (el) { el.onchange = recompute; });
+    scopeSel.onchange = recompute;
+
+    async function refreshList() {
+      await navigate(state.path, false);
+      // 用刷新后的条目重建候选集：被删掉的项没有行可显示了。
+      var byPath = {};
+      state.entries.forEach(function (e) { byPath[e.path] = e; });
+      targets = targets.map(function (e) { return byPath[e.path]; }).filter(Boolean);
+      banner.hidden = true;
+      reloadBtn.hidden = true;
+      recompute();
+      toast('info', '列表已刷新');
+    }
+
+    async function submit() {
+      var items = rows.filter(function (r) { return r.ok && r.checked; })
+        .map(function (r) { return { path: r.entry.path, name: r.name }; });
+      if (!items.length) return;
+
+      okBtn.disabled = true;
+      okBtn.textContent = '提交中…';
+      var res, raw = '';
+      try {
+        res = await apiFetch(BASE + '/fs/rename-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: items })
+        });
+        raw = await res.text();
+      } catch (e) {
+        toast('err', '重命名失败：' + e.message);
+        updateSummary();
+        return;
+      }
+      var data = {};
+      try { data = JSON.parse(raw); } catch (e) { data = {}; }
+
+      if (res.ok && data.ok) {
+        // 保持选中：把选中的旧路径换成新路径。
+        // ⚠️ 必须在 navigate **之后**回写 —— navigate 内部会清空 state.selected。
+        var map = {};
+        (data.renamed || []).forEach(function (r) { map[r.from] = r.to; });
+        var next = new Set();
+        state.selected.forEach(function (p) { next.add(map[p] || p); });
+        m.close();
+        toast('ok', '已重命名 ' + (data.renamed || []).length + ' 项' +
+          ((data.skipped || []).length ? '，' + data.skipped.length + ' 项名称未改变' : ''));
+        await navigate(state.path, false);
+        state.selected = next;
+        renderTable();
+        return;
+      }
+
+      // 服务端拒了：把逐项原因贴回对应的预览行，并取消它们的勾选。本地预检看不到
+      // 当前目录之外的冲突，所以这一刻服务端才是权威。
+      var why = {};
+      (data.errors || []).forEach(function (e) { why[e.path] = e.reason; });
+      var pinned = 0;
+      rows.forEach(function (r) {
+        var reason = why[r.entry.path];
+        if (!reason) return;
+        r.ok = false;
+        r.checked = false;
+        r.reason = reason;
+        pinned++;
+      });
+      if (pinned) renderRows();
+      banner.textContent = data.message || raw || ('重命名失败（HTTP ' + res.status + '）');
+      banner.hidden = false;
+      reloadBtn.hidden = false;
+      updateSummary();
+
+      // 500 的场合可能真有改成功的项（服务端会如实回报），那也要说出来。
+      if ((data.renamed || []).length) {
+        toast('warn', '已改成功 ' + data.renamed.length + ' 项，其余失败', 6000);
+      } else {
+        toast('err', banner.textContent, 6000);
+      }
+    }
+
+    recompute();
   }
 
   // ---------------------------------------------------------------- 移动
@@ -4222,6 +4760,13 @@
     $('btn-move-sel').onclick = function () {
       var picked = pickedEntries();
       if (picked.length) openMoveDialog(picked);
+    };
+
+    $('btn-rename-sel').onclick = function () {
+      // 再过滤一次站点条目：按钮的显隐已经算过一遍，但「点了没反应」比
+      // 「按钮不显示」更难理解，宁可在这里也兜一道。
+      var picked = pickedEntries().filter(function (e) { return !e.site; });
+      if (picked.length) openBatchRenameDialog(picked);
     };
 
     $('check-all').onchange = function (e) {

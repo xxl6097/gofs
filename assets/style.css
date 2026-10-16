@@ -17,6 +17,7 @@
   --danger: #dc2626;
   --danger-soft: rgba(220, 38, 38, 0.10);
   --ok: #16a34a;
+  --ok-soft: rgba(22, 163, 74, 0.16);
   --warn: #d97706;
   --zip: #b45309;
   /* 操作按钮的语义色：一眼分辨「这排按钮各自干什么」。
@@ -60,6 +61,7 @@
     --danger: #f87171;
     --danger-soft: rgba(248, 113, 113, 0.14);
     --ok: #4ade80;
+    --ok-soft: rgba(74, 222, 128, 0.18);
     --warn: #fbbf24;
     --zip: #fbbf24;
   --op-open: #60a5fa;
@@ -93,6 +95,7 @@
   --danger: #f87171;
   --danger-soft: rgba(248, 113, 113, 0.14);
   --ok: #4ade80;
+  --ok-soft: rgba(74, 222, 128, 0.18);
   --warn: #fbbf24;
   --zip: #fbbf24;
   --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -1260,6 +1263,83 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   line-height: 1.7;
 }
 .hint-box b { color: var(--text); font-weight: 600; }
+
+/* ---------------------------------------------------------- 批量重命名弹窗
+   「规则 → 汇总 → 逐行预览」。预览是主角，所以规则区收窄、列表占满宽度；
+   每一行是「旧名 → 新名 + 原因」，改动的那一段高亮，冲突行整行标红。 */
+.rn-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.rn-field { display: flex; align-items: center; gap: 10px; }
+.rn-field > label {
+  flex: none;
+  width: 62px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.rn-field input[type=text] {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  font-family: inherit;
+  outline: none;
+}
+.rn-field input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* 正则写错时把输入框标红，配合下面那行错误文案 —— 不能让用户点了「重命名」
+   才知道写错了。 */
+.rn-field input[type=text].invalid { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+.rn-opts { display: flex; flex-wrap: wrap; gap: 16px; padding-left: 72px; }
+.rn-form .hint.err { color: var(--danger); }
+.rn-summary {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 8px 2px;
+  border-top: 1px solid var(--border);
+}
+.rn-summary b { color: var(--text); font-weight: 600; }
+.rn-table { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+.rn-row:last-child { border-bottom: 0; }
+/* 复选框外面包一层：15px 的方框本身在手机上按不准（与列表里的 .check-hit 同理）。 */
+.rn-check {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  min-height: 26px;
+  cursor: pointer;
+}
+.rn-check input { margin: 0; accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+.rn-row.bad { background: var(--danger-soft); }
+.rn-row.noop { color: var(--text-mute); }
+.rn-row.noop .rn-check { cursor: not-allowed; }
+.rn-row.noop .rn-check input { cursor: not-allowed; }
+.rn-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.rn-name.new { color: var(--text); }
+.rn-arrow { flex: none; color: var(--text-mute); }
+.rn-why { margin-left: auto; flex: none; font-size: 12px; color: var(--danger); }
+.rn-row.noop .rn-why { color: var(--text-mute); }
+/* 改动片段：旧名上划掉、新名上加亮。用半透明底而不是纯色，
+   深浅两套主题下都不用单独调。 */
+.rn-name mark { padding: 0 1px; border-radius: 3px; }
+.rn-name mark.rn-del { background: var(--danger-soft); color: var(--danger); text-decoration: line-through; }
+.rn-name mark.rn-add { background: var(--ok-soft); color: var(--ok); }
 .hint-box code {
   font-family: var(--mono);
   font-size: 11.5px;
@@ -2106,6 +2186,11 @@ html.booting body::after {
   .checkbox { min-height: 40px; }
   /* 勾选框本身只有 20px，把整格做成可点区域（label 撑满单元格）。 */
   .check-hit { min-height: 42px; }
+  /* 批量重命名的预览行同理：方框外面那层 label 撑到 40px，
+     而且**必须放在这里**（触摸）而不是窄屏那一档 —— 平板也是触摸设备。 */
+  .rn-check { width: 40px; min-height: 40px; }
+  /* 下拉框的内边距只给到 36px，触摸设备上补齐到 40px。 */
+  .rn-field .select { min-height: 40px; }
 
   /* 品牌 logo 也是可点目标（点了回根目录），手机上只剩图标那 20px。 */
   .brand { min-height: 40px; min-width: 40px; justify-content: center; }
@@ -2439,4 +2524,14 @@ html.booting body::after {
   .rule-perm { flex: 1 1 auto; width: auto; }
   .rule-row .btn { flex: 0 0 auto; }
   .pw-row { flex-wrap: wrap; }
+  /* 批量重命名同理：「旧名 → 新名 + 原因」挤不进一行，把原因挤到第二行；
+     标签也不再留固定宽度，让输入框拿到整行。 */
+  .rn-row { flex-wrap: wrap; }
+  /* 用左内边距而不是外边距：width:100% 再加 margin 会顶破行宽，
+     预览表就多出一条横向滚动条。 */
+  .rn-why { width: 100%; padding-left: 36px; margin-left: 0; }
+  .rn-field { flex-wrap: wrap; }
+  .rn-field > label { width: auto; }
+  .rn-field input[type=text], .rn-field select { flex: 1 1 100%; }
+  .rn-opts { padding-left: 0; }
 }

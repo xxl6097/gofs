@@ -171,6 +171,8 @@ func (s *Server) Handler() http.Handler {
 	// 卸载是**独立**的扩展点（WithUninstaller），与 Restarter 无关。
 	mux.HandleFunc("/fs/uninstall", s.handleUninstall)
 	mux.HandleFunc("/fs/users", s.handleUsers)
+	// 批量重命名：整批校验通过才动手（见 handler_rename.go）。
+	mux.HandleFunc("/fs/rename-batch", s.handleRenameBatch)
 	mux.HandleFunc("/fs/extract", s.handleExtract)
 	mux.HandleFunc("/fs/text", s.handleText)
 	mux.HandleFunc("/fs/office", s.handleOffice)

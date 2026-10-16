@@ -453,6 +453,13 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 	}
 	destPath = fsutil.CleanURLPath(destPath)
 
+	// 目标名的长度也要挡：不挡的话，一个超长名会被文件系统拒成 ENAMETOOLONG，
+	// 透出去就是 500 —— 看起来像服务端故障，实际是请求本身不合法，而上传同一个
+	// 名字（handlePut）一直是拒绝的。两边口径必须一致。
+	if !s.checkNameLength(w, destPath) {
+		return
+	}
+
 	src, err := s.res.Resolve(urlPath)
 	if err != nil {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
