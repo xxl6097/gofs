@@ -1500,10 +1500,26 @@ gofs -b 127.0.0.1 -p 5000 --path-prefix /files /data -a 'admin:密码@/data:rw'
 ```
 
 ```nginx
-location /files/ {
-    proxy_pass http://127.0.0.1:5000;   # 结尾不带 /：别把前缀剥掉
-    # …… 其余同上
-}
+    location /gofs/ {
+        proxy_pass http://127.0.0.1:5000;   # ← 没有结尾 "/"，不要把 /files 剥掉
+        proxy_http_version 1.1;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+```
+
+#### nginx生效命令
+
+```
+# 进入容器内部校验
+docker exec nginx nginx -t
+# 热重载（推荐，无停机）
+docker exec nginx nginx -s reload
 ```
 
 带斜杠会让 nginx 剥掉 `/files` 前缀，而 gofs 的 `--path-prefix` 正需要看到它 ——
