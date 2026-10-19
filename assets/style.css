@@ -296,8 +296,6 @@
 .upgrade-result { margin-top: 8px; font-size: 13px; }
 .upgrade-result.ok { color: var(--ok); }
 .upgrade-result.err { color: var(--danger); }
-/* 「已是最新版本」旁边那个去发布页的链接：和这句话排在同一行，留一点间距。 */
-.upgrade-release-link { margin-left: 8px; }
 
 .upgrade-head { font-weight: 600; }
 
@@ -1342,33 +1340,6 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .rn-name mark { padding: 0 1px; border-radius: 3px; }
 .rn-name mark.rn-del { background: var(--danger-soft); color: var(--danger); text-decoration: line-through; }
 .rn-name mark.rn-add { background: var(--ok-soft); color: var(--ok); }
-
-/* 「推断成正则」：紧跟在「查找内容」下面的一排候选。
-   用虚线边而不是实线：它是个建议，不是表单字段本身。 */
-.rn-suggest { padding-left: 72px; }
-.rn-suggest-head { font-size: 11.5px; color: var(--text-mute); margin-bottom: 5px; }
-.rn-suggest-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.rn-suggest-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
-  max-width: 100%;
-  padding: 3px 9px;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-soft);
-  color: var(--text-dim);
-  font-size: 11.5px;
-  cursor: pointer;
-}
-.rn-suggest-chip:hover { border-color: var(--accent); color: var(--text); background: var(--bg-hover); }
-.rn-suggest-chip b { font-weight: 600; white-space: nowrap; }
-.rn-suggest-chip code {
-  font-family: var(--mono);
-  color: var(--accent);
-  overflow-wrap: anywhere;
-}
-
 .hint-box code {
   font-family: var(--mono);
   font-size: 11.5px;
@@ -2205,8 +2176,6 @@ html.booting body::after {
    （操作区的半透明是就近在 .ops 那里关掉的。） */
 @media (hover: none) {
   .btn { min-height: 40px; }
-  /* 批量重命名里「推断成正则」的候选也是可点目标。 */
-  .rn-suggest-chip { min-height: 40px; }
   .btn.icon { width: 40px; height: 40px; }
   .op-btn { min-height: 40px; min-width: 40px; justify-content: center; }
   /* 「更多」是手机上唯一的操作入口，必须是标准方块按钮。 */
@@ -2565,6 +2534,4 @@ html.booting body::after {
   .rn-field > label { width: auto; }
   .rn-field input[type=text], .rn-field select { flex: 1 1 100%; }
   .rn-opts { padding-left: 0; }
-  /* 标签折到输入框上方后，建议区不用再让出标签那 72px。 */
-  .rn-suggest { padding-left: 0; }
 }

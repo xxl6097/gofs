@@ -81,15 +81,6 @@ type Options struct {
 	// GitHub Enterprise 填 https://<host>/api/v3。
 	APIBase string
 
-	// ReleasesURL 为版本发布页（给人看的网页），留空自动推导：
-	// github.com 用 https://github.com/<owner>/<repo>/releases，
-	// GitHub Enterprise 把 API 根里的 /api/v3 去掉再拼。
-	//
-	// 只在「检查更新发现已是最新」时会用到 —— 那时没有 Release，
-	// 界面靠它给管理员一个去看 release 的入口（见 gofs.ReleasesPage）。
-	// 自建或镜像站推导不出来时显式给一个。
-	ReleasesURL string
-
 	// Client 为 HTTP 客户端，留空用一个 10 分钟超时的。
 	//
 	// 超时给得宽是因为要下载几十 MB 的二进制，
@@ -117,39 +108,15 @@ type Options struct {
 	DryRun bool
 }
 
-// Upgrader 实现 gofs.Upgrader（以及可选的 gofs.ReleasesPage）。
+// Upgrader 实现 gofs.Upgrader。
 type Upgrader struct {
 	owner, repo    string
 	currentVersion string
 	apiBase        string
-	releasesURL    string
 	assetName      func(goos, goarch string) string
 	checksumsName  string
 	client         *http.Client
 	dryRun         bool
-}
-
-// ReleasesURL 返回版本发布页，供界面在「已是最新」时挂一个入口。
-// 实现了 gofs.ReleasesPage。
-func (u *Upgrader) ReleasesURL() string { return u.releasesURL }
-
-// deriveReleasesURL 由仓库坐标与 API 根推出网页端的版本列表页。
-//
-// GitHub Enterprise 的 API 根是 https://<host>/api/v3，网页根就是 <host>：
-// 去掉那段 API 后缀再拼 <owner>/<repo>/releases。认不出后缀时按原样拼 ——
-// 显式给了 Options.ReleasesURL 的话根本走不到这里。
-func deriveReleasesURL(apiBase, owner, repo string) string {
-	base := strings.TrimRight(strings.TrimSpace(apiBase), "/")
-	if base == "" || base == DefaultAPIBase {
-		return "https://github.com/" + owner + "/" + repo + "/releases"
-	}
-	for _, suffix := range []string{"/api/v3", "/api"} {
-		if strings.HasSuffix(base, suffix) {
-			base = strings.TrimSuffix(base, suffix)
-			break
-		}
-	}
-	return base + "/" + owner + "/" + repo + "/releases"
 }
 
 // defaultAssetName 返回 <prefix>-<goos>-<goarch>[.exe] 的拼装函数。
@@ -195,19 +162,11 @@ func New(opts Options) (*Upgrader, error) {
 		current = gofs.Version
 	}
 
-	owner := strings.TrimSpace(opts.Owner)
-	repo := strings.TrimSpace(opts.Repo)
-	page := strings.TrimSpace(opts.ReleasesURL)
-	if page == "" {
-		page = deriveReleasesURL(base, owner, repo)
-	}
-
 	return &Upgrader{
-		owner:          owner,
-		repo:           repo,
+		owner:          strings.TrimSpace(opts.Owner),
+		repo:           strings.TrimSpace(opts.Repo),
 		currentVersion: current,
 		apiBase:        base,
-		releasesURL:    page,
 		assetName:      name,
 		checksumsName:  sums,
 		client:         client,

@@ -44,59 +44,6 @@ func TestVersionLess(t *testing.T) {
 	}
 }
 
-// TestReleasesURL 覆盖「版本发布页」的推导。
-//
-// 这个地址只在「已是最新」时用得上：那时没有 Release，界面只有一句
-// 「已是最新版本」，靠它给管理员一个去看 release 的入口。
-func TestReleasesURL(t *testing.T) {
-	cases := []struct {
-		name string
-		opts Options
-		want string
-	}{
-		{
-			name: "github.com 默认",
-			opts: Options{Owner: "xxl6097", Repo: "gofs"},
-			want: "https://github.com/xxl6097/gofs/releases",
-		},
-		{
-			name: "显式给 github API",
-			opts: Options{Owner: "o", Repo: "r", APIBase: DefaultAPIBase},
-			want: "https://github.com/o/r/releases",
-		},
-		{
-			name: "GitHub Enterprise：去掉 /api/v3（含尾斜杠）",
-			opts: Options{Owner: "o", Repo: "r", APIBase: "https://git.corp.example/api/v3/"},
-			want: "https://git.corp.example/o/r/releases",
-		},
-		{
-			name: "GitHub Enterprise：/api 后缀",
-			opts: Options{Owner: "o", Repo: "r", APIBase: "https://git.corp.example/api"},
-			want: "https://git.corp.example/o/r/releases",
-		},
-		{
-			name: "显式覆盖优先（镜像站/自建）",
-			opts: Options{Owner: "o", Repo: "r", APIBase: "https://api.github.com",
-				ReleasesURL: "https://mirror.example/gofs/releases"},
-			want: "https://mirror.example/gofs/releases",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			u, err := New(tc.opts)
-			if err != nil {
-				t.Fatalf("New 失败: %v", err)
-			}
-			if got := u.ReleasesURL(); got != tc.want {
-				t.Errorf("ReleasesURL() = %q, 期望 %q", got, tc.want)
-			}
-			// 它是可选能力：必须真的满足 gofs.ReleasesPage，
-			// 否则服务端那处类型断言永远不成立。
-			var _ gofs.ReleasesPage = u
-		})
-	}
-}
-
 // TestPickAsset 确认按 GOOS/GOARCH 挑资产，而不是拿到第一个就下。
 func TestPickAsset(t *testing.T) {
 	g := &Upgrader{assetName: defaultAssetName("gofs")}

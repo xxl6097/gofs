@@ -3181,117 +3181,6 @@
     return rows;
   }
 
-  // ---------------------------------------------------------- 从样例推导正则
-  //
-  // 很多人在「查找内容」里想写的其实不是正则，而是一个**真实文件名**
-  //（IMG_001.JPG）—— 他们想要的是「匹配同一类的名字」。这里把样例拆成
-  // 「固定段 + 可变段」，按泛化程度给几条候选；点一下才套用，不点就仍然是
-  // 原来的字面量搜索。
-
-  // tokenizeSample 把样例拆成数字段 / 字母段 / 单字符段。
-  //
-  // 只认 ASCII 数字与字母：文件名里的中文、日文通常正是「要保留的含义」，
-  // 把它泛化成 \p{L}+ 只会让规则更难懂、更容易误伤。
-  function tokenizeSample(s) {
-    var out = [], i = 0;
-    while (i < s.length) {
-      var rest = s.slice(i);
-      var m = /^[0-9]+/.exec(rest);
-      if (m) { out.push({ kind: 'digit', text: m[0] }); i += m[0].length; continue; }
-      m = /^[A-Za-z]+/.exec(rest);
-      if (m) { out.push({ kind: 'alpha', text: m[0] }); i += m[0].length; continue; }
-      // 其余按单个字符处理（分隔符、点、下划线、中文…），套用前统一转义。
-      // 代理对要整对取，否则会把 emoji 劈成两半。
-      var ch = s.charAt(i);
-      if (ch >= '\uD800' && ch <= '\uDBFF' && i + 1 < s.length) ch = s.slice(i, i + 2);
-      out.push({ kind: 'other', text: ch });
-      i += ch.length;
-    }
-    return out;
-  }
-
-  // buildSampleRegex 把分段拼成一条正则；vars 指定哪几类分段算「可变」。
-  // 可变段包成捕获组：这样套用之后「替换为」里能直接用 $1 引用它。
-  function buildSampleRegex(tokens, vars) {
-    return tokens.map(function (t) {
-      if (t.kind === 'digit' && vars.digit) return '(\\d+)';
-      if (t.kind === 'alpha' && vars.alpha) return '([A-Za-z]+)';
-      return escapeRegExp(t.text);
-    }).join('');
-  }
-
-  // looksLikeSample 判断「查找内容」里的文字更像样例，还是已经写好的正则。
-  //
-  // 推导只对样例有意义：从 `IMG_(\d+)` 再推导一遍只会得到一串转义过的括号。
-  // 点号刻意不算元字符 —— 文件名本来就带扩展名（`S01.jpg`），而 . 是最常见的
-  // 一个，拿它当判据会和再正常不过的样例撞车。
-  function looksLikeSample(s) {
-    return !/[\\^$|?*+()[\]{}]/.test(s);
-  }
-
-  // deriveRenameRegexes 从样例给出候选，泛化程度从保守到宽松。
-  //
-  // 两个必须守住的约定：
-  //   - **扩展名永远按字面量保留**。把它泛化成 ([A-Za-z]+) 既不是用户想要的，
-  //     也会让 $1/$2 的编号变得难以预料。
-  //   - 作用范围是「名称」时，扩展名不参与匹配，候选里就完全不带它 ——
-  //     带了 \.JPG 会一条都匹配不上，那比不给建议还糟。
-  //
-  // 于是两种情况都只在「主名」上做推导，作用范围=全名时再把扩展名原样接回去。
-  function deriveRenameRegexes(sample, scope) {
-    var parts = splitName(sample);
-    var stem = parts.base;
-    if (!stem) return [];
-    var suffix = scope === 'full' ? escapeRegExp(parts.ext) : '';
-
-    var tokens = tokenizeSample(stem);
-    var hasDigit = tokens.some(function (t) { return t.kind === 'digit'; });
-    var hasAlpha = tokens.some(function (t) { return t.kind === 'alpha'; });
-    var out = [];
-    var seen = {};
-
-    function add(re, label, desc) {
-      if (!re || seen[re]) return;
-      seen[re] = true;
-      out.push({ re: re, label: label, desc: desc });
-    }
-
-    // 1) 只把数字当变量：序号、日期、版本号最常见的形态。
-    if (hasDigit) {
-      add(buildSampleRegex(tokens, { digit: true, alpha: false }) + suffix,
-        '数字可变',
-        '数字段（001、2024…）当变量，其余按原样匹配');
-    }
-    // 2) 数字与单词都当变量。
-    if (hasDigit && hasAlpha) {
-      add(buildSampleRegex(tokens, { digit: true, alpha: true }) + suffix,
-        '数字和单词可变',
-        '数字段与字母段都当变量，其余按原样匹配');
-    }
-    // 3) 只保留最前面的固定前缀，后面的内容整段当变量。
-    //    适合「可变部分里混着字母、短横线、点」的情况（日期、版本串）。
-    if (hasDigit) {
-      var firstVar = -1;
-      for (var i = 0; i < tokens.length; i++) {
-        if (tokens[i].kind === 'digit') { firstVar = i; break; }
-      }
-      var prefix = '';
-      for (i = 0; i < firstVar; i++) prefix += escapeRegExp(tokens[i].text);
-      add(prefix + '(.+)' + suffix,
-        prefix ? '其余部分可变' : '整个名字都可变',
-        prefix
-          ? '只保留最前面的固定前缀，后面的内容都当变量'
-          : '整段都当变量' + (suffix ? '，只保留扩展名' : ''));
-    }
-    // 4) 没有任何可泛化的段时才给「原样」：它等价于字面量搜索，唯一的价值是
-    //    把 . * + 之类的元字符转义好，方便在它上面再加捕获组。
-    if (!out.length) {
-      add(tokens.map(function (t) { return escapeRegExp(t.text); }).join('') + suffix,
-        '原样匹配', '不泛化，只把 . * + 等特殊字符转义成字面量');
-    }
-    return out;
-  }
-
   // renameBatchLimit 是一次能提交的项数上限，与服务端的 maxRenameBatch 对齐。
   var renameBatchLimit = 1000;
   // renamePreviewLimit 是最多渲染多少行。一千行的 DOM 会把弹窗拖到卡顿，
@@ -3344,14 +3233,6 @@
     var findInput = textInput('例如 IMG_');
     var replInput = textInput('例如 2024-');
     form.appendChild(formRow('查找内容', findInput));
-
-    // 推导建议紧跟在「查找内容」下面：它读的就是这个输入框里的样例，
-    // 放远了就成了一个不知道从哪来的东西。
-    var suggest = document.createElement('div');
-    suggest.className = 'rn-suggest';
-    suggest.hidden = true;
-    form.appendChild(suggest);
-
     form.appendChild(formRow('替换为', replInput));
 
     var cbRegex = checkBox('正则表达式', rule.regex);
@@ -3386,7 +3267,6 @@
     var regexHint = document.createElement('div');
     regexHint.className = 'hint';
     form.appendChild(regexHint);
-
     body.appendChild(form);
 
     // ---- 预览区
@@ -3429,64 +3309,6 @@
         ? '正则表达式不合法：' + msg
         : '正则模式下，「替换为」里可以用 $1、$& 引用匹配到的内容';
       regexHint.classList.toggle('err', !!msg);
-    }
-
-    // ---------------------------------------------------- 正则推导建议
-    //
-    // 建议不打断当前搜索 —— 只有点了某一条，才会把它写进输入框。
-    //
-    // 有没有勾「正则表达式」不影响推导：先勾正则、再贴 `S01` 的人同样需要
-    // `S(\d+)`。判断依据是**输入的文字像不像样例**（见 looksLikeSample）——
-    // 已经手写好正则的人不需要再从它推导一遍。
-    function renderSuggestions() {
-      suggest.textContent = '';
-      var sample = findInput.value;
-      if (!sample || !looksLikeSample(sample)) {
-        suggest.hidden = true;
-        return;
-      }
-      var list = deriveRenameRegexes(sample, scopeSel.value);
-      if (!list.length) {
-        suggest.hidden = true;
-        return;
-      }
-
-      var head = document.createElement('div');
-      head.className = 'rn-suggest-head';
-      head.textContent = cbRegex.input.checked
-        ? '推断成正则（点一下替换当前规则）：'
-        : '推断成正则（点一下套用，会同时勾上「正则表达式」）：';
-      suggest.appendChild(head);
-
-      var chips = document.createElement('div');
-      chips.className = 'rn-suggest-list';
-      list.forEach(function (c) {
-        var chip = document.createElement('button');
-        chip.type = 'button';
-        chip.className = 'rn-suggest-chip';
-        chip.title = c.desc;
-        var label = document.createElement('b');
-        label.textContent = c.label;
-        chip.appendChild(label);
-        var code = document.createElement('code');
-        code.textContent = c.re;
-        chip.appendChild(code);
-        chip.onclick = function () { applySuggestion(c); };
-        chips.appendChild(chip);
-      });
-      suggest.appendChild(chips);
-      suggest.hidden = false;
-    }
-
-    // applySuggestion 把推导结果写进「查找内容」并启用正则。
-    //
-    // 作用范围保持不变：候选本来就是按当前作用范围推出来的，改它反而会对不上。
-    function applySuggestion(c) {
-      findInput.value = c.re;
-      cbRegex.input.checked = true;
-      recompute(); // 内部会保存选项（含「正则已开」）并刷新预览
-      findInput.focus();
-      try { findInput.setSelectionRange(c.re.length, c.re.length); } catch (e) { /* 忽略 */ }
     }
 
     function renderRows() {
@@ -3589,8 +3411,6 @@
       }
       saveRenameOpts(rule);
       updateSummary();
-      // 建议只读「查找内容 + 作用范围 + 正则开关」，与预览行无关，无条件重画。
-      renderSuggestions();
     }
 
     var timer = null;

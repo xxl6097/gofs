@@ -15,7 +15,7 @@
   并**默认把「传到根目录」的文件按 年/月/日 三级目录自动归档**
   （子目录原地放；可关闭、可自定义布局、可单次覆盖）
 - 删除、新建目录（`MKCOL`）、**移动（单选或批量，用目录选择器挑目标）**、重命名（`MOVE`）、
-  **批量重命名（查找替换，可从样例文件名推导正则，带实时预览与冲突跳过）**
+  **批量重命名（查找替换，带实时预览与冲突跳过）**
 - 递归搜索（`?q=`）
 - 目录打包下载为 zip（可选压缩级别）：**不勾选就打包整个目录，
   勾选了就只打包所选**，选中的目录会连同内容一起递归打包
@@ -250,24 +250,7 @@ curl -X MOVE -u user:pass \
 的新名字** —— 改动的那一段高亮，剩下的一目了然。
 
 - **三种查法**：默认按字面量、不区分大小写（输入「img」也能命中 `IMG_001.JPG`）；
-  勾上「正则表达式」后支持 `$1`、`$&`、命名组 `$<name>` 这类反向引用
-  （写错正则会当场标红并禁用提交）。
-- **从样例推导正则**：不想手写正则时，直接在「查找内容」里贴一个真实文件名
-  （`IMG_001.JPG`），输入框下方会立刻列出推断出的候选：
-
-  | 候选 | 得到 | 含义 |
-  | --- | --- | --- |
-  | 数字可变 | `IMG_(\d+)\.JPG` | 数字段（`001`、`2024`…）当变量 |
-  | 数字和单词可变 | `([A-Za-z]+)_(\d+)\.JPG` | 数字段与字母段都当变量 |
-  | 其余部分可变 | `IMG_(.+)\.JPG` | 只保留固定前缀，后面整段当变量 |
-
-  输入 `S01` 就得到 `S(\d+)`。推断会**跟着「作用范围」走**：选「名称（不含扩展名）」
-  时推出来的规则里就不带 `\.JPG`。有没有勾「正则表达式」都会推导（先勾上再贴样例
-  同样能看到建议）；点某一条才会把它写进「查找内容」，不点就仍然按原来的规则。
-  可变段都带捕获组，套用后「替换为」里可以直接用 `$1`。已经手写好正则
-  （含 `\ ^ $ | ? * + ( ) [ ] { }` 这些符号）时不再推导，免得刷出一堆转义括号。
-  样例里没有可泛化的段时（例如 `file.name`），只给一条「原样匹配」——
-  把 `.` 之类的元字符转义好，方便在它上面再加捕获组。
+  勾上「正则表达式」后支持 `$1`、`$&` 这类反向引用（写错正则会当场标红并禁用提交）。
 - **作用范围**默认是**名称（不含扩展名）**：改错扩展名的代价是文件变得打不开，
   而真需要改扩展名时切一下只是多一次点击。
 - **冲突项自动跳过**：目标同名已存在、与本次的其它项重名、名称非法或超长，都会
@@ -1517,26 +1500,10 @@ gofs -b 127.0.0.1 -p 5000 --path-prefix /files /data -a 'admin:密码@/data:rw'
 ```
 
 ```nginx
-    location /gofs/ {
-        proxy_pass http://127.0.0.1:5000;   # ← 没有结尾 "/"，不要把 /files 剥掉
-        proxy_http_version 1.1;
-        proxy_set_header Host              $http_host;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_buffering off;
-        proxy_request_buffering off;
-    }
-```
-
-#### nginx生效命令
-
-```
-# 进入容器内部校验
-docker exec nginx nginx -t
-# 热重载（推荐，无停机）
-docker exec nginx nginx -s reload
+location /files/ {
+    proxy_pass http://127.0.0.1:5000;   # 结尾不带 /：别把前缀剥掉
+    # …… 其余同上
+}
 ```
 
 带斜杠会让 nginx 剥掉 `/files` 前缀，而 gofs 的 `--path-prefix` 正需要看到它 ——
@@ -1719,12 +1686,6 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 点「检查更新」→ 有新版就显示版本号、发布说明与发布页 → 确认后「立即升级」
 → 进度实时推送（下载 / 校验 / 替换）→ 重启后生效。
 
-**已是最新版本时**，那句话旁边也会给一个「查看 GitHub Release」的链接：
-没有新版本不等于没什么可看（这个版本改了什么、有没有预发布版都在发布页）。
-这个地址来自升级器的可选接口 `ReleasesPage` —— `githubupgrade` 已经实现，
-按 `Owner`/`Repo`（以及 `APIBase`）自动推出发布页；自建或镜像站可以用
-`Options.ReleasesURL` 显式指定。没实现该接口的升级器行为完全不变。
-
 **但 gofs 自己不实现「怎么查、怎么装」，也不实现「怎么重启 / 怎么卸载自己」** ——
 它只定义接口，实现由部署方给：
 
@@ -1732,12 +1693,6 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 type Upgrader interface {
     Check(ctx context.Context) (*Release, error)
     Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
-}
-
-// ReleasesPage 是 Upgrader 的**可选**扩展：实现了它，
-// 「已是最新版本」旁边会多一个去发布页的链接（返回空串则不显示）。
-type ReleasesPage interface {
-    ReleasesURL() string
 }
 
 type Restarter interface {

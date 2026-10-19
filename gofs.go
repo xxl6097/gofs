@@ -80,9 +80,6 @@ type (
 	//
 	// 未注入时相关接口返回 404，界面上也不显示那一块。
 	Upgrader = config.Upgrader
-	// ReleasesPage 是 Upgrader 的可选扩展：实现它之后，「已是最新版本」
-	// 旁边会多一个直达版本发布页的链接。
-	ReleasesPage = config.ReleasesPage
 	// Restarter 由调用方实现「怎么重启自己」。
 	//
 	// 未注入时相关接口返回 404，界面上也不显示「重启」按钮。
