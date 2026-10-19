@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/xxl6097/gofs/internal/config"
@@ -62,6 +63,14 @@ func (s *Server) upgradeCheck(w http.ResponseWriter, r *http.Request) {
 	if rel != nil {
 		reply["release"] = rel
 		reply["latest"] = rel.Version
+	}
+	// 已是最新时 rel 为 nil，界面拿不到 Release.PageURL ——「已是最新版本」
+	// 那句话旁边就没有任何入口。升级器若实现了可选的 ReleasesPage，这里把
+	// 发布页地址一并下发，前端就能在旁边挂一个链接（见 buildUpgradeBox）。
+	if rp, ok := s.cfg.Upgrader.(config.ReleasesPage); ok {
+		if u := strings.TrimSpace(rp.ReleasesURL()); u != "" {
+			reply["releases_url"] = u
+		}
 	}
 	s.writeJSON(w, reply)
 }

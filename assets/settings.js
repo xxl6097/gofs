@@ -964,7 +964,22 @@
         if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
         if (!data.updateable) {
           result.className = 'upgrade-result ok';
-          result.textContent = '已是最新版本（' + data.current + '）。';
+          result.textContent = '';
+          var latest = document.createElement('span');
+          latest.textContent = '已是最新版本（' + data.current + '）。';
+          result.appendChild(latest);
+          // 已是最新时没有 release 对象，也就没有 PageURL —— 但发布页仍然值得
+          // 给一个入口：这个版本改了什么、有没有预发布版，都在那儿。
+          // 地址由升级器提供（实现了 gofs.ReleasesPage 才有）。
+          if (data.releases_url) {
+            var relLink = document.createElement('a');
+            relLink.className = 'btn btn-sm upgrade-release-link';
+            relLink.href = data.releases_url;
+            relLink.target = '_blank';
+            relLink.rel = 'noopener noreferrer';
+            relLink.textContent = '查看 GitHub Release';
+            result.appendChild(relLink);
+          }
           return;
         }
         renderRelease(data.release);

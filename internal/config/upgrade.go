@@ -72,3 +72,18 @@ type Upgrader interface {
 	// 返回 nil 表示升级成功（服务端会提示重启）。
 	Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
 }
+
+// ReleasesPage 是 Upgrader 的**可选**扩展：把「版本发布页」一并告诉界面。
+//
+// 为什么需要单独一个接口：检查更新发现**已是最新**时，Check 返回 nil，
+// 响应里没有 Release，也就没有 PageURL —— 界面只有一句「已是最新版本」，
+// 管理员想去看看这个版本发了什么、有没有预发布版，却没有入口。
+//
+// 实现了它，服务端会在检查更新的响应里多带一个 releases_url，
+// 「已是最新」旁边就能给一个直达发布页的链接。
+// 没实现时行为完全不变（不回报这个字段）。
+type ReleasesPage interface {
+	// ReleasesURL 返回版本列表页地址（例如 https://github.com/owner/repo/releases）。
+	// 返回空串表示不提供。
+	ReleasesURL() string
+}

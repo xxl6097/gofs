@@ -1719,6 +1719,12 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 点「检查更新」→ 有新版就显示版本号、发布说明与发布页 → 确认后「立即升级」
 → 进度实时推送（下载 / 校验 / 替换）→ 重启后生效。
 
+**已是最新版本时**，那句话旁边也会给一个「查看 GitHub Release」的链接：
+没有新版本不等于没什么可看（这个版本改了什么、有没有预发布版都在发布页）。
+这个地址来自升级器的可选接口 `ReleasesPage` —— `githubupgrade` 已经实现，
+按 `Owner`/`Repo`（以及 `APIBase`）自动推出发布页；自建或镜像站可以用
+`Options.ReleasesURL` 显式指定。没实现该接口的升级器行为完全不变。
+
 **但 gofs 自己不实现「怎么查、怎么装」，也不实现「怎么重启 / 怎么卸载自己」** ——
 它只定义接口，实现由部署方给：
 
@@ -1726,6 +1732,12 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 type Upgrader interface {
     Check(ctx context.Context) (*Release, error)
     Upgrade(ctx context.Context, rel *Release, onProgress func(UpgradeProgress)) error
+}
+
+// ReleasesPage 是 Upgrader 的**可选**扩展：实现了它，
+// 「已是最新版本」旁边会多一个去发布页的链接（返回空串则不显示）。
+type ReleasesPage interface {
+    ReleasesURL() string
 }
 
 type Restarter interface {

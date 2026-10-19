@@ -102,6 +102,51 @@ func TestUpgradeCheckUpToDate(t *testing.T) {
 	}
 }
 
+// releasesPageUpgrader 给 fakeUpgrader 加上可选的 ReleasesPage 能力。
+type releasesPageUpgrader struct {
+	*fakeUpgrader
+	url string
+}
+
+func (u *releasesPageUpgrader) ReleasesURL() string { return u.url }
+
+// TestUpgradeCheckReportsReleasesURL 覆盖「已是最新时也要有去发布页的入口」。
+//
+// 已是最新时 Check 返回 nil，响应里没有 Release、也就没有 PageURL；
+// 升级器若实现了可选的 ReleasesPage，服务端要把单独的 releases_url 带上，
+// 界面才能在那句话旁边挂一个链接。没实现的升级器行为保持不变。
+func TestUpgradeCheckReportsReleasesURL(t *testing.T) {
+	newServer := func(u config.Upgrader) *Server {
+		t.Helper()
+		cfg := testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw")
+		cfg.Upgrader = u
+		return newTestServer(t, cfg)
+	}
+
+	// 实现了 ReleasesPage：下发地址
+	const page = "https://github.com/xxl6097/gofs/releases"
+	s := newServer(&releasesPageUpgrader{fakeUpgrader: &fakeUpgrader{rel: nil}, url: page})
+	got := do(t, s, http.MethodGet, "/fs/upgrade", nil, adminHdr())
+	if got.code != http.StatusOK {
+		t.Fatalf("返回 %d：%s", got.code, got.body)
+	}
+	if !strings.Contains(got.body, `"releases_url":"`+page+`"`) {
+		t.Errorf("没有下发发布页地址：%s", got.body)
+	}
+
+	// 没实现：不回报这个字段
+	s2 := newServer(&fakeUpgrader{rel: nil})
+	if got2 := do(t, s2, http.MethodGet, "/fs/upgrade", nil, adminHdr()); strings.Contains(got2.body, "releases_url") {
+		t.Errorf("未实现 ReleasesPage 时不该有 releases_url：%s", got2.body)
+	}
+
+	// 实现但返回空串（或纯空白）：也不回报 —— 空 href 比没有链接更糟
+	s3 := newServer(&releasesPageUpgrader{fakeUpgrader: &fakeUpgrader{rel: nil}, url: "  "})
+	if got3 := do(t, s3, http.MethodGet, "/fs/upgrade", nil, adminHdr()); strings.Contains(got3.body, "releases_url") {
+		t.Errorf("空地址不该下发：%s", got3.body)
+	}
+}
+
 // TestUpgradeCheckSurfacesError 确认检查失败时把原因原样给管理员 ——
 // 换成一句笼统的「检查失败」只会让人更难排查。
 func TestUpgradeCheckSurfacesError(t *testing.T) {

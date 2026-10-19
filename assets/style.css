@@ -296,6 +296,8 @@
 .upgrade-result { margin-top: 8px; font-size: 13px; }
 .upgrade-result.ok { color: var(--ok); }
 .upgrade-result.err { color: var(--danger); }
+/* 「已是最新版本」旁边那个去发布页的链接：和这句话排在同一行，留一点间距。 */
+.upgrade-release-link { margin-left: 8px; }
 
 .upgrade-head { font-weight: 600; }
 
