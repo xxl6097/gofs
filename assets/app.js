@@ -3038,6 +3038,123 @@
     return { base: name.slice(0, dot), ext: name.slice(dot) };
   }
 
+  // RENAME_EXAMPLE_MAX 是「示例名」输入框与正则生成器的长度上限。
+  // 文件名本身有 NAME_MAX 量级的上限；再长的示例生成出来的正则既没人看得懂，
+  // 也会让「命中 N/M」的统计白费力气。
+  var RENAME_EXAMPLE_MAX = 255;
+
+  // isLowSurrogate 判断一个 UTF-16 码元是否落在代理对的后半。
+  // 选区从/到代理对中间切开时，取出来的只有半个 emoji，生成的正则没有意义。
+  function isLowSurrogate(code) {
+    return code >= 0xDC00 && code <= 0xDFFF;
+  }
+
+  // renameTargetName 按作用范围取「正则实际作用的字符串」。
+  // 口径必须与 applyRenameRule 一致：base 是主名，full 是完整文件名。
+  function renameTargetName(name, scope) {
+    return scope === 'full' ? name : splitName(name).base;
+  }
+
+  // countRenameMatches 统计一条正则能命中多少个候选名。
+  // 不用 g 标志：带 g 的 RegExp.test 会推进 lastIndex，循环里会隔一个漏一个。
+  function countRenameMatches(re, names, scope, caseSensitive) {
+    var rx;
+    try {
+      rx = new RegExp(re, caseSensitive ? '' : 'i');
+    } catch (e) {
+      return -1;
+    }
+    var n = 0;
+    for (var i = 0; i < names.length; i++) {
+      if (rx.test(renameTargetName(names[i], scope))) n++;
+    }
+    return n;
+  }
+
+  // locateRenameFragment 在示例名里找出「匹配片段」的位置。
+  // 片段出现多次时优先取正好结束于目标末尾的那次 —— 只有它能让结尾锚定有
+  // 意义；找不到结尾出现再退回第一次出现。
+  function locateRenameFragment(example, scope, frag) {
+    if (!example || !frag) return null;
+    var target = renameTargetName(example, scope);
+    var last = target.lastIndexOf(frag);
+    if (last >= 0 && last + frag.length === target.length) {
+      return { start: last, end: target.length };
+    }
+    var first = target.indexOf(frag);
+    if (first < 0) return null;
+    return { start: first, end: first + frag.length };
+  }
+
+  // buildRenameRegexCandidates 由「示例名 + 选区」生成候选正则。
+  //
+  // 返回 { ok, reason, target, fragment, total, candidates }。reason 是给界面
+  // 翻译成中文的机器可读标记（no-example / no-fragment / ...），不直接拼文案：
+  // 提示怎么说不该由这个纯函数决定。
+  //
+  // 生成的是「起点」而不是唯一答案：精确匹配最保守；数字段与字母+数字段把
+  // 可变部分换成字符类；选区正好到目标末尾时再给一组带 $ 的版本。用户按
+  // 候选旁边的命中数自己选，下面的逐行预览仍然是最终准绳。
+  function buildRenameRegexCandidates(example, start, end, scope, names, caseSensitive) {
+    example = example == null ? '' : String(example);
+    names = names || [];
+    var target = renameTargetName(example, scope);
+    var res = {
+      ok: false,
+      reason: '',
+      target: target,
+      fragment: '',
+      total: names.length,
+      candidates: []
+    };
+
+    if (!example) { res.reason = 'no-example'; return res; }
+    if (example.length > RENAME_EXAMPLE_MAX) { res.reason = 'too-long'; return res; }
+    if (!(start >= 0) || !(end > start)) { res.reason = 'no-fragment'; return res; }
+    if (end > example.length) { res.reason = 'bad-range'; return res; }
+    // 选区切在代理对中间：只有半个字素，转义出来的正则匹配不到完整字符。
+    if (isLowSurrogate(example.charCodeAt(start)) ||
+        (end < example.length && isLowSurrogate(example.charCodeAt(end)))) {
+      res.reason = 'split-char';
+      return res;
+    }
+    // base 范围不含扩展名：选到扩展名上必然 0 命中，说清楚比给一条误导性的
+    // 正则好。跨出主名（一半在名称、一半在扩展名）同理。
+    if (start >= target.length) { res.reason = 'outside-scope'; return res; }
+    if (end > target.length) { res.reason = 'cross-scope'; return res; }
+
+    var frag = example.slice(start, end);
+    res.fragment = frag;
+
+    var pats = [{ re: escapeRegExp(frag) }];
+    if (/^[0-9]+$/.test(frag)) {
+      pats.push({ re: '\\d{' + frag.length + '}' });
+    } else {
+      // 只有「字母段 + 数字段」这种最常见的形态才生成通用候选；
+      // a1b2 之类再细分下去候选会爆炸，收益也不大。
+      var m = /^([A-Za-z]+)([0-9]+)$/.exec(frag);
+      if (m) pats.push({ re: '[A-Za-z]{' + m[1].length + '}\\d{' + m[2].length + '}' });
+    }
+
+    var all = pats.slice();
+    // 锚定按**目标串**（base 还是 full）判断，不是按输入框里的整串：
+    // web01.log 在 base 范围下选 01，得到的是主名末尾的 01$。
+    if (end === target.length) {
+      pats.forEach(function (p) { all.push({ re: p.re + '$' }); });
+    }
+
+    var seen = {};
+    all.forEach(function (p) {
+      if (seen[p.re]) return; // 不同通用规则可能生成同一条，去重并保持顺序
+      seen[p.re] = true;
+      var hits = countRenameMatches(p.re, names, scope, caseSensitive);
+      if (hits < 0) return; // 理论不可达；真编译失败就宁可不展示
+      res.candidates.push({ re: p.re, hits: hits });
+    });
+    res.ok = res.candidates.length > 0;
+    return res;
+  }
+
   // applyRenameRule 按规则算出一个新名字。
   //
   // rule = { find, repl, regex, caseSensitive, scope }，scope 为 'base'（不含
@@ -3267,25 +3384,236 @@
     var regexHint = document.createElement('div');
     regexHint.className = 'hint';
     form.appendChild(regexHint);
-    body.appendChild(form);
 
-    // ---- 预览区
+    // ---- 预览区（与规则区同一列；右侧是正则生成器，由 .rn-layout 的 grid 摆放）
+    var preview = document.createElement('div');
+    preview.className = 'rn-preview';
+
     var banner = document.createElement('div');
     banner.className = 'hint-box danger';
     banner.hidden = true;
-    body.appendChild(banner);
+    preview.appendChild(banner);
 
     var summary = document.createElement('div');
     summary.className = 'rn-summary';
-    body.appendChild(summary);
+    preview.appendChild(summary);
 
     var table = document.createElement('div');
     table.className = 'rn-table';
-    body.appendChild(table);
+    preview.appendChild(table);
+
+    // ---- 侧栏：由示例生成正则
+    //
+    // 预填第一个选中项的名字当样板。不自动选中任何片段 —— 猜错「要改哪一段」
+    // 比什么都不选更难发现；候选与命中数会把判断补上。
+    var assist = document.createElement('aside');
+    assist.className = 'rn-assist';
+    assist.setAttribute('aria-label', '由示例生成正则');
+
+    var assistTitle = document.createElement('div');
+    assistTitle.className = 'rn-assist-title';
+    assistTitle.textContent = '由示例生成正则';
+    assist.appendChild(assistTitle);
+
+    var exampleInput = textInput('例如 web01');
+    exampleInput.maxLength = RENAME_EXAMPLE_MAX;
+    if (targets.length) exampleInput.value = targets[0].name;
+    assist.appendChild(formRow('示例名', exampleInput));
+
+    var fragInput = textInput('例如 01');
+    fragInput.maxLength = RENAME_EXAMPLE_MAX;
+    assist.appendChild(formRow('匹配片段', fragInput));
+
+    var assistHint = document.createElement('div');
+    assistHint.className = 'hint';
+    assistHint.textContent = '在示例名里选中要匹配的片段，或直接填写「匹配片段」。';
+    assist.appendChild(assistHint);
+
+    var candsBox = document.createElement('div');
+    candsBox.className = 'rn-cands';
+    candsBox.setAttribute('role', 'group');
+    candsBox.setAttribute('aria-label', '候选正则');
+    assist.appendChild(candsBox);
+
+    var assistMsg = document.createElement('div');
+    assistMsg.className = 'hint rn-assist-msg';
+    assistMsg.setAttribute('aria-live', 'polite');
+    assist.appendChild(assistMsg);
+
+    // 「片段落在扩展名里」时给一个一步切换范围的出口：让用户自己去下拉框里
+    // 找「名称和扩展名」，得先明白为什么没有结果，多一道理解成本。
+    var assistFix = btn('改为「名称和扩展名」', 'ghost rn-assist-fix', function () {
+      scopeSel.value = 'full';
+      if (assistState.mode === 'manual') syncFromFragment();
+      renderAssist();
+      recompute();
+    });
+    assistFix.hidden = true;
+    assist.appendChild(assistFix);
+
+    // assistState 是侧栏的临时状态：
+    //   mode=selection 时以 selStart/selEnd 为准（示例名里的原生选区）；
+    //   mode=manual 时以 fragInput 为准（手填，或触摸设备上选不准时的兜底）。
+    // active 只用于高亮最近一次填入的候选，findInput 一手改就清掉。
+    var assistState = { selStart: -1, selEnd: -1, mode: 'selection', active: '' };
+    var assistTimer = null;
+
+    function captureAssistSelection() {
+      var a = exampleInput.selectionStart;
+      var b = exampleInput.selectionEnd;
+      if (a == null || b == null || b <= a) return false;
+      assistState.selStart = a;
+      assistState.selEnd = b;
+      assistState.mode = 'selection';
+      fragInput.value = exampleInput.value.slice(a, b);
+      return true;
+    }
+
+    function syncFromFragment() {
+      var pos = locateRenameFragment(exampleInput.value, scopeSel.value, fragInput.value);
+      assistState.selStart = pos ? pos.start : -1;
+      assistState.selEnd = pos ? pos.end : -1;
+    }
+
+    function scheduleAssist() {
+      // 与主表单的 120ms 防抖分开：选区变化和规则输入互不等待。
+      if (assistTimer) clearTimeout(assistTimer);
+      assistTimer = setTimeout(function () { assistTimer = null; renderAssist(); }, 80);
+    }
+
+    function assistReasonText(reason) {
+      switch (reason) {
+        case 'no-example': return '先填写示例名，或在示例名里选中要匹配的片段。';
+        case 'no-fragment': return '在示例名里选中要匹配的片段，或直接填写「匹配片段」。';
+        case 'not-found': return '示例名里找不到这个片段。';
+        case 'bad-range': return '选区已失效，请在示例名里重新选择。';
+        case 'split-char': return '选区切断了字符，请重新选择完整的字符。';
+        case 'too-long': return '示例名过长，请换一个更短的例子。';
+        case 'outside-scope':
+        case 'cross-scope': return '片段位于扩展名里，当前作用范围不包含扩展名。';
+        default: return '没有可用的正则候选，请换一个片段。';
+      }
+    }
+
+    function applyAssistCandidate(re) {
+      // 主表单那边可能正有一个防抖中的重算；先取消，免得它稍后拿旧的手工
+      // 输入覆盖掉刚填进去的候选。
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (assistTimer) { clearTimeout(assistTimer); assistTimer = null; }
+      assistState.active = re;
+      findInput.value = re;
+      cbRegex.input.checked = true; // 候选是正则，必须把模式打开
+      renderAssist();               // 先让当前候选亮起来，再走既有预览
+      recompute();
+    }
+
+    function renderAssist() {
+      var example = exampleInput.value;
+      var scope = scopeSel.value;
+      var names = targets.map(function (e) { return e.name; });
+      var pos = null;
+      var res;
+
+      if (assistState.mode === 'manual') {
+        pos = locateRenameFragment(example, scope, fragInput.value);
+      } else if (assistState.selStart >= 0 && assistState.selEnd > assistState.selStart) {
+        pos = { start: assistState.selStart, end: assistState.selEnd };
+      }
+
+      if (assistState.mode === 'manual' && fragInput.value && !pos) {
+        // 片段在作用范围内找不到。若它其实出现在扩展名里，说清楚是范围问题，
+        // 而不是让用户以为示例名里根本没有这段文字。
+        res = {
+          ok: false,
+          reason: example.indexOf(fragInput.value) >= 0 ? 'outside-scope' : 'not-found',
+          candidates: []
+        };
+      } else if (!pos) {
+        res = buildRenameRegexCandidates(example, -1, -1, scope, names, cbCase.input.checked);
+      } else {
+        res = buildRenameRegexCandidates(example, pos.start, pos.end, scope, names, cbCase.input.checked);
+      }
+
+      candsBox.textContent = '';
+      assistMsg.textContent = '';
+      assistMsg.classList.remove('err');
+      assistFix.hidden = true;
+
+      if (!res.ok) {
+        assistMsg.textContent = assistReasonText(res.reason);
+        assistMsg.classList.toggle('err', res.reason === 'bad-range' || res.reason === 'split-char');
+        assistFix.hidden = res.reason !== 'outside-scope' && res.reason !== 'cross-scope';
+        return;
+      }
+
+      res.candidates.forEach(function (c) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'rn-cand' + (assistState.active === c.re ? ' active' : '');
+        b.title = '填入「查找内容」：' + c.re;
+        // 点按钮不该把示例名里的选区弄丢：真正的保险是上面的 assistState，
+        // 这里再 preventDefault 一次，桌面端连焦点都不会跳。
+        b.onmousedown = function (ev) { ev.preventDefault(); };
+        var code = document.createElement('code');
+        code.textContent = c.re;
+        b.appendChild(code);
+        var hit = document.createElement('span');
+        hit.className = 'rn-cand-hit';
+        hit.textContent = '命中 ' + c.hits + '/' + res.total;
+        b.appendChild(hit);
+        b.onclick = function () { applyAssistCandidate(c.re); };
+        candsBox.appendChild(b);
+      });
+
+      assistMsg.textContent = '目标：' +
+        (scope === 'full' ? '完整文件名' : '主名') + '「' + res.target + '」';
+    }
+
+    // ---- 侧栏事件
+    exampleInput.oninput = function () {
+      var a = exampleInput.selectionStart;
+      var b = exampleInput.selectionEnd;
+      if (a != null && b != null && b > a) {
+        captureAssistSelection();
+      } else if (assistState.mode === 'manual' && fragInput.value) {
+        syncFromFragment();
+      } else {
+        // 文本变了，旧下标不再指向原来的字符；宁可让用户重选，也不能拿
+        // 一段错位的位置生成正则。
+        assistState.selStart = -1;
+        assistState.selEnd = -1;
+        fragInput.value = '';
+      }
+      scheduleAssist();
+    };
+    // select 覆盖鼠标拖选与 Shift+方向键；keyup/mouseup/touchend 是不同浏览器
+    // 更新 selectionStart 的时机差异的兜底。已经没有选区时什么都不做，
+    // 光标只是停着（start === end）不算「选中了一个片段」。
+    ['select', 'keyup', 'mouseup', 'touchend'].forEach(function (ev) {
+      exampleInput.addEventListener(ev, function () {
+        if (captureAssistSelection()) scheduleAssist();
+      });
+    });
+    fragInput.oninput = function () {
+      assistState.mode = 'manual';
+      syncFromFragment();
+      scheduleAssist();
+    };
+
+    // ---- 组装：规则在左、生成器在右、预览在规则下方
+    // DOM 顺序保持「规则」在前：openModal 会自动聚焦第一个文本输入框，
+    // 打开弹窗时光标应当落在「查找内容」而不是示例名上。
+    var layout = document.createElement('div');
+    layout.className = 'rn-layout';
+    layout.appendChild(form);
+    layout.appendChild(assist);
+    layout.appendChild(preview);
+    body.appendChild(layout);
 
     var m = openModal({
       title: '批量重命名',
       wide: true,
+      cls: 'rn-modal',
       body: body,
       footer: modalFoot([
         // 刷新只在「服务端拒了、而本地看起来没问题」时才有意义（多半是文件刚被
@@ -3420,12 +3748,30 @@
       timer = setTimeout(function () { timer = null; recompute(); }, 120);
     }
 
+    findInput.oninput = function () {
+      // 一手改查找内容，最近填入的候选就不再代表输入框里的东西了。
+      if (assistState.active) {
+        assistState.active = '';
+        renderAssist();
+      }
+      scheduleRecompute();
+    };
+    replInput.oninput = scheduleRecompute;
     [findInput, replInput].forEach(function (el) {
-      el.oninput = scheduleRecompute;
       el.onkeydown = function (ev) { if (ev.key === 'Enter') submit(); };
     });
-    [cbRegex.input, cbCase.input].forEach(function (el) { el.onchange = recompute; });
-    scopeSel.onchange = recompute;
+    cbRegex.input.onchange = recompute;
+    cbCase.input.onchange = function () {
+      // 命中数随大小写敏感度变化；预览本身由 recompute 负责。
+      recompute();
+      renderAssist();
+    };
+    scopeSel.onchange = function () {
+      // 范围变了，锚定口径与命中数都跟着变；手填的片段按新范围重新定位。
+      recompute();
+      if (assistState.mode === 'manual') syncFromFragment();
+      renderAssist();
+    };
 
     async function refreshList() {
       await navigate(state.path, false);
@@ -3436,6 +3782,8 @@
       banner.hidden = true;
       reloadBtn.hidden = true;
       recompute();
+      // 命中数基于新的 targets，必须跟着刷新。
+      renderAssist();
       toast('info', '列表已刷新');
     }
 
@@ -3505,6 +3853,7 @@
       }
     }
 
+    renderAssist();
     recompute();
   }
 

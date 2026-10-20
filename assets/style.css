@@ -1348,6 +1348,104 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   border-radius: 4px;
 }
 
+/* 批量重命名弹窗加宽：左侧规则 + 预览，右侧「由示例生成正则」。
+   760px 放不下两列（规则区本身就要 684px），所以只给这个弹窗单独放宽。 */
+.modal.wide.rn-modal { max-width: 1040px; }
+
+/* 两行两列的 grid：规则在上、预览在下，生成器在右侧跨两行。
+   用 grid 而不是两个 flex 列，是为了让预览永远紧贴规则，不会被右侧面板的
+   高度推下去；窄屏改 areas 即可换成一列，不用在 JS 里搬 DOM。 */
+.rn-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  grid-template-areas:
+    "form assist"
+    "preview assist";
+  column-gap: 20px;
+  row-gap: 14px;
+  align-items: start;
+}
+.rn-layout > .rn-form {
+  grid-area: form;
+  min-width: 0;
+  /* 间距交给 grid 的 row-gap，两边都留会叠成 28px。 */
+  margin-bottom: 0;
+}
+/* min-width:0 是 .rn-table 横向滚动的关键：默认的 min-width:auto 会让
+   网格项被内容撑宽，于是滚动条跑到弹窗上去了。 */
+.rn-preview { grid-area: preview; min-width: 0; }
+.rn-assist {
+  grid-area: assist;
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: 18px;
+  align-self: start;
+}
+.rn-assist-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.rn-assist .hint {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-mute);
+  margin-top: 8px;
+  /* 示例名、正则都可能很长；换行而不是把侧栏撑出横向滚动条。 */
+  overflow-wrap: anywhere;
+}
+.rn-assist .hint.err { color: var(--danger); }
+.rn-assist-fix { margin-top: 8px; }
+
+.rn-cands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.rn-cand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.rn-cand:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.rn-cand.active { background: var(--accent-soft); border-color: var(--accent); }
+.rn-cand code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.rn-cand-hit { flex: none; font-size: 11.5px; color: var(--text-mute); }
+
+/* 触摸设备上候选卡片也按 44px 的标准高度来，和弹窗底部按钮一致。 */
+@media (hover: none) {
+  .rn-cand { min-height: 44px; }
+}
+
+/* 820px 以下放不下两列：规则 → 生成器 → 预览。
+   生成器排在预览之前，手机上不用先滚过 46vh 的列表才能拿到它。 */
+@media (max-width: 820px) {
+  .rn-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "form" "assist" "preview";
+  }
+  .rn-assist {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+}
+
 /* ---------------------------------------------------------------- 进度 */
 
 .progress-wrap { margin-top: 14px; }
