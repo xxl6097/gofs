@@ -2995,27 +2995,32 @@
   // 拒掉并给出逐项原因。
 
   // RENAME_OPTS_KEY 记住上次用过的规则开关。
-  // 批量改名常常是连着做几批的，每次都重新勾「正则」「区分大小写」很烦
-  //（PowerRename 之类的工具同样会记住）。
+  // 批量改名常常是连着做几批的，每次都重新勾「通配符」「正则」「区分大小写」
+  // 很烦（PowerRename 之类的工具同样会记住）。
   var RENAME_OPTS_KEY = 'gofs-rename-opts';
 
   function loadRenameOpts() {
-    var o = { regex: false, caseSensitive: false, scope: 'base' };
+    var o = { regex: false, wildcard: false, caseSensitive: false, scope: 'base' };
     try {
       var saved = JSON.parse(localStorage.getItem(RENAME_OPTS_KEY) || 'null');
       if (saved && typeof saved === 'object') {
         if (typeof saved.regex === 'boolean') o.regex = saved.regex;
+        if (typeof saved.wildcard === 'boolean') o.wildcard = saved.wildcard;
         if (typeof saved.caseSensitive === 'boolean') o.caseSensitive = saved.caseSensitive;
         if (saved.scope === 'full') o.scope = 'full';
       }
     } catch (e) { /* 无痕模式或数据损坏：用默认值 */ }
+    // 两个模式互斥。旧数据若同时为真（不该出现），以通配符为准 —— 它的
+    // 语义更窄、更不容易让用户把正则元字符当成通配符。
+    if (o.wildcard) o.regex = false;
     return o;
   }
 
   function saveRenameOpts(rule) {
     try {
       localStorage.setItem(RENAME_OPTS_KEY, JSON.stringify({
-        regex: rule.regex, caseSensitive: rule.caseSensitive, scope: rule.scope
+        regex: rule.regex, wildcard: rule.wildcard,
+        caseSensitive: rule.caseSensitive, scope: rule.scope
       }));
     } catch (e) { /* 存不下不影响这次操作 */ }
   }
@@ -3155,10 +3160,42 @@
     return res;
   }
 
+  // wildcardToRegExp 把通配符模式编译成「整段匹配」的正则。
+  //
+  // 只认两个元字符：* 匹配任意长度（含空），? 匹配单个字符。其余字符一律
+  // 转义 —— 不提供 path.Match 的字符类语法：[ 在文件名里并不罕见，把它当
+  // 普通字符比让用户猜「这里是不是字符类」更安全。
+  //
+  // **连续的 * / ? 合成一个捕获组**：`web??` 得到一个 $1 = "01"，而不是
+  // 两个各含一个字符的组（后者让「保留可变部分」变成 $1$2，很难用）。
+  // 用 ^...$ 整段锚定：通配符描述的是整个名字，这样 `*.log` 不会顺带命中
+  // `a.log.bak`，与搜索里的通配语义也一致。u 标志让 ? 匹配一个完整码点，
+  // 而不是把 emoji 的代理对拆成两半。
+  function wildcardToRegExp(pattern, caseSensitive) {
+    var chars = Array.from(pattern);
+    var out = '^';
+    for (var i = 0; i < chars.length;) {
+      if (chars[i] !== '*' && chars[i] !== '?') {
+        out += escapeRegExp(chars[i]);
+        i++;
+        continue;
+      }
+      var body = '';
+      while (i < chars.length && (chars[i] === '*' || chars[i] === '?')) {
+        body += chars[i] === '*' ? '.*' : '.';
+        i++;
+      }
+      out += '(' + body + ')';
+    }
+    return new RegExp(out + '$', (caseSensitive ? '' : 'i') + 'u');
+  }
+
   // applyRenameRule 按规则算出一个新名字。
   //
-  // rule = { find, repl, regex, caseSensitive, scope }，scope 为 'base'（不含
-  // 扩展名，默认）或 'full'。正则写错时返回 { invalid }，由调用方去提示。
+  // rule = { find, repl, regex, wildcard, caseSensitive, scope }，scope 为
+  // 'base'（不含扩展名，默认）或 'full'。正则写错时返回 { invalid }，由调用
+  // 方去提示。通配符与正则可以同时为 false（字面量），但不会同时为 true：
+  // 界面上两个勾选框互斥。
   //
   // 以后要加「序列编号」「加前后缀」这类规则，就是在这里多一个分支：预览与提交
   // 都只认这个函数的结果。
@@ -3170,7 +3207,12 @@
     var target = rule.scope === 'full' ? name : parts.base;
     var out;
     try {
-      if (rule.regex) {
+      if (rule.wildcard) {
+        // 通配符同样走 replace，于是 $1（第 1 个 * / ?）、$&（整段匹配）与
+        // 正则模式一样可用。pattern 只由转义后的字面量和两个固定片段组成，
+        // 不存在编译失败，所以不用像正则那样先校验。
+        out = target.replace(wildcardToRegExp(rule.find, rule.caseSensitive), rule.repl);
+      } else if (rule.regex) {
         // 正则模式走 String.replace，于是 $1 / $& 这类反向引用天然可用
         //（与 PowerRename 一致）。
         out = target.replace(new RegExp(rule.find, rule.caseSensitive ? 'g' : 'gi'), rule.repl);
@@ -3352,6 +3394,7 @@
     form.appendChild(formRow('查找内容', findInput));
     form.appendChild(formRow('替换为', replInput));
 
+    var cbWildcard = checkBox('通配符', rule.wildcard);
     var cbRegex = checkBox('正则表达式', rule.regex);
     var cbCase = checkBox('区分大小写', rule.caseSensitive);
     var scopeSel = document.createElement('select');
@@ -3368,6 +3411,7 @@
 
     var opts = document.createElement('div');
     opts.className = 'rn-opts';
+    opts.appendChild(cbWildcard.label);
     opts.appendChild(cbRegex.label);
     opts.appendChild(cbCase.label);
     form.appendChild(opts);
@@ -3423,11 +3467,6 @@
     var fragInput = textInput('例如 01');
     fragInput.maxLength = RENAME_EXAMPLE_MAX;
     assist.appendChild(formRow('匹配片段', fragInput));
-
-    var assistHint = document.createElement('div');
-    assistHint.className = 'hint';
-    assistHint.textContent = '在示例名里选中要匹配的片段，或直接填写「匹配片段」。';
-    assist.appendChild(assistHint);
 
     var candsBox = document.createElement('div');
     candsBox.className = 'rn-cands';
@@ -3502,7 +3541,8 @@
       if (assistTimer) { clearTimeout(assistTimer); assistTimer = null; }
       assistState.active = re;
       findInput.value = re;
-      cbRegex.input.checked = true; // 候选是正则，必须把模式打开
+      cbWildcard.input.checked = false; // 候选是正则，切回正则模式
+      cbRegex.input.checked = true;
       renderAssist();               // 先让当前候选亮起来，再走既有预览
       recompute();
     }
@@ -3633,9 +3673,16 @@
     function setRegexError(msg) {
       regexErr = msg;
       findInput.classList.toggle('invalid', !!msg);
-      regexHint.textContent = msg
-        ? '正则表达式不合法：' + msg
-        : '正则模式下，「替换为」里可以用 $1、$& 引用匹配到的内容';
+      if (msg) {
+        regexHint.textContent = '正则表达式不合法：' + msg;
+      } else if (cbWildcard.input.checked) {
+        regexHint.textContent = '通配符模式：* 匹配任意字符、? 匹配单个字符，整段名称必须匹配；' +
+          '「替换为」里可以用 $1、$& 引用匹配到的内容';
+      } else if (cbRegex.input.checked) {
+        regexHint.textContent = '正则模式下，「替换为」里可以用 $1、$& 引用匹配到的内容';
+      } else {
+        regexHint.textContent = '按纯文本查找替换，查找内容出现在名称里即命中';
+      }
       regexHint.classList.toggle('err', !!msg);
     }
 
@@ -3719,6 +3766,10 @@
       rule.find = findInput.value;
       rule.repl = replInput.value;
       rule.regex = cbRegex.input.checked;
+      rule.wildcard = cbWildcard.input.checked;
+      // 两个模式互斥；理论上勾选框的 onchange 已经保证了这一点，这里再收一道，
+      // 避免 localStorage 里同时为真之类的边角情况让 applyRenameRule 走错分支。
+      if (rule.wildcard) rule.regex = false;
       rule.caseSensitive = cbCase.input.checked;
       rule.scope = scopeSel.value;
 
@@ -3760,7 +3811,17 @@
     [findInput, replInput].forEach(function (el) {
       el.onkeydown = function (ev) { if (ev.key === 'Enter') submit(); };
     });
-    cbRegex.input.onchange = recompute;
+    // 通配符与正则是两种互斥的「查找表达式」口径：一个把 * / ? 当元字符，
+    // 另一个把 . * + 当元字符。同时打开只会让人猜「现在按哪套算」，所以
+    // 勾一个就把另一个取消。
+    cbWildcard.input.onchange = function () {
+      if (cbWildcard.input.checked) cbRegex.input.checked = false;
+      recompute();
+    };
+    cbRegex.input.onchange = function () {
+      if (cbRegex.input.checked) cbWildcard.input.checked = false;
+      recompute();
+    };
     cbCase.input.onchange = function () {
       // 命中数随大小写敏感度变化；预览本身由 recompute 负责。
       recompute();
