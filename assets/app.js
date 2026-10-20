@@ -3091,6 +3091,86 @@
     return { start: first, end: first + frag.length };
   }
 
+  // buildRenameWildcardCandidates 由示例名 + 选区生成通配符候选。
+  //
+  // 返回格式与 buildRenameRegexCandidates 一致，但候选是通配符模式。
+  function buildRenameWildcardCandidates(example, start, end, scope, names, caseSensitive) {
+    example = example == null ? '' : String(example);
+    names = names || [];
+    var target = renameTargetName(example, scope);
+    var res = {
+      ok: false,
+      reason: '',
+      target: target,
+      fragment: '',
+      total: names.length,
+      candidates: []
+    };
+
+    if (!example) { res.reason = 'no-example'; return res; }
+    if (example.length > RENAME_EXAMPLE_MAX) { res.reason = 'too-long'; return res; }
+    if (!(start >= 0) || !(end > start)) { res.reason = 'no-fragment'; return res; }
+    if (end > example.length) { res.reason = 'bad-range'; return res; }
+    if (isLowSurrogate(example.charCodeAt(start)) ||
+        (end < example.length && isLowSurrogate(example.charCodeAt(end)))) {
+      res.reason = 'split-char';
+      return res;
+    }
+    if (start >= target.length) { res.reason = 'outside-scope'; return res; }
+    if (end > target.length) { res.reason = 'cross-scope'; return res; }
+
+    var frag = example.slice(start, end);
+    res.fragment = frag;
+
+    var pats = [{ wc: frag }]; // 精确匹配
+    if (/^[0-9]+$/.test(frag)) {
+      // 纯数字：? 表示每一位，* 表示任意长度
+      pats.push({ wc: '?'.repeat(frag.length) });
+      if (frag.length > 1) pats.push({ wc: '*' });
+    } else if (/^[A-Za-z]+$/.test(frag)) {
+      // 纯字母
+      pats.push({ wc: '?'.repeat(frag.length) });
+      if (frag.length > 1) pats.push({ wc: '*' });
+    } else {
+      // 混合内容
+      if (frag.length > 1) pats.push({ wc: '*' });
+    }
+
+    var seen = {};
+    pats.forEach(function (p) {
+      if (seen[p.wc]) return;
+      seen[p.wc] = true;
+
+      // 构造完整通配符模式：把目标中所有与片段相同的位置替换成候选通配符
+      var parts = [];
+      var lastIdx = 0;
+      for (var i = 0; i <= target.length - frag.length; i++) {
+        if (target.slice(i, i + frag.length).toLowerCase() === frag.toLowerCase()) {
+          if (i > lastIdx) parts.push(target.slice(lastIdx, i));
+          parts.push(p.wc);
+          lastIdx = i + frag.length;
+        }
+      }
+      if (lastIdx < target.length) parts.push(target.slice(lastIdx));
+      var fullWc = parts.join('');
+
+      // 用完整模式统计命中数
+      var wcRx;
+      try {
+        wcRx = wildcardToRegExp(fullWc, caseSensitive);
+      } catch (e) {
+        return; // 通配符转换失败就跳过
+      }
+      var hits = 0;
+      for (var i = 0; i < names.length; i++) {
+        if (wcRx.test(renameTargetName(names[i], scope))) hits++;
+      }
+      res.candidates.push({ re: p.wc, hits: hits, isWildcard: true });
+    });
+    res.ok = res.candidates.length > 0;
+    return res;
+  }
+
   // buildRenameRegexCandidates 由「示例名 + 选区」生成候选正则。
   //
   // 返回 { ok, reason, target, fragment, total, candidates }。reason 是给界面
@@ -3534,15 +3614,56 @@
       }
     }
 
-    function applyAssistCandidate(re) {
+    function applyAssistCandidate(re, isWildcard) {
       // 主表单那边可能正有一个防抖中的重算；先取消，免得它稍后拿旧的手工
       // 输入覆盖掉刚填进去的候选。
       if (timer) { clearTimeout(timer); timer = null; }
       if (assistTimer) { clearTimeout(assistTimer); assistTimer = null; }
+
+      // 构造完整模式：把示例名中**所有**选中片段的出现都替换成候选
+      var example = exampleInput.value;
+      var scope = scopeSel.value;
+      var target = renameTargetName(example, scope);
+      var pos = assistState.mode === 'manual'
+        ? locateRenameFragment(example, scope, fragInput.value)
+        : (assistState.selStart >= 0 && assistState.selEnd > assistState.selStart
+            ? { start: assistState.selStart, end: assistState.selEnd }
+            : null);
+
+      var fullPattern = re;
+      if (pos && pos.start >= 0 && pos.end > pos.start) {
+        // 有选区：把目标中所有与选区相同的片段都替换成候选
+        var frag = example.slice(pos.start, pos.end);
+        var parts = [];
+        var lastIdx = 0;
+        for (var i = 0; i <= target.length - frag.length; i++) {
+          if (target.slice(i, i + frag.length).toLowerCase() === frag.toLowerCase()) {
+            if (i > lastIdx) {
+              // 通配符模式下，字面量部分不需要转义（通配符只识别 * 和 ?）
+              // 正则模式下，字面量部分需要转义
+              parts.push(isWildcard ? target.slice(lastIdx, i) : escapeRegExp(target.slice(lastIdx, i)));
+            }
+            // 通配符模式下直接用候选，正则模式下包裹成捕获组
+            parts.push(isWildcard ? re : ('(' + re + ')'));
+            lastIdx = i + frag.length;
+          }
+        }
+        if (lastIdx < target.length) {
+          parts.push(isWildcard ? target.slice(lastIdx) : escapeRegExp(target.slice(lastIdx)));
+        }
+        fullPattern = parts.join('');
+      }
+
       assistState.active = re;
-      findInput.value = re;
-      cbWildcard.input.checked = false; // 候选是正则，切回正则模式
-      cbRegex.input.checked = true;
+      findInput.value = fullPattern;
+      // 根据候选类型设置模式
+      if (isWildcard) {
+        cbWildcard.input.checked = true;
+        cbRegex.input.checked = false;
+      } else {
+        cbWildcard.input.checked = false;
+        cbRegex.input.checked = true;
+      }
       renderAssist();               // 先让当前候选亮起来，再走既有预览
       recompute();
     }
@@ -3569,9 +3690,14 @@
           candidates: []
         };
       } else if (!pos) {
-        res = buildRenameRegexCandidates(example, -1, -1, scope, names, cbCase.input.checked);
+        // 根据当前模式选择候选生成器
+        res = cbWildcard.input.checked
+          ? buildRenameWildcardCandidates(example, -1, -1, scope, names, cbCase.input.checked)
+          : buildRenameRegexCandidates(example, -1, -1, scope, names, cbCase.input.checked);
       } else {
-        res = buildRenameRegexCandidates(example, pos.start, pos.end, scope, names, cbCase.input.checked);
+        res = cbWildcard.input.checked
+          ? buildRenameWildcardCandidates(example, pos.start, pos.end, scope, names, cbCase.input.checked)
+          : buildRenameRegexCandidates(example, pos.start, pos.end, scope, names, cbCase.input.checked);
       }
 
       candsBox.textContent = '';
@@ -3601,7 +3727,7 @@
         hit.className = 'rn-cand-hit';
         hit.textContent = '命中 ' + c.hits + '/' + res.total;
         b.appendChild(hit);
-        b.onclick = function () { applyAssistCandidate(c.re); };
+        b.onclick = function () { applyAssistCandidate(c.re, c.isWildcard); };
         candsBox.appendChild(b);
       });
 
@@ -3679,7 +3805,29 @@
         regexHint.textContent = '通配符模式：* 匹配任意字符、? 匹配单个字符，整段名称必须匹配；' +
           '「替换为」里可以用 $1、$& 引用匹配到的内容';
       } else if (cbRegex.input.checked) {
-        regexHint.textContent = '正则模式下，「替换为」里可以用 $1、$& 引用匹配到的内容';
+        // 正则模式下给出匹配预览：用第一个文件演示正则实际匹配到了什么
+        var preview = '';
+        if (findInput.value && targets.length) {
+          try {
+            var testRx = new RegExp(findInput.value, rule.caseSensitive ? '' : 'i');
+            var testTarget = renameTargetName(targets[0].name, rule.scope);
+            var m = testRx.exec(testTarget);
+            if (m) {
+              // 构造「希望显示为」的预览：把匹配到的内容用 {N} 标记出来
+              var preview1 = testTarget.slice(0, m.index);
+              var preview2 = '';
+              for (var pi = 1; pi < m.length; pi++) {
+                preview2 += '{' + pi + '}';
+              }
+              if (m.length === 1) preview2 = '{0}'; // 无捕获组时用 {0} 代表整段
+              var preview3 = testTarget.slice(m.index + m[0].length);
+              preview = '  希望显示为：' + preview1 + preview2 + preview3 +
+                (rule.scope === 'base' && targets[0].name.indexOf('.') > 0 ? splitName(targets[0].name).ext : '');
+            }
+          } catch (e) { /* 正则非法时不显示预览 */ }
+        }
+        regexHint.textContent = '正则模式：$1 引用第 1 个捕获组、$& 引用整段匹配。' +
+          '例：查找 (web)(\\d+) 替换 $1_site_$2，web01 → web_site_01。' + preview;
       } else {
         regexHint.textContent = '按纯文本查找替换，查找内容出现在名称里即命中';
       }
