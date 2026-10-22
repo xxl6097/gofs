@@ -434,7 +434,9 @@
     card.appendChild(logo);
 
     var h = document.createElement('h2');
-    h.textContent = '登录 gofs';
+    // 与顶栏品牌、标签页标题保持同一个站点名；写死 gofs 会让自定义标题的
+    // 部署出现「登录前叫 gofs、登录后叫别的」。
+    h.textContent = '登录 ' + siteTitle();
     card.appendChild(h);
 
     var sub = document.createElement('p');
@@ -1032,6 +1034,15 @@
     return (dir === '/' ? '' : dir.replace(/\/+$/, '')) + '/' + name;
   }
 
+  // dirDisplay 把目录路径规范成「用于展示」的形式：恰好一个尾部斜杠。
+  // state.path 可能来自服务端（带尾斜杠）或前端导航（不带），直接拼 "/"
+  // 就会出现「/项目文档//」这种文案。
+  function dirDisplay(p) {
+    var s = String(p == null ? '/' : p);
+    if (!s || s === '/') return '/';
+    return s.replace(/\/+$/, '') + '/';
+  }
+
   // ---------------------------------------------------------------- 格式化
 
   function fmtSize(n) {
@@ -1214,6 +1225,8 @@
 
   // ---------------------------------------------------------------- 弹窗
 
+  var modalSeq = 0;
+
   function openModal(opts) {
     var mask = document.createElement('div');
     mask.className = 'modal-mask';
@@ -1223,15 +1236,22 @@
     // 设置弹窗想单独收窄，只能靠一个额外的类名去覆盖 max-width。
     box.className = 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : '') +
       (opts.cls ? ' ' + opts.cls : '');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.tabIndex = -1;
 
     var head = document.createElement('div');
     head.className = 'modal-head';
     var t = document.createElement('div');
+    t.id = 'modal-title-' + (++modalSeq);
+    box.setAttribute('aria-labelledby', t.id);
     t.textContent = opts.title || '';
     head.appendChild(t);
     var x = document.createElement('button');
     x.type = 'button';
     x.className = 'btn icon ghost';
+    x.setAttribute('aria-label', '关闭');
+    x.title = '关闭';
     x.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>';
     x.onclick = close;
     head.appendChild(x);
@@ -1262,6 +1282,32 @@
     };
     document.addEventListener('keydown', escHandler);
 
+    // Tab 圈在弹窗里：遮罩后面还有整张文件列表，不拦的话键盘用户会
+    // 一边看不见焦点、一边在背景里操作。
+    var trapHandler = function (e) {
+      if (e.key !== 'Tab') return;
+      var nodes = box.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      var list = [];
+      Array.prototype.forEach.call(nodes, function (n) {
+        if (n.disabled) return;
+        if (n.getClientRects().length === 0) return;
+        list.push(n);
+      });
+      if (!list.length) { e.preventDefault(); box.focus(); return; }
+      var first = list[0], last = list[list.length - 1];
+      var cur = document.activeElement;
+      if (e.shiftKey && (cur === first || cur === box)) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (cur === last || !box.contains(cur))) {
+        e.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener('keydown', trapHandler);
+
+    // 关闭后把焦点还给打开弹窗的那颗按钮，避免焦点掉回 body。
+    var prevFocus = document.activeElement;
+
     // closing 防止递归：beforeClose 里再次调用 close 时直接放行。
     var closing = false;
 
@@ -1272,13 +1318,16 @@
       if (opts.beforeClose && opts.beforeClose() === false) return;
       closing = true;
       document.removeEventListener('keydown', escHandler);
+      document.removeEventListener('keydown', trapHandler);
       mask.remove();
+      if (prevFocus && prevFocus.focus && document.contains(prevFocus)) prevFocus.focus();
       if (opts.onClose) opts.onClose();
     }
 
     $('modal-root').appendChild(mask);
     var focusEl = box.querySelector('input[type=text]');
     if (focusEl) { focusEl.focus(); focusEl.select(); }
+    else box.focus();
     return { close: close, el: box, body: body, setLocked: function (v) { opts.locked = v; } };
   }
 
@@ -1593,6 +1642,7 @@
       var cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = state.selected.has(e.path);
+      cb.setAttribute('aria-label', '选择 ' + e.name);
       cb.style.accentColor = 'var(--accent)';
       cb.onchange = function () {
         if (cb.checked) state.selected.add(e.path);
@@ -1628,7 +1678,27 @@
       } else {
         label.onclick = function () { downloadEntry(e); };
       }
-      cell.appendChild(label);
+      // 搜索结果是递归的，同名文件可能来自不同目录。只显示 e.name
+      // 会让两行看起来完全一样，所以搜索态在名字下面补一行所在目录。
+      var main = document.createElement('div');
+      main.className = 'name-main';
+      main.appendChild(label);
+      if (state.query) {
+        var parent = e.path || '';
+        if (e.name && parent.slice(-e.name.length) === e.name) {
+          parent = parent.slice(0, -e.name.length);
+        }
+        parent = parent.replace(/\/+$/, '') || '根目录';
+        var subParts = [parent];
+        // 手机上大小列被隐藏，顺手在这里补回来，避免搜索结果只有名字。
+        if (isNarrow() && !e.is_dir) subParts.push(fmtSize(e.size));
+        var sub = document.createElement('span');
+        sub.className = 'name-sub';
+        sub.textContent = subParts.join(' · ');
+        sub.title = e.path;
+        main.appendChild(sub);
+      }
+      cell.appendChild(main);
       if (e.archive) {
         var tag = document.createElement('span');
         tag.className = 'tag zip';
@@ -1641,11 +1711,6 @@
         st.className = 'tag site';
         st.textContent = '站点';
         cell.appendChild(st);
-      } else if (e.is_dir) {
-        var dt = document.createElement('span');
-        dt.className = 'tag';
-        dt.textContent = '目录';
-        cell.appendChild(dt);
       }
       tdName.appendChild(cell);
       tr.appendChild(tdName);
@@ -1696,11 +1761,11 @@
       }
       // 「链接」对所有能读到的人都有意义，不受写权限约束 ——
       // 只读账号同样需要把文件地址发给别人。
-      actions.push({ kind: 'link', label: '链接', run: function () { copyEntryLink(e); } });
+      actions.push({ kind: 'link', label: '复制链接', run: function () { copyEntryLink(e); } });
       // 「分享」会生成一条免登录的公开地址，属于授权动作，所以要求写权限
       // （服务端还会再按范围校验一次）。
       if (can('write')) {
-        actions.push({ kind: 'share', label: '分享', run: function () { openShareDialog(e); } });
+        actions.push({ kind: 'share', label: '分享链接', run: function () { openShareDialog(e); } });
       }
       // 站点条目不参与移动/重命名/删除：它代表的是**另一个挂载根**，
       // 服务端按解析后的绝对路径判定并 403（见 Roots.IsRoot），
@@ -1715,29 +1780,44 @@
         actions.push({ kind: 'trash', label: '删除', cls: 'danger', run: function () { doDelete([e]); } });
       }
 
-      actions.forEach(function (a) {
-        var b = makeOpBtn(a.kind, a.label, a.cls);
-        if (a.disabled) {
-          b.disabled = true;
-          b.title = a.label + '：' + a.hint;
-        } else {
-          b.onclick = a.run;
+      // 每行只露一个主操作，其余进「更多」。之前一屏几十个彩色文字按钮，
+      // 文件名反而不是主角，操作列也被撑到 532px。
+      // 主操作的优先级：打开 / 编辑 / 预览 / 下载；被禁用（例如超限编辑）
+      // 就自动落到下一个可用动作。
+      var primary = null;
+      ['open', 'edit', 'preview', 'download'].some(function (kind) {
+        for (var i = 0; i < actions.length; i++) {
+          if (actions[i].kind === kind && !actions[i].disabled) {
+            primary = actions[i];
+            return true;
+          }
         }
-        ops.appendChild(b);
+        return false;
       });
+      if (!primary) {
+        primary = actions.filter(function (a) { return !a.disabled; })[0] || actions[0];
+      }
 
-      // 「更多」是这排按钮的兜底出口，所以**总是**渲染：
-      //   正常宽度下 display:none 不占位；
-      //   放不下（.ops-tight）或窄屏时才出现。
-      //
-      // 之前只在 actions.length > 1 时才建它 —— 那样一个只有单项操作的行
-      // （例如只读账号只有一个「链接」）一旦放不下，就会变成一格空白，
-      // 那一项操作彻底点不到了。
-      var moreBtn = makeOpBtn('more', '更多', 'ops-more');
-      moreBtn.title = '更多操作';
-      moreBtn.setAttribute('aria-label', '更多操作');
-      moreBtn.onclick = function () { openRowActions(e, actions, moreBtn); };
-      ops.appendChild(moreBtn);
+      var primaryBtn = makeOpBtn(primary.kind, primary.label, primary.cls);
+      primaryBtn.classList.add('op-primary');
+      if (primary.disabled) {
+        primaryBtn.disabled = true;
+        primaryBtn.title = primary.label + '：' + primary.hint;
+      } else {
+        primaryBtn.onclick = primary.run;
+      }
+      ops.appendChild(primaryBtn);
+
+      var rest = actions.filter(function (a) { return a !== primary; });
+      if (rest.length) {
+        var moreBtn = makeOpBtn('more', '更多', 'ops-more');
+        moreBtn.title = '更多操作';
+        moreBtn.setAttribute('aria-label', '更多操作：' + e.name);
+        // 菜单里放完整动作列表（包括主操作）：万一极窄宽度把主操作按钮
+        // 收掉，它仍然能从菜单里点到，不会出现「按钮没了、功能也没了」。
+        moreBtn.onclick = function () { openRowActions(e, actions, moreBtn); };
+        ops.appendChild(moreBtn);
+      }
 
       tdOps.appendChild(ops);
       tr.appendChild(tdOps);
@@ -1963,6 +2043,8 @@
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
       var active = th.dataset.sort === state.sortKey;
       th.classList.toggle('active', active);
+      th.setAttribute('aria-sort',
+        active ? (state.sortDir > 0 ? 'ascending' : 'descending') : 'none');
       var arrow = th.querySelector('.arrow');
       if (arrow) arrow.remove();
       if (active) {
@@ -1996,19 +2078,37 @@
     $('toolbar').classList.toggle('stuck', n > 0);
     if (n > 0) syncToolbarOffset();
 
+    // 进入批量选择后，投放区不再相关；清空选择后自动回来。
+    var zone = $('drop-zone');
+    if (zone) zone.hidden = !can('write') || n > 0 || !!state.query;
+
     var stat = $('stat');
     stat.textContent = statText();
     stat.title = '「文件合计」只统计当前列表里的文件大小，不含子目录里的内容；' +
       '目录本身不计入大小。';
 
+    // 手机宽度放不下「删除所选 (2)」这种完整标签，但也不能只剩图标。
+    // 统一收成「删除 (2)」，四个批量按钮仍能并排放下。
+    var narrow = isNarrow();
+
     var btnDel = $('btn-delete-sel');
     btnDel.hidden = !(can('delete') && n > 0);
-    if (n > 0) btnDel.querySelector('span').textContent = '删除所选 (' + n + ')';
+    if (n > 0) {
+      // 手机只用「删除」，计数交给左侧的「已选 N 项」；
+      // 四个按钮带数字会挤出屏幕。
+      btnDel.querySelector('span').textContent =
+        narrow ? '删除' : '删除所选 (' + n + ')';
+      btnDel.setAttribute('aria-label', '删除选中的 ' + n + ' 项');
+    }
 
     // 移动按钮跟着选中数变脸，与删除所选同一条件（只是权限门不同）。
     var btnMove = $('btn-move-sel');
     btnMove.hidden = !(can('write') && n > 0);
-    if (n > 0) btnMove.querySelector('span').textContent = '移动所选 (' + n + ')';
+    if (n > 0) {
+      btnMove.querySelector('span').textContent =
+        narrow ? '移动' : '移动所选 (' + n + ')';
+      btnMove.setAttribute('aria-label', '移动选中的 ' + n + ' 项');
+    }
 
     // 批量重命名：条件与移动一致，但站点条目不算数 —— 它们代表的是**另一个
     // 挂载根**，服务端按 Roots.IsRoot 一律 403（见行操作菜单里对 e.site 的
@@ -2020,17 +2120,23 @@
     }
     var btnRename = $('btn-rename-sel');
     btnRename.hidden = renamable === 0;
-    if (renamable > 0) btnRename.querySelector('span').textContent = '重命名所选 (' + renamable + ')';
+    if (renamable > 0) {
+      btnRename.querySelector('span').textContent =
+        narrow ? '重命名' : '重命名所选 (' + renamable + ')';
+      btnRename.setAttribute('aria-label', '重命名选中的 ' + renamable + ' 项');
+    }
 
     // 打包按钮跟着选中数变脸：0 项时是「打包下载」（整个目录），
     // 有选中时是「打包所选 (n)」，点击前就能看出会打包什么。
     var btnZip = $('btn-zip');
     var zipLabel = btnZip.querySelector('span');
     if (n > 0) {
-      zipLabel.textContent = '打包所选 (' + n + ')';
+      zipLabel.textContent = narrow ? '打包' : '打包所选 (' + n + ')';
+      btnZip.setAttribute('aria-label', '打包选中的 ' + n + ' 项并下载');
       btnZip.title = '把选中的 ' + n + ' 项打包成一个 zip 下载（选中的目录会连同内容一起打包）';
     } else {
       zipLabel.textContent = '打包下载';
+      btnZip.setAttribute('aria-label', '打包当前目录并下载');
       btnZip.title = '把当前目录整个打包成 zip 下载';
     }
   }
@@ -2071,7 +2177,7 @@
   function uploadLimitHint() {
     var parts = ['上传文件（也可直接把文件拖进页面）'];
     var dir = uploadTargetDir(state.path);
-    parts.push('存入 ' + (dir === '/' ? '/' : dir + '/'));
+    parts.push('存入 ' + dirDisplay(dir));
     // 只有真的会归档时才提这件事。判断用「实际落点 ≠ 当前目录」，
     // 与投放区、上传弹窗完全同一套口径。
     if (dir !== state.path) parts.push('按日期自动归档');
@@ -2093,7 +2199,8 @@
     var zone = $('drop-zone');
     if (!zone) return;
     var allowed = can('write');
-    zone.hidden = !allowed;
+    // 搜索态和批量选择时，投放区与当前任务无关，收起来把空间让给结果。
+    zone.hidden = !allowed || !!state.query || state.selected.size > 0;
     if (!allowed) return;
 
     var narrow = isNarrow();
@@ -2101,19 +2208,19 @@
     var lim = uploadLimitText();
 
     if (narrow) {
-      // 一行放得下才不会被截断：手机上一句「存入 /2026/09/28/ · 自动归档 · ≤ 10 GiB」
-      // 约 240px，紧凑但完整；<strong> 那句「拖到这里」由 CSS 隐藏。
-      $('drop-zone-lead').textContent = '上传文件';
-      $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
+      // 手机上不能拖拽，所以把「点这里」写成明确动作；路径与上限留在
+      // 第二行。CSS 不再隐藏这句话，整条横条就是上传入口。
+      $('drop-zone-lead').textContent = '点击选择文件上传';
+      $('drop-zone-target').textContent = '存入 ' + dirDisplay(dir) +
         (dir !== state.path ? ' · 自动归档' : '') +
         ' · ≤ ' + (uploadMax() > 0 ? fmtSize(uploadMax()) : '不限');
     } else {
-      $('drop-zone-lead').textContent = '把文件或文件夹拖到这里即可上传';
-      $('drop-zone-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/') +
+      $('drop-zone-lead').textContent = '把文件或文件夹拖到这里，或点击选择文件';
+      $('drop-zone-target').textContent = '存入 ' + dirDisplay(dir) +
         (dir !== state.path ? '（按日期自动归档）' : '');
       if (lim) $('drop-zone-target').textContent += '　·　' + lim;
     }
-    zone.title = narrow ? '选择文件或文件夹上传到 ' + dir + '/' : '';
+    zone.title = '选择文件上传到 ' + dirDisplay(dir);
   }
 
   // renderFooter 渲染页脚。它随登录状态与权限实时变化，因此必须在
@@ -2718,7 +2825,7 @@
     note.appendChild(nb);
     note.appendChild(document.createTextNode('：'));
     var code = document.createElement('code');
-    code.textContent = destDir + '/';
+    code.textContent = dirDisplay(destDir);
     note.appendChild(code);
     if (destDir !== targetDir) {
       note.appendChild(document.createTextNode('（按日期自动归档）'));
@@ -2819,7 +2926,7 @@
 
     var msg = (cancelled ? '已取消，' : '') + '已上传 ' + okCount + '/' + jobs.length + ' 个文件（共 ' +
       fmtSize(totalBytes) + '，耗时 ' + fmtDuration(elapsedMs) + '）';
-    if (destDir !== targetDir) msg += '\n存入 ' + destDir + '/';
+    if (destDir !== targetDir) msg += '\n存入 ' + dirDisplay(destDir);
     if (cancelled) msg += '\n余下 ' + (jobs.length - finished) + ' 个文件未上传';
     if (failures.length) {
       // 传文件夹时失败很容易成片出现，逐个弹 toast 会把界面刷爆 ——
@@ -2863,7 +2970,7 @@
     field.appendChild(input);
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '将创建在：' + (state.path === '/' ? '/' : state.path + '/') +
+    hint.textContent = '将创建在：' + dirDisplay(state.path) +
       (isFile ? '（内容为空）' : '');
     field.appendChild(hint);
 
@@ -4783,7 +4890,7 @@
           take.type = 'button';
           take.className = 'op-btn';
           take.dataset.kind = 'download';
-          take.textContent = '取出';
+          take.textContent = '下载';
           take.onclick = function () {
             // 包内条目同样是原生下载：服务端已经带了 Content-Disposition。
             nativeDownload(API + '?path=' + encodeURIComponent(entry.path) +
@@ -5042,17 +5149,73 @@
 
   // ---------------------------------------------------------------- 主题
 
+  var THEMES = [
+    { key: 'auto', label: '跟随系统' },
+    { key: 'light', label: '浅色' },
+    { key: 'dark', label: '深色' }
+  ];
+
+  function themeLabel(key) {
+    for (var i = 0; i < THEMES.length; i++) {
+      if (THEMES[i].key === key) return THEMES[i].label;
+    }
+    return THEMES[0].label;
+  }
+
+  function syncThemeUI() {
+    var cur = document.documentElement.getAttribute('data-theme') || 'auto';
+    var btn = $('btn-theme');
+    if (btn) {
+      btn.title = '主题：' + themeLabel(cur);
+      btn.setAttribute('aria-label', '主题：' + themeLabel(cur));
+      // 深色时把太阳换成月亮，按钮本身就带状态。
+      var icon = btn.querySelector('svg');
+      if (icon) {
+        icon.innerHTML = cur === 'dark'
+          ? '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.6 6.6 0 0 0 21 12.8z"/>'
+          : '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/>';
+      }
+    }
+    var menu = $('theme-menu');
+    if (menu) {
+      Array.prototype.forEach.call(menu.children, function (item) {
+        item.setAttribute('aria-checked', item.dataset.theme === cur ? 'true' : 'false');
+      });
+    }
+  }
+
+  function applyTheme(key) {
+    if (!THEMES.some(function (t) { return t.key === key; })) key = 'auto';
+    document.documentElement.setAttribute('data-theme', key);
+    try { localStorage.setItem('gofs-theme', key); } catch (e) { /* 无痕模式等 */ }
+    syncThemeUI();
+  }
+
   function initTheme() {
-    var saved = localStorage.getItem('gofs-theme') || 'auto';
+    var saved = 'auto';
+    try { saved = localStorage.getItem('gofs-theme') || 'auto'; } catch (e) { /* 忽略 */ }
+    if (!THEMES.some(function (t) { return t.key === saved; })) saved = 'auto';
     document.documentElement.setAttribute('data-theme', saved);
-    $('btn-theme').onclick = function () {
-      var order = ['auto', 'light', 'dark'];
-      var cur = document.documentElement.getAttribute('data-theme') || 'auto';
-      var next = order[(order.indexOf(cur) + 1) % order.length];
-      document.documentElement.setAttribute('data-theme', next);
-      localStorage.setItem('gofs-theme', next);
-      toast('info', '主题：' + { auto: '跟随系统', light: '浅色', dark: '深色' }[next]);
-    };
+
+    var menu = $('theme-menu');
+    if (menu) {
+      THEMES.forEach(function (t) {
+        var item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'menu-item';
+        item.setAttribute('role', 'menuitem');
+        item.dataset.theme = t.key;
+        item.textContent = t.label;
+        item.onclick = function () {
+          applyTheme(t.key);
+          if (G.closeTopMenus) G.closeTopMenus();
+          if (G.closeMore) G.closeMore();
+          toast('info', '主题：' + t.label);
+        };
+        menu.appendChild(item);
+      });
+    }
+    syncThemeUI();
   }
 
   // ---------------------------------------------------------------- 事件绑定
@@ -5182,6 +5345,11 @@
       toggleMenu('upload-wrap', 'upload-menu', 'btn-upload');
     };
 
+    $('btn-theme').onclick = function (e) {
+      e.stopPropagation();
+      toggleMenu('theme-wrap', 'theme-menu', 'btn-theme');
+    };
+
     // ---- 搜索方式下拉 ----
     // 菜单项由 SEARCH_MODES 生成（而不是写死在 HTML 里）：模式表只有一处，
     // 加一种模式不必再回头改 index.html。
@@ -5228,6 +5396,8 @@
       var cur = state.searchMode || 'fuzzy';
       $('search-mode-label').textContent = searchModeLabel(cur);
       $('btn-search-mode').title = '搜索方式：' + searchModeLabel(cur);
+      // 手机上标签会被 CSS 隐藏，读屏仍需要知道当前模式。
+      $('btn-search-mode').setAttribute('aria-label', '搜索方式：' + searchModeLabel(cur));
       $('search-input').placeholder = searchModeLabel(cur) + '搜索…';
       Array.prototype.forEach.call(
         $('search-mode-menu').querySelectorAll('.menu-item'),
@@ -5333,11 +5503,18 @@
       renderTable();
     };
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
+      th.tabIndex = 0;
       th.onclick = function () {
         var k = th.dataset.sort;
         if (state.sortKey === k) state.sortDir = -state.sortDir;
         else { state.sortKey = k; state.sortDir = 1; }
         renderTable();
+      };
+      th.onkeydown = function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          th.click();
+        }
       };
     });
 
@@ -5396,7 +5573,7 @@
 
     function showDropHint(n) {
       var dir = uploadTargetDir(state.path);
-      $('drop-target').textContent = '存入 ' + (dir === '/' ? '/' : dir + '/');
+      $('drop-target').textContent = '存入 ' + dirDisplay(dir);
       var notes = [];
       if (n > 0) notes.push(n + ' 项');
       var lim = uploadLimitText();
@@ -5438,10 +5615,14 @@
     });
 
     // 常驻投放区整块可点：点哪儿都能打开文件选择框，符合网盘的直觉。
-    // 「选择文件夹…」按钮要 stopPropagation，否则会连带触发外层的选文件。
+    // 文件夹上传走顶栏「上传 → 上传文件夹」，或直接把文件夹拖进来。
     $('drop-zone').onclick = function () { $('file-input').click(); };
-    $('drop-zone-pick').onclick = function (e) { e.stopPropagation(); $('file-input').click(); };
-    $('drop-zone-dir').onclick = function (e) { e.stopPropagation(); $('dir-input').click(); };
+    $('drop-zone').onkeydown = function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        $('file-input').click();
+      }
+    };
 
     // 浏览器前进/后退
     window.addEventListener('popstate', function (e) {
@@ -5449,11 +5630,55 @@
       navigate(p, false);
     });
 
-    // 快捷键
+    // 快捷键。除了原有的 r / ，补齐文件管理器里最常用的几组：
+    //   Ctrl/⌘+A 全选、Esc 清除选择、Delete 删除所选、F2 重命名。
+    // 输入框、编辑器和弹窗里一律让路，避免抢走打字与对话框自己的按键。
     document.addEventListener('keydown', function (e) {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-      if (e.key === 'r' && !e.metaKey && !e.ctrlKey) navigate(state.path, false);
-      if (e.key === '/' ) { e.preventDefault(); $('search-input').focus(); }
+      var tag = e.target.tagName;
+      // 只在「会吞掉字符的控件」里让路。复选框/单选框/按钮拿到焦点时
+      // 仍然要能用 Ctrl+A、Delete、F2 —— 用户点完勾选框接着按 F2 是最常见的顺序。
+      var typing = tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable ||
+        (tag === 'INPUT' && !/^(checkbox|radio|button|submit)$/i.test(e.target.type || ''));
+      if (typing) return;
+      var modalOpen = !!document.querySelector('.modal-mask');
+
+      if (!modalOpen) {
+        if (e.key === 'r' && !e.metaKey && !e.ctrlKey) navigate(state.path, false);
+        if (e.key === '/') { e.preventDefault(); $('search-input').focus(); return; }
+      }
+
+      var mod = e.metaKey || e.ctrlKey;
+      if (!modalOpen && mod && (e.key === 'a' || e.key === 'A')) {
+        if (!state.entries.length) return;
+        e.preventDefault();
+        state.selected.clear();
+        state.entries.forEach(function (x) { state.selected.add(x.path); });
+        renderTable();
+        return;
+      }
+      if (modalOpen) return;
+
+      if (e.key === 'Escape' && state.selected.size) {
+        // 行操作菜单已经打开时，Esc 先关菜单，不要顺手清空选择。
+        if (document.querySelector('.ops-menu')) return;
+        e.preventDefault();
+        state.selected.clear();
+        renderTable();
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') &&
+          state.selected.size && can('delete')) {
+        e.preventDefault();
+        doDelete(pickedEntries());
+        return;
+      }
+      if (e.key === 'F2' && state.selected.size === 1 && can('write')) {
+        var one = pickedEntries()[0];
+        if (one && !one.site) {
+          e.preventDefault();
+          openRenameDialog(one);
+        }
+      }
     });
   }
 

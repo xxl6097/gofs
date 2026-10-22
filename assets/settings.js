@@ -124,23 +124,29 @@
         hint.appendChild(document.createTextNode('　·　' + opts.persistHint));
       }
 
-      var quick = document.createElement('button');
-      quick.type = 'button';
-      quick.className = 'btn btn-sm';
-      quick.style.marginTop = '8px';
-      quick.textContent = '恢复启动时的默认值';
-      quick.onclick = function () {
-        var d = splitSize(opts.def);
-        if (allowUnlimited) cb.checked = opts.def === 0;
-        input.value = d.value;
-        for (var i = 0; i < unitSel.options.length; i++) {
-          if (unitSel.options[i].value === String(d.unit.factor)) unitSel.selectedIndex = i;
-        }
-        syncInputs();
-        refresh();
-      };
-      hint.appendChild(document.createElement('br'));
-      hint.appendChild(quick);
+      // 只有当前值和启动默认值不同（或输入了非法值）时才给「恢复」入口。
+      // 之前每个字段下面都挂一个同等醒目的按钮，大部分时候点了什么也不会变，
+      // 还把设置页撑得很长。
+      var changed = !isFinite(read()) || read() !== opts.def;
+      if (changed) {
+        var quick = document.createElement('button');
+        quick.type = 'button';
+        quick.className = 'btn btn-sm ghost reset-control';
+        quick.style.marginTop = '6px';
+        quick.textContent = '恢复启动时的默认值';
+        quick.onclick = function () {
+          var d = splitSize(opts.def);
+          if (allowUnlimited) cb.checked = opts.def === 0;
+          input.value = d.value;
+          for (var i = 0; i < unitSel.options.length; i++) {
+            if (unitSel.options[i].value === String(d.unit.factor)) unitSel.selectedIndex = i;
+          }
+          syncInputs();
+          refresh();
+        };
+        hint.appendChild(document.createElement('br'));
+        hint.appendChild(quick);
+      }
     }
 
     function read() {
@@ -195,17 +201,20 @@
       hint.appendChild(b);
       hint.appendChild(document.createTextNode('　·　启动参数默认值：' + (opts.def || '（空）')));
 
-      var quick = document.createElement('button');
-      quick.type = 'button';
-      quick.className = 'btn btn-sm';
-      quick.style.marginTop = '8px';
-      quick.textContent = '恢复启动时的默认值';
-      quick.onclick = function () {
-        input.value = opts.def || '';
-        refresh();
-      };
-      hint.appendChild(document.createElement('br'));
-      hint.appendChild(quick);
+      // 同 makeSizeField：默认值没被动过时不再显示「恢复」按钮。
+      if (String(input.value).trim() !== String(opts.def || '').trim()) {
+        var quick = document.createElement('button');
+        quick.type = 'button';
+        quick.className = 'btn btn-sm ghost reset-control';
+        quick.style.marginTop = '6px';
+        quick.textContent = '恢复启动时的默认值';
+        quick.onclick = function () {
+          input.value = opts.def || '';
+          refresh();
+        };
+        hint.appendChild(document.createElement('br'));
+        hint.appendChild(quick);
+      }
     }
 
     input.oninput = refresh;

@@ -66,13 +66,14 @@
   <div class="topbar-actions">
     <div class="search">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-      <input id="search-input" type="search" placeholder="模糊搜索…" autocomplete="off" spellcheck="false">
+      <input id="search-input" type="search" placeholder="模糊搜索…" autocomplete="off" spellcheck="false" aria-label="搜索文件">
       <!-- 搜索方式：复用顶栏下拉那套 .menu-wrap/.menu-pop。
            按钮故意不用 .btn —— ≤820px 的 `.btn span{display:none}` 会把
            「模糊/精确」这些标签藏掉，只剩一个没意义的箭头。 -->
       <div class="menu-wrap search-mode" id="search-mode-wrap">
         <button class="search-mode-btn" id="btn-search-mode" type="button"
                 aria-haspopup="menu" aria-expanded="false" aria-controls="search-mode-menu">
+          <svg class="mode-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></svg>
           <span id="search-mode-label">模糊</span>
           <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
@@ -118,10 +119,17 @@
         <span>更多</span>
       </button>
       <div class="more-panel" id="more-panel">
-        <button class="btn icon" id="btn-theme" title="切换主题" type="button">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
-          <span>主题</span>
-        </button>
+        <!-- 主题是三种状态（跟随系统 / 浅色 / 深色），单按钮循环切换
+             看不出当前是哪一档。改成和搜索方式一致的下拉菜单。 -->
+        <div class="menu-wrap" id="theme-wrap">
+          <button class="btn icon" id="btn-theme" type="button" title="主题"
+                  aria-haspopup="menu" aria-expanded="false" aria-controls="theme-menu">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+            <span>主题</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="menu-pop" id="theme-menu" role="menu"></div>
+        </div>
         <div class="menu-wrap" id="mkdir-wrap">
           <button class="btn" id="btn-mkdir" type="button" hidden
                   aria-haspopup="menu" aria-expanded="false" aria-controls="mkdir-menu">
@@ -194,14 +202,13 @@
        目录一长就得先滚到底才知道页面支持拖拽。放在前面还能顺带说清落点。
        手机端（触摸、窄屏）改写成一条紧凑的可点横条，那句「拖到这里」是错的，
        但「点一下就能选文件」依然成立。文案由 renderDropZone() 按屏宽生成。 -->
-  <div class="drop-zone" id="drop-zone" hidden>
+  <div class="drop-zone" id="drop-zone" hidden role="button" tabindex="0"
+       aria-label="选择文件上传">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
     <div class="drop-zone-text">
       <strong id="drop-zone-lead">把文件或文件夹拖到这里即可上传</strong>
       <span id="drop-zone-target">当前目录</span>
     </div>
-    <button class="btn" id="drop-zone-pick" type="button">选择文件…</button>
-    <button class="btn" id="drop-zone-dir" type="button">选择文件夹…</button>
   </div>
 
   <div class="table-wrap">
@@ -236,7 +243,7 @@
 </div>
 
 <div class="modal-root" id="modal-root"></div>
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <input type="file" id="file-input" multiple hidden>
 <!-- webkitdirectory：让浏览器把「选中的整个目录」递归展开成文件列表，
      每个文件带 webkitRelativePath（形如 apps/web/index.html）。

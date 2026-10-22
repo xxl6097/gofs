@@ -9,8 +9,8 @@
   --border: #e2e5ea;
   --border-strong: #cbd1da;
   --text: #1c1f24;
-  --text-dim: #6b7280;
-  --text-mute: #9aa1ac;
+  --text-dim: #5b6470;
+  --text-mute: #6b7280;
   --accent: #2563eb;
   --accent-soft: rgba(37, 99, 235, 0.10);
   --accent-text: #ffffff;
@@ -54,7 +54,7 @@
     --border-strong: #3a4049;
     --text: #e7e9ec;
     --text-dim: #9ba3ae;
-    --text-mute: #767e89;
+    --text-mute: #8a929d;
     --accent: #4d8dff;
     --accent-soft: rgba(77, 141, 255, 0.16);
     --accent-text: #0b1220;
@@ -88,7 +88,7 @@
   --border-strong: #3a4049;
   --text: #e7e9ec;
   --text-dim: #9ba3ae;
-  --text-mute: #767e89;
+  --text-mute: #8a929d;
   --accent: #4d8dff;
   --accent-soft: rgba(77, 141, 255, 0.16);
   --accent-text: #0b1220;
@@ -344,6 +344,22 @@
 
 * { box-sizing: border-box; }
 
+/* 键盘焦点必须看得见。输入框已有自己的 box-shadow 焦点环，这里只补
+   自定义按钮、菜单、表头和投放区，避免同一个控件出现两层焦点圈。 */
+.btn:focus-visible,
+.op-btn:focus-visible,
+.menu-item:focus-visible,
+.action-item:focus-visible,
+.tab:focus-visible,
+.office-tab:focus-visible,
+.drop-zone:focus-visible,
+.listing th.sortable:focus-visible,
+.check-hit:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.modal:focus { outline: none; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -539,8 +555,16 @@ svg {
 }
 .search-mode-btn:hover { color: var(--text); border-color: var(--accent); }
 .search-mode-btn .caret { width: 11px; height: 11px; opacity: .6; }
+/* 手机上文字标签让位给搜索框，用漏斗图标说明这颗按钮是「搜索方式」。 */
+.search-mode-btn .mode-ico { display: none; width: 14px; height: 14px; }
 /* 菜单里的当前项：给个勾选的观感（复用 accent 色，不新增图标）。 */
-.search-mode .menu-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.search-mode .menu-item[aria-checked="true"],
+#theme-menu .menu-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+#theme-menu .menu-item[aria-checked="true"]::after {
+  content: '✓';
+  margin-left: auto;
+  font-size: 12px;
+}
 .search-mode .menu-pop { min-width: 168px; }
 
 /* ---------------------------------------------------------------- 按钮 */
@@ -696,6 +720,8 @@ svg {
   align-items: center;
   gap: 10px;
 }
+/* 批量按钮在窄屏要能换行，否则最右边的「删除」会被裁掉。 */
+.toolbar-right { flex-wrap: wrap; justify-content: flex-end; }
 
 .checkbox {
   display: inline-flex;
@@ -757,18 +783,12 @@ table.listing {
 .col-check { width: 42px; }
 .col-size { width: 110px; }
 .col-time { width: 150px; }
-/* 操作列必须放得下**最多 8 个**按钮 —— 压缩包 + 完整权限那一行是
-   下载 / 解压 / 内容 / 链接 / 分享 / 移动 / 重命名 / 删除。
-   ⚠️ 这个数字随功能增加而变过：早先按 5 个按钮（318px）定的 352px，
-   后来补上「链接 / 分享 / 移动」之后就不够了，于是每一行都收起成「更多」——
-   即使名字列还空着大半个表格。现在按 Chrome 实测值定：
-   带文字 504px、纯图标 268px，各留 4px 余量，加左右内边距 24px。
-   给不够时按钮不会缩（见 .op-btn 的 flex: none），只会折行；
-   折行也放不下时由 .ops 的 flex-wrap 兜底，绝不会压到「修改时间」列上。
-   注意：th 与 td 都要带 col-* 类。只隐藏 th 会让表头列数与内容列数不一致，
-   table-layout: fixed 下列宽分配会整体错位（实测能把操作列挤到只剩 34px）。 */
-.col-ops { width: 532px; }
+/* 每行只露出一个主操作 + 「更多」，其余动作进下拉。
+   列宽因此从原先的 532px 收到 184px，把空间还给文件名。
+   窄屏下两个按钮都只剩图标（见 1280px 断点），112px 足够。 */
+.col-ops { width: 184px; }
 .col-name { width: auto; }
+.listing thead th.col-ops { text-align: right; }
 
 .listing td {
   padding: 8px 12px;
@@ -790,13 +810,30 @@ table.listing {
 .name-cell .ico { color: var(--text-mute); }
 .name-cell.dir .ico { color: var(--accent); }
 .name-cell.archive .ico { color: var(--zip); }
+/* 名字与「所在目录」两行：搜索结果是递归的，同名文件需要靠第二行区分。 */
+.name-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .name-cell .label {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
   text-decoration: none;
   cursor: pointer;
+}
+.name-sub {
+  font-size: 11.5px;
+  color: var(--text-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
 }
 .name-cell .label:hover { color: var(--accent); text-decoration: underline; }
 .name-cell .tag {
@@ -830,9 +867,8 @@ table.listing {
   gap: 4px;
   justify-content: flex-end;
   overflow: hidden;
-  /* 常态不压到全透明：语义色要能看出来（0.35 时彩色基本变成灰的）。 */
-  opacity: .72;
-  transition: opacity .14s;
+  /* 现在一行只有一个主操作和一个中性的「更多」，不需要靠透明度压噪音。
+     保持全不透明，主操作的颜色才够清晰、文字对比度也才够。 */
 }
 
 /* 允许溢出才能量出真实内容宽度。默认的 flex-shrink 会把按钮压窄，
@@ -842,13 +878,6 @@ table.listing {
 /* 放不下：只留「更多」，点开是一个可点的列表（见 openRowActions）。 */
 .ops.ops-tight .op-btn:not(.ops-more) { display: none; }
 .ops.ops-tight .ops-more { display: inline-flex; }
-tr:hover .ops, tr.selected .ops { opacity: 1; }
-
-/* 触摸设备上根本没有 hover：按钮会永远停在 35% 透明度，
-   既看不清，用户也猜不到那里能点。所以触摸设备一律全显。 */
-@media (hover: none) {
-  .ops { opacity: 1; }
-}
 
 .op-btn {
   display: inline-flex;
@@ -895,8 +924,8 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 /* 被禁用时（例如文件超过编辑上限）退回中性灰：彩色会让它看起来仍可点。 */
 .ops .op-btn[disabled] { color: var(--text-mute); }
 
-/* 「更多」按钮只在窄屏出现（宽屏时整排按钮都摆得下）。 */
-.ops-more { display: none; }
+/* 「更多」是每行的常驻入口：除主操作外的动作都收在这里。 */
+.ops-more { display: inline-flex; }
 
 /* ---- 窄屏下的操作菜单 ---- */
 
@@ -1014,10 +1043,10 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .drop-zone {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-  padding: 12px 16px;
-  border: 1.5px dashed var(--border-strong);
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 9px 14px;
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   background: var(--bg-soft);
   color: var(--text-dim);
@@ -1031,8 +1060,8 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   color: var(--text);
 }
 .drop-zone > svg {
-  width: 22px;
-  height: 22px;
+  width: 19px;
+  height: 19px;
   flex: none;
   color: var(--accent);
 }
@@ -1043,8 +1072,7 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
   flex-direction: column;
   gap: 2px;
 }
-.drop-zone-text strong { font-size: 13.5px; font-weight: 600; color: var(--text); }
-.drop-zone .btn { flex: none; }
+.drop-zone-text strong { font-size: 13px; font-weight: 600; color: var(--text); }
 .drop-zone-target,
 .drop-zone-text span {
   font-size: 12px;
@@ -1094,6 +1122,12 @@ tr:hover .ops, tr.selected .ops { opacity: 1; }
 .settings-panel .row input[type=text] { min-width: 0; }
 .settings-panel .checkbox { flex: none; }
 .settings-panel .hint b { color: var(--text); }
+/* 「恢复默认」只在值真的不同时出现，做成弱化的文字动作而不是一排按钮。 */
+.settings-panes .reset-control {
+  color: var(--accent);
+  padding-left: 0;
+  padding-right: 8px;
+}
 
 /* ---- 设置弹窗的宽度 ----
 
@@ -2318,12 +2352,9 @@ html.booting body::after {
 }
 
 @media (max-width: 1280px) {
-  /* 中等宽度放不下带文字的按钮（最宽的一行要 504px）。
-     收成纯图标后每个按钮约 33px，最宽的一行（8 个）实测 268px ——
-     加左右内边距与 4px 余量即 296px。按 5 个按钮定的 196px 会让
-     每一行都放不下、全都收进「更多」。 */
+  /* 中等宽度只留两个图标按钮（主操作 + 更多），112px 足够。 */
   .op-btn span { display: none; }
-  .col-ops { width: 296px; }
+  .col-ops { width: 112px; }
   .col-time { width: 140px; }
 }
 
@@ -2345,19 +2376,20 @@ html.booting body::after {
   .search input { width: 110px; }
   .search input:focus { width: 150px; }
   .col-time { display: none; }
-  /* 已经没有时间列了，图标按钮仍要留够位置（最宽的 8 个实测 268px）。 */
-  .col-ops { width: 296px; }
+  /* 两个图标按钮：主操作 + 更多。 */
+  .col-ops { width: 108px; }
   .op-btn span { display: none; }
   .btn span { display: none; }
   .btn.primary span { display: inline; }
+  /* 批量操作不能只剩图标：保留「打包 (2) / 重命名 (2) / 移动 (2) / 删除 (2)」，
+     计数已在工具条统计里，必要时按钮还会折行。 */
+  .toolbar .btn span { display: inline; }
+  .toolbar .btn { padding: 7px 10px; }
 }
 
-/* 再窄一档，296px 会开始吃掉文件名（实测 561px 时名字只剩 0px）。
-   这里收回到 224px：常见的 6 个按钮（目录行）仍放得下、不出现「更多」，
-   只有最宽的 8 个（压缩包 + 完整权限）才收 —— 那时是真的没地方了。
-   ≤560px 那条规则在文件更靠后的位置，会覆盖这里。 */
+/* 再窄一档也只需要两个图标按钮；≤560px 的规则会覆盖同样的宽度。 */
 @media (max-width: 640px) {
-  .col-ops { width: 224px; }
+  .col-ops { width: 112px; }
 }
 
 /* ---------------- 顶栏重排 ----------------
@@ -2399,13 +2431,16 @@ html.booting body::after {
     flex-wrap: nowrap;
     justify-content: flex-start;
   }
+  /* 顺序：搜索 → 刷新 → 更多 → 上传。上传是主操作，放最右。
+     ⚠️ order 必须挂在 .menu-wrap 包装上：挂在 #btn-upload 上只会影响
+     包装内部的排序，按钮仍跟着包装留在默认位置。 */
   #btn-refresh { order: 1; }
   .more-wrap { order: 2; display: block; position: relative; }
-  #btn-upload { order: 3; }
+  #upload-wrap { order: 3; flex: none; }
   /* 这一行是 nowrap，按钮绝不能被压缩：flex 项默认可收缩，
      实测「刷新」被压到 36px（低于 40px 的触摸下限）。
      让它们固定，把可伸缩的空间全部留给搜索框。 */
-  #btn-refresh, .more-toggle, #btn-upload { flex: none; }
+  #btn-refresh, .more-toggle { flex: none; }
 
   .search { flex: 1 1 auto; min-width: 0; }
   /* 输入框吃掉剩余宽度，搜索方式按钮固定宽度靠右 —— 不能再给输入框
@@ -2486,11 +2521,9 @@ html.booting body::after {
 }
 
 @media (max-width: 560px) {
-  /* 手机：整排操作按钮根本排不下，收进「更多」菜单。
-     名称列由此从 100px 出头回到 230px 以上，文件名能正常阅读。 */
-  .ops .op-btn:not(.ops-more) { display: none; }
-  .ops-more { display: inline-flex; }
-  .col-ops { width: 64px; }
+  /* 手机上保留一个主操作 + 更多，既不至于一排图标，
+     也不会把文件名挤没。 */
+  .col-ops { width: 112px; }
   /* 手机再让出「大小」列。 */
   .col-size { display: none; }
   /* 勾选列故意**不**收窄：它的可点区域是整格（label），
@@ -2512,15 +2545,20 @@ html.booting body::after {
   .toolbar-right { margin-left: auto; }
   .stat { font-size: 12px; }
 
+  /* 搜索框里已经有「模糊搜索…」的占位符，旁边再摆一个「模糊」按钮
+     既重复又挤占宽度。手机端只留下拉箭头，模式名由占位符承担；
+     aria-label 由 syncSearchModeUI 同步，读屏仍知道当前模式。 */
+  .search-mode-btn { padding: 7px 7px; gap: 0; }
+  #search-mode-label { display: none; }
+  .search-mode-btn .mode-ico { display: inline-block; }
+  /* 漏斗本身已经是「筛选/模式」的入口，省掉箭头，把宽度还给搜索框。 */
+  .search-mode-btn .caret { display: none; }
+
   /* 投放区常驻在列表上方（桌面端也一样，见 index.html），这里只收紧间距：
-     手机上它的价值是「一行之内说清传到哪、上限多少，并且点一下就能选文件」。 */
+     手机上它的价值是「说清点一下就能传、传到哪、上限多少」。 */
   #drop-zone { margin-bottom: 10px; }
-  .drop-zone { padding: 10px 12px; gap: 10px; }
+  .drop-zone { padding: 9px 12px; gap: 9px; }
   .drop-zone > svg { width: 18px; height: 18px; }
-  /* 手机上一行说清就够：那句「拖到这里」在触摸屏上是错的，
-     留着只会误导，而且两行会把横条撑到 60px 以上。 */
-  .drop-zone-text strong { display: none; }
-  .drop-zone .btn { display: none; }
 
   /* 页脚收紧：手机只留「谁 + 能做什么」这一句动态信息，
      版本号（静态装饰）让位，并给 iPhone 底部横条留出安全区。 */
@@ -2539,23 +2577,20 @@ html.booting body::after {
   .modal-foot .btn { flex: 1; justify-content: center; min-height: 44px; }
 
   /* 手机上投放区整块可点，右侧按钮就多余了（还占掉本就不多的宽度）。 */
-  .drop-zone { padding: 11px 13px; gap: 10px; }
-  .drop-zone .btn { display: none; }
+  .drop-zone { padding: 9px 12px; gap: 9px; }
   .drop-zone-text strong { font-size: 13px; }
 }
 
-/* 触摸设备上图标按钮被放大到 40px 宽（见上面的 @media (hover: none)），
-   列宽要跟着放宽，否则一行放不下、每行都收进「更多」。按真实按钮数量分级：
-   8 个（压缩包 + 完整权限）需 8×40 + 7×4 = 348px，加内边距即 372px；
-   6 个（目录行）需 260px，加内边距即 284px。
-   手机宽度已经改用「更多」菜单，不受这条影响（用 min-width 排除）。
+/* 触摸设备上图标按钮会被放大到 40px（见上面的 @media (hover: none)）。
+   每行只有主操作 + 更多两个按钮：2×40 + 4 + 左右内边距 24 = 108，
+   这里给到 112/128，留一点点余量。
    这两条放在最后，是为了覆盖上面 1280 / 820 / 640 断点里的窄值。 */
 @media (hover: none) and (min-width: 1001px) and (max-width: 1280px) {
-  .col-ops { width: 372px; }
+  .col-ops { width: 128px; }
 }
-/* 再窄就放不下 8 个了，列宽只保证常见的 6 个 —— 更宽的行这时是真的没地方。 */
+/* 触摸设备上每个图标按钮会被放大到 40px，两个按钮只需 112px。 */
 @media (hover: none) and (min-width: 561px) and (max-width: 1000px) {
-  .col-ops { width: 284px; }
+  .col-ops { width: 112px; }
 }
 
 /* ------------------------------------------------------- 用户与权限管理 */
