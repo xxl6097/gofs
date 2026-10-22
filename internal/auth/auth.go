@@ -273,8 +273,13 @@ func (a *Authenticator) mergeStatic(in *account) error {
 // `/docs/../secret` 在 ACL 眼里仍属于 `/docs`，落盘时却被折叠成 `/secret` ——
 // 受限账号因此可以越出自己的目录。规则本身由 ValidateRules 拒绝 `..`，
 // 所以对合法配置这是纯防御。
+//
+// ⚠️ 刻意**不**把 `\` 当成分隔符：Unix 上它是合法的文件名字符，而
+// Resolve 也不会转换它。在鉴权层转换会造成「鉴权看 /docs/secret、
+// 实际打开 /docs\secret」的错位。Windows 上 Resolve 会把它当分隔符，
+// 那时鉴权只会更严格（误拒），不会放行。
 func normalizePath(p string) string {
-	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+	p = strings.TrimSpace(p)
 	if p == "" {
 		return "/"
 	}

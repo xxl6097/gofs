@@ -23,6 +23,10 @@ func TestLookupFoldsDotSegments(t *testing.T) {
 		{"/docs/../secret.txt", PermNone},
 		{"/docs/../../etc/passwd", PermNone},
 		{"/docs2/a.txt", PermNone},
+		// 反斜杠在 Unix 上是文件名字符，不能当分隔符：否则鉴权会
+		// 把 /docs\secret 当成 /docs 的子路径放行，而 Resolve 打开的是
+		// 根目录下另一个名字带反斜杠的文件。
+		{`/docs\secret.txt`, PermNone},
 	}
 	for _, c := range cases {
 		if got := a.Lookup(c.path, "alice", "pw", true); got != c.want {
