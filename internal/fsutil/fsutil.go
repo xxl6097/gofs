@@ -225,6 +225,44 @@ func EnsureWithin(root, target string) error {
 	return nil
 }
 
+// ResolveReal 返回 target 解析软链后的真实路径，**允许尾部尚不存在**。
+//
+// 用于「按真实目标复核权限」：PUT 新文件、解压新条目时叶子往往不存在，
+// EvalSymlinks 会直接返回 ENOENT，于是整段检查被跳过 —— 那正是软链绕过
+// ACL 的入口。这里解析最长的已存在祖先，再把剩余段原样拼回去。
+func ResolveReal(target string) (string, error) {
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// 软链环、权限不足等异常：宁可拒绝，不可放行。
+		return "", err
+	}
+
+	var tail []string
+	cur := abs
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("%w: %s", ErrEscaped, target)
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			parts := append([]string{real}, tail...)
+			return filepath.Join(parts...), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+	}
+}
+
 // within 判断 p 是否位于 root 之内。
 func within(root, p string) bool {
 	if p == root {

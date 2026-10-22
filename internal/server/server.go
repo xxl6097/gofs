@@ -103,10 +103,16 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.AllowUpload && (cfg.RenderIndex || cfg.RenderTryIndex || cfg.RenderSPA) {
-		logger.Errorf("安全提示：已启用 render-index/SPA 且允许上传。" +
-			"服务目录中的 index.html 会作为同源页面执行（这是该模式的定义），" +
-			"请确保可上传目录存放的不是不可信内容")
+	writable := cfg.AllowUpload || cfg.AllowEdit || cfg.AllowExtract
+	if writable && (cfg.RenderIndex || cfg.RenderTryIndex || cfg.RenderSPA) {
+		if cfg.UnsafeIndexHTML {
+			logger.Errorf("安全提示：--unsafe-index-html 已开启。" +
+				"可写部署中的 index.html 会作为同源页面执行，" +
+				"拥有写权限的账号可借此读取登录凭据并调用全部接口")
+		} else {
+			logger.Infof("安全提示：可写部署中的 index.html 已启用 CSP sandbox" +
+				"（脚本可运行但不透明源）；需要同源应用请显式 --unsafe-index-html")
+		}
 	}
 
 	// 上传密钥存储：路径为空时只保存在内存中。
@@ -201,6 +207,8 @@ func (s *Server) Handler() http.Handler {
 	// 先按前缀剥离（/files/s/<token>/… -> /s/<token>/…），再改写分享路径。
 	h = s.withSharePath(h)
 	h = s.withPathPrefix(h)
+	// 路径规范化缓存放在路由之前：有些路径会被同一个请求检查多次。
+	h = s.withCanonicalCache(h)
 	// 安全响应头放在最外层，连前缀不匹配的 404 也带上。
 	h = s.withSecurityHeaders(h)
 	return h
@@ -637,6 +645,10 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 
 // permOf 按请求身份计算对 urlPath 的权限。
 func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
+	// 与 authorize 使用同一套规范化：否则页面数据里的 perms 会与实际
+	// 文件操作看到的路径不一致。
+	urlPath = s.canonicalPath(r, urlPath)
+
 	// 分享令牌：换来的只是「不用登录」，权限级别由令牌自己定（只读 / 可读写），
 	// 且严格限制在令牌范围内。
 	//
@@ -695,6 +707,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	if !s.auth.Enabled() {
 		return permResult{Perm: auth.PermReadWrite}, true
 	}
+	// ACL 必须按磁盘上的真实名字匹配（大小写/规范化/短名）。
+	urlPath = s.canonicalPath(r, urlPath)
 
 	// 认证限速：Basic 认证可以被无限次尝试，不设闸门就等于把口令交给
 	// 字典攻击。这里按来源统计失败次数，超限后临时封禁。
@@ -853,7 +867,9 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// 落盘时 Resolve 又把它折叠成 `/secret.txt`，受限账号就能越出自己的目录。
 	//
 	// CleanURLPath 保留结尾斜杠语义，所以对正常路径没有任何行为变化。
-	urlPath := fsutil.CleanURLPath(r.URL.Path)
+	// 之后再按磁盘真实名字（大小写/Unicode 规范化/Windows 短名）对齐一次，
+	// 否则 ACL 会按请求里的写法匹配，而文件系统按另一套语义打开同一个文件。
+	urlPath := s.canonicalPath(r, r.URL.Path)
 
 	// 上传密钥走独立分支：它只代表「往某个目录传文件」这一件事，
 	// 不参与读、删、改名、解压等任何其它操作。
@@ -866,9 +882,28 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// 直接回 401 + 挑战会触发浏览器原生对话框；而「先跳登录页再回来」
 	// 又会因为浏览器不会自动带 Basic 凭据而陷入拿不到数据的死循环。
 	// 返回外壳 + 前端登录后自行 fetch 数据，可以同时避开这两个问题。
-	if s.auth.Enabled() && isAppShellNavigation(r) && s.checkPerm(r, urlPath) == auth.PermNone {
-		s.renderAuthGate(w, r, urlPath)
-		return
+	//
+	// ⚠️ 这个预检也会验证 Basic 口令（checkPerm），因此必须与 authorize
+	// 共用同一套失败计数/封禁：否则攻击者对 "/" 发随机密码就能绕过限速，
+	// 用 PBKDF2 把 CPU 打满。
+	if s.auth.Enabled() && isAppShellNavigation(r) {
+		ip := s.clientIP(r)
+		if blocked, remain := s.authBlocked(ip); blocked {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
+			http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
+				http.StatusTooManyRequests)
+			return
+		}
+		if s.checkPerm(r, urlPath) == auth.PermNone {
+			if _, _, hasCred := credentials(r); hasCred {
+				s.noteAuthFailure(ip)
+			} else if sessionToken(r) != "" {
+				// 无效/过期的 cookie 与猜密码同性质。
+				s.noteAuthFailure(ip)
+			}
+			s.renderAuthGate(w, r, urlPath)
+			return
+		}
 	}
 
 	p, ok := s.authorize(w, r, urlPath)
@@ -896,6 +931,35 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
+	}
+
+	// 软链（以及大小写/规范化别名）可能让实际目标落在另一条 ACL 规则下。
+	// 请求路径命中的是较宽的规则，真实目标却可能是只读甚至无权限：
+	// 读写之前必须按真实路径再复核一次。
+	//
+	// DELETE / MOVE 的叶子如果是软链，操作对象是链接本身（os.Remove /
+	// os.Rename 不会跟随），不按目标权限校验，否则用户无法清理自己的链接。
+	leafLink := false
+	if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		leafLink = true
+	}
+	if !(leafLink && (r.Method == http.MethodDelete || r.Method == MethodMove)) {
+		realURL, realPerm, within := s.realPermOf(r, abs)
+		if within {
+			if realURL != urlPath {
+				if realPerm == auth.PermNone {
+					http.Error(w, "403 Forbidden: 目标路径没有访问权限", http.StatusForbidden)
+					return
+				}
+				if realPerm < p.Perm {
+					p.Perm = realPerm
+				}
+			}
+		} else if p.Share || !s.cfg.AllowSymlink {
+			// 分享链接无法表达根外目标；普通账号只有显式 --allow-symlink 才放行。
+			http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+			return
+		}
 	}
 
 	// 打包下载：GET 从 ?pick= 取选中项，POST 从请求体取。
@@ -1126,7 +1190,16 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 				humanSize(s.cfg.HashMaxSize)), http.StatusRequestEntityTooLarge)
 			return
 		}
+		// 摘要要读完整个文件：与上传/解压共用重任务闸门。
+		release, ok := s.acquireJob(r.Context())
+		if !ok {
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "503 Service Unavailable: 摘要任务过多，请稍后重试",
+				http.StatusServiceUnavailable)
+			return
+		}
 		sum, err := fileSHA256(abs)
+		release()
 		if err != nil {
 			s.writeErr(w, err)
 			return
@@ -1295,6 +1368,11 @@ func (s *Server) writeJSON(w http.ResponseWriter, v any) {
 
 // writeJSONStatus 以指定状态码输出 JSON 响应。
 func (s *Server) writeJSONStatus(w http.ResponseWriter, code int, v any) {
+	// 大 JSON（目录列举 / 搜索结果）遇到「连上不读」的客户端时，
+	// 不能让 Write 永久阻塞并占着并发名额。
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// 禁止浏览器按内容嗅探类型。JSON 里可能带着文档原文（包括 <script> 字样），
 	// 万一被某条路径当成 text/html 渲染，那就是一个 XSS。

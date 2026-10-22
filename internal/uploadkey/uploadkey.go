@@ -478,8 +478,12 @@ func (k *Key) AllowsPath(urlPath string) bool {
 }
 
 // normalizePath 归一化 URL 路径。
+//
+// ⚠️ 不把 `\` 当分隔符：Unix 上它是合法的文件名字符，而 fsutil.Resolve
+// 也不会转换它。scope 检查若把 `/uploads\evil` 当成 `/uploads/evil`，
+// 就会放行一次实际写到 `/uploads\evil`（scope 之外）的请求。
+// Windows 上 Resolve 会把它当分隔符，那时这里只会更严格（误拒），不会放行。
 func normalizePath(p string) string {
-	p = strings.ReplaceAll(p, "\\", "/")
 	if p == "" {
 		return "/"
 	}

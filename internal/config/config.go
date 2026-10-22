@@ -296,6 +296,15 @@ type Config struct {
 	RenderTryIndex bool
 	RenderSPA      bool
 
+	// UnsafeIndexHTML 允许在**可写**部署里以同源方式执行服务目录中的
+	// index.html（默认关闭）。
+	//
+	// 上传/在线编辑/解压任一开启时，拥有写权限的账号可以放置或覆盖
+	// index.html；若它被当作同源页面执行，脚本就能读取登录凭据、调用所有
+	// 接口。默认对这些 index.html 加 CSP sandbox（脚本可运行，但不透明源），
+	// 需要真正的同源应用时显式打开本开关并自行承担风险。
+	UnsafeIndexHTML bool
+
 	// AssetsDir 为自定义前端资源目录，为空时使用内嵌资源。
 	AssetsDir string
 
@@ -579,6 +588,7 @@ func Defaults() *Config {
 		RenderIndex:      false,
 		RenderTryIndex:   false,
 		RenderSPA:        false,
+		UnsafeIndexHTML:  false,
 		AssetsDir:        "",
 		LogFormat:        "",
 		LogFile:          "",
@@ -654,6 +664,7 @@ func (c *Config) ApplyEnv() {
 	c.RenderIndex = envBool("GOFS_RENDER_INDEX", c.RenderIndex)
 	c.RenderTryIndex = envBool("GOFS_RENDER_TRY_INDEX", c.RenderTryIndex)
 	c.RenderSPA = envBool("GOFS_RENDER_SPA", c.RenderSPA)
+	c.UnsafeIndexHTML = envBool("GOFS_UNSAFE_INDEX_HTML", c.UnsafeIndexHTML)
 	c.AssetsDir = envStr("GOFS_ASSETS", c.AssetsDir)
 	c.LogFormat = envStr("GOFS_LOG_FORMAT", c.LogFormat)
 	c.LogFile = envStr("GOFS_LOG_FILE", c.LogFile)
@@ -742,6 +753,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.BoolVar(&cfg.RenderIndex, "render-index", cfg.RenderIndex, "请求目录时返回 index.html，不存在则 404")
 	fs.BoolVar(&cfg.RenderTryIndex, "render-try-index", cfg.RenderTryIndex, "请求目录时优先返回 index.html，无则目录列表")
 	fs.BoolVar(&cfg.RenderSPA, "render-spa", cfg.RenderSPA, "以 SPA 模式渲染，未命中路径回退到 index.html")
+	fs.BoolVar(&cfg.UnsafeIndexHTML, "unsafe-index-html", cfg.UnsafeIndexHTML,
+		"允许可写部署中的 index.html 以同源方式执行（默认加 CSP sandbox）")
 	fs.StringVar(&cfg.AssetsDir, "assets", cfg.AssetsDir, "自定义前端资源目录")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "自定义 HTTP 日志格式，置空可关闭")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "日志输出文件，默认 stdout")
@@ -1212,6 +1225,8 @@ func usageText() string {
       --render-index         目录下 index.html 作为首页，不存在返回 404
       --render-try-index     优先 index.html，无则目录列表
       --render-spa           SPA 模式，未命中回退 index.html
+      --unsafe-index-html    可写部署（上传/编辑/解压）中的 index.html
+                             默认加 CSP sandbox；加此项才允许它以同源方式执行
       --assets <path>        自定义前端资源目录
       --log-format <format>  自定义 HTTP 日志格式
       --log-file <file>      日志文件

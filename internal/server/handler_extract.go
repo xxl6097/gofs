@@ -79,61 +79,74 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 // 列出包内清单、又能取出包内单个文件 —— 少这一道，任何能连上服务的人
 // 都能读到服务目录里任意压缩包的内容，绕过全部路径级权限。
 // （历史教训：这一道原本是没有的，见 TestExtractListRequiresAuth。）
-func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath string) (archive.Reader, string, bool) {
+func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath string) (archive.Reader, string, func(), bool) {
+	noop := func() {}
 	if !s.cfg.AllowExtract {
 		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	if fsutil.HasParentSegment(urlPath) {
 		http.Error(w, "400 Bad Request: 路径中不允许出现 ..", http.StatusBadRequest)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	clean := fsutil.CleanURLPath(urlPath)
 	if clean == "/" {
 		http.Error(w, "400 Bad Request: 缺少 path 参数", http.StatusBadRequest)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	// 读这份压缩包需要对该路径有读权限。
 	// authorize 会按需写 401 / 403 / 429，并计入认证失败限速。
 	p, ok := s.authorize(w, r, clean)
 	if !ok {
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	if p.Perm < auth.PermRead {
 		http.Error(w, "403 Forbidden: 没有读取该压缩包的权限", http.StatusForbidden)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	abs, err := s.res.Resolve(clean)
 	if err != nil {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
-		return nil, "", false
+		return nil, "", noop, false
+	}
+	// 软链目标可能落在另一条 ACL 规则下：按真实路径再复核一次。
+	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+		return nil, "", noop, false
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "404 Not Found: 压缩包不存在", http.StatusNotFound)
-			return nil, "", false
+			return nil, "", noop, false
 		}
 		s.writeErr(w, err)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	if st.IsDir() {
 		http.Error(w, "400 Bad Request: 目标不是文件", http.StatusBadRequest)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 
+	// 打开 zip 会先解析整个中央目录：这是重任务，必须在解析前取名额。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 解压任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return nil, "", noop, false
+	}
 	rd, err := archive.Open(abs)
 	if err != nil {
+		release()
 		if errors.Is(err, archive.ErrUnsupported) {
 			http.Error(w, "415 Unsupported Media Type: 仅支持 zip / tar / tar.gz / tgz / gz",
 				http.StatusUnsupportedMediaType)
-			return nil, "", false
+			return nil, "", noop, false
 		}
 		s.writeErr(w, err)
-		return nil, "", false
+		return nil, "", noop, false
 	}
 	s.applyArchiveLimits(rd)
-	return rd, clean, true
+	return rd, clean, release, true
 }
 
 // applyArchiveLimits 把解压配置里的上限同步给「列表 / 单条目预览」。
@@ -146,11 +159,13 @@ func (s *Server) applyArchiveLimits(rd archive.Reader) {
 	if !ok {
 		return
 	}
-	maxEntry := s.cfg.ExtractMaxTotal
 	// 单条目预览再收紧一道：总量上限是给整次解压用的，单个条目
-	// 在预览时落到临时目录不该同样宽松。0（不限制）时用 1GiB 兜底。
-	if maxEntry <= 0 || maxEntry > 1<<30 {
-		maxEntry = 1 << 30
+	// 在预览时落到临时目录不该同样宽松。1GiB 仍可被少量并发请求写满
+	// /tmp，因此预览上限固定为 64MiB；更大的条目请直接下载或解压。
+	const previewMaxEntry int64 = 64 << 20
+	maxEntry := s.cfg.ExtractMaxTotal
+	if maxEntry <= 0 || maxEntry > previewMaxEntry {
+		maxEntry = previewMaxEntry
 	}
 	ls.SetLimits(archive.Limits{
 		MaxFiles:      s.cfg.ExtractMaxFiles,
@@ -162,11 +177,17 @@ func (s *Server) applyArchiveLimits(rd archive.Reader) {
 // extractList 列出压缩包内容，或流式输出包内单个文件。
 func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Query().Get("path")
-	rd, clean, ok := s.resolveArchive(w, r, urlPath)
+	rd, clean, release, ok := s.resolveArchive(w, r, urlPath)
 	if !ok {
 		return
 	}
+	defer release()
 	defer rd.Close()
+
+	// 预览同样可能是大响应：客户端连上不读时不能一直占着名额。
+	tw, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer resetWrite()
+	w = tw
 
 	// 指定了 file 参数则直接下载包内文件，不解压落盘。
 	if inner := r.URL.Query().Get("file"); inner != "" {
@@ -290,6 +311,9 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "404 Not Found: 压缩包不存在", http.StatusNotFound)
 		return
 	}
+	if !s.requireRealPerm(w, r, srcAbs, auth.PermReadWrite) {
+		return
+	}
 
 	// 确定目标目录。
 	destClean := req.Dest
@@ -307,6 +331,9 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden: 目标目录非法", http.StatusForbidden)
 		return
 	}
+	if !s.requireRealPerm(w, r, destAbs, auth.PermReadWrite) {
+		return
+	}
 	if destAbs == srcAbs {
 		http.Error(w, "400 Bad Request: 目标目录不能是压缩包自身", http.StatusBadRequest)
 		return
@@ -321,6 +348,17 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 解压是最重的操作：长时间占 CPU、磁盘 IO 和一条连接。
+	// 必须在 archive.Open 之前取名额 —— zip 会先解析整个中央目录，
+	// 那一步本身就可能吃掉大量内存。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "3")
+		http.Error(w, "503 Service Unavailable: 解压任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	rd, err := archive.Open(srcAbs)
 	if err != nil {
 		if errors.Is(err, archive.ErrUnsupported) {
@@ -333,16 +371,6 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.applyArchiveLimits(rd)
 	defer rd.Close()
-
-	// 解压是最重的操作：长时间占 CPU、磁盘 IO 和一条连接。
-	// 取不到名额时直接拒绝，让客户端稍后重试，而不是排队把服务拖垮。
-	release, ok := s.acquireJob(r.Context())
-	if !ok {
-		w.Header().Set("Retry-After", "3")
-		http.Error(w, "503 Service Unavailable: 解压任务过多，请稍后重试", http.StatusServiceUnavailable)
-		return
-	}
-	defer release()
 
 	entries, err := rd.List(r.Context())
 	if err != nil {
@@ -445,6 +473,10 @@ func (s *Server) extractTargetsAllowed(r *http.Request, destClean string, entrie
 		}
 		target := fsutil.CleanURLPath(path.Join(destClean, name))
 		if s.checkPerm(r, target) != auth.PermReadWrite {
+			return target, false
+		}
+		// 目标可能经过软链/大小写别名落到另一条 ACL 规则下：按真实路径复核。
+		if abs, err := s.res.Resolve(target); err != nil || !s.realPermAllowed(r, abs, auth.PermReadWrite) {
 			return target, false
 		}
 	}

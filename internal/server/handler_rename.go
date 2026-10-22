@@ -407,6 +407,17 @@ func (s *Server) planRenameItem(r *http.Request, pl *renamePlan, vacating map[st
 	if s.checkPerm(r, pl.path) != auth.PermReadWrite {
 		return "对源路径没有写权限"
 	}
+	// 目标路径同样要有写权限：不能把条目改到一个被配置为只读的名字上。
+	if s.checkPerm(r, pl.dstURL) != auth.PermReadWrite {
+		return "对目标路径没有写权限"
+	}
+	// 软链/大小写别名：按真实目标再复核一次。
+	if !s.realPermAllowed(r, pl.srcAbs, auth.PermReadWrite) {
+		return "对源的真实路径没有写权限"
+	}
+	if !s.realPermAllowed(r, pl.dstAbs, auth.PermReadWrite) {
+		return "对目标的真实路径没有写权限"
+	}
 	if pl.srcAbs == pl.dstAbs {
 		// 名称没变：不是错误，外面按 skipped 报（放在「目标已存在」之前判，
 		// 否则它会撞上自己）。
@@ -415,6 +426,12 @@ func (s *Server) planRenameItem(r *http.Request, pl *renamePlan, vacating map[st
 		// 目标恒为「源所在目录 + 单段新名」，也就是源的**兄弟**，结构上就不可能
 		// 落在源里面。收单段名而不是完整目标路径，挡掉的就是这一类。
 		return ""
+	}
+	// 目录改名会改变所有后代的 URL：新位置的权限不能高于旧位置。
+	if fi, err := os.Lstat(pl.srcAbs); err == nil && fi.IsDir() {
+		if bad, ok := s.requireMoveTree(r, pl.srcAbs, pl.path, pl.dstURL); !ok {
+			return "目录内的 " + bad + " 在新位置权限会提升"
+		}
 	}
 	// 目标已存在：占着它的若是本批次里要改走的某一项，就放行。
 	if _, err := os.Lstat(pl.dstAbs); err == nil {

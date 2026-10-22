@@ -176,6 +176,15 @@ const searchMaxEntries = 3000
 // serveSearch 处理 ?q= 搜索。?mode= 选择匹配方式（fuzzy/exact/wildcard/regex），
 // 缺省或无法识别时按 fuzzy 处理。
 func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPath, pattern string) {
+	// 搜索会遍历整棵子树：与上传/解压共用重任务闸门，避免被反复触发。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 搜索任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	entries, total, err := fsutil.Search(s.res, abs, fsutil.SearchOptions{
 		Pattern: pattern,
 		Mode:    fsutil.ParseSearchMode(r.URL.Query().Get("mode")),
@@ -228,6 +237,10 @@ func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
 // writeHTMLStatus 与 writeHTML 相同，但允许指定状态码：
 // 目录不存在时仍然返回完整外壳，只是 HTTP 状态为 404。
 func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status int) {
+	// 目录页/搜索页可能带着上万条条目，同样需要「无进展超时」。
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
+
 	// 默认 JSON 编码会转义 < > &，可安全地放进 <script> 内。
 	raw, err := json.Marshal(data)
 	if err != nil {
@@ -249,6 +262,27 @@ func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status in
 	_, _ = w.Write(out)
 }
 
+// indexSandboxNeeded 表示服务目录里的 index.html 是否必须进入沙箱。
+//
+// 只要有任一远程写入口（上传 / 在线编辑 / 解压），index.html 就可能被
+// 非管理员写入；把它当同源页面执行等于把本站凭据与接口交给写入者。
+// 纯只读部署（内容只由本机运维更新）不需要沙箱。
+func (s *Server) indexSandboxNeeded() bool {
+	if s.cfg.UnsafeIndexHTML {
+		return false
+	}
+	return s.cfg.AllowUpload || s.cfg.AllowEdit || s.cfg.AllowExtract
+}
+
+// hardenIndex 给可写部署中的 index.html 加上与普通 HTML 文件相同的沙箱。
+func (s *Server) hardenIndex(w http.ResponseWriter) {
+	if s.indexSandboxNeeded() {
+		// allow-scripts 保留静态页面的脚本；没有 allow-same-origin，
+		// 文档处于不透明源，读不到本站 cookie / storage / 同源接口。
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts; frame-ancestors 'none'")
+	}
+}
+
 // tryServeIndex 在目录下尝试返回 index.html。
 func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir string) bool {
 	idx := filepath.Join(dir, "index.html")
@@ -262,12 +296,19 @@ func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir strin
 	if err != nil || st.IsDir() {
 		return false
 	}
+	// index.html 本身也可能是软链/大小写别名：按真实目标复核读权限。
+	if !s.realPermAllowed(r, idx, auth.PermRead) {
+		return false
+	}
 	f, err := os.Open(idx)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	s.hardenIndex(w)
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
 	return true
 }
@@ -280,6 +321,10 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "404 Not Found", http.StatusNotFound)
 			return
 		}
+	}
+	if !s.realPermAllowed(r, idx, auth.PermRead) {
+		http.Error(w, "404 Not Found", http.StatusNotFound)
+		return
 	}
 	f, err := os.Open(idx)
 	if err != nil {
@@ -299,6 +344,9 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	s.hardenIndex(w)
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
 }
 
@@ -359,6 +407,8 @@ func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", s.assetETag(name, st, rs))
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
 	http.ServeContent(w, r, name, st.ModTime(), rs)
 }
 

@@ -30,6 +30,9 @@ import (
 func (s *Server) renderLinkIndex(w http.ResponseWriter, r *http.Request,
 	listing *fsutil.Listing, shareToken string) {
 
+	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer reset()
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	// 链接上要不要挂 ?share=：

@@ -157,6 +157,15 @@ func picksFromBody(r *http.Request) ([]string, error) {
 // 采用「先扫描再写出」两阶段：扫描阶段可提前发现错误并给出正确的状态码，
 // 写出阶段边压缩边发送，避免大目录占用额外的磁盘与内存。
 func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath string, picks []string) {
+	// 打包会扫描整棵目录树并持续压缩输出：与上传/解压共用重任务闸门。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 打包任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	picked := len(picks) > 0
 
 	var (
@@ -395,6 +404,11 @@ func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string, l
 		}
 		abs, err := s.res.Resolve(p)
 		if err != nil {
+			skipped = append(skipped, raw)
+			continue
+		}
+		// 选中项可能经过软链/大小写别名：按真实目标再复核一次读权限。
+		if !s.realPermAllowed(r, abs, auth.PermRead) {
 			skipped = append(skipped, raw)
 			continue
 		}

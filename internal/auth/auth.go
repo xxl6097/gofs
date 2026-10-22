@@ -22,12 +22,16 @@
 package auth
 
 import (
+	"crypto/pbkdf2"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Permission 表示对某个路径的授权级别。
@@ -90,6 +94,13 @@ type Authenticator struct {
 	userFile string   // 用户表落盘路径，空串表示仅内存
 	pwCache  *pwCache // 「账号+密码」校验结果的缓存，见 pwCache 的注释
 
+	// verifySem 限制同时进行的 PBKDF2 计算数。
+	//
+	// PBKDF2 是按「故意很慢」设计的；没有这道闸门时，攻击者可以用大量
+	// 并发请求（尤其是能绕过失败限速的入口）把 CPU 打满。超过等待窗口
+	// 的校验直接失败（fail closed），而不是无限排队。
+	verifySem chan struct{}
+
 	// sessions 是服务端会话表（token -> 会话），供 cookie 鉴权使用。
 	// 见 session.go 里为什么不用自包含 token。
 	sessions map[string]*Session
@@ -106,9 +117,10 @@ func Parse(rules []string) (*Authenticator, error) {
 // 与上传密钥的 --key-file 语义保持一致。
 func Open(rules []string, userFile string) (*Authenticator, error) {
 	a := &Authenticator{
-		userFile: userFile,
-		pwCache:  newPWCache(),
-		sessions: make(map[string]*Session),
+		userFile:  userFile,
+		pwCache:   newPWCache(),
+		sessions:  make(map[string]*Session),
+		verifySem: make(chan struct{}, verifyConcurrency()),
 	}
 	for _, raw := range rules {
 		raw = strings.TrimSpace(raw)
@@ -311,6 +323,8 @@ func (a *Authenticator) Verify(username, password string) bool {
 	if acc := a.lookupAccount(username); acc != nil {
 		return a.passwordMatches(acc, password)
 	}
+	// 未知用户名也跑一次同等成本的 PBKDF2，抹平「用户是否存在」的时序差异。
+	a.verifyDummy(password)
 	return false
 }
 
@@ -333,6 +347,52 @@ func subtleEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// PBKDF2 并发闸门与未知用户的等时校验。
+//
+// PBKDF2 单次约 100ms，必须限制同时计算的数量：否则攻击者用大量并发请求
+// 就能把 CPU 打满。超过等待窗口的校验直接失败（fail closed），而不是无限
+// 排队把请求堆在内存里。
+const authVerifyTimeout = 2 * time.Second
+
+// dummySalt 只用于「未知用户名」的等时计算，不需要保密。
+var dummySalt = []byte("gofs-dummy-salt!")
+
+func verifyConcurrency() int {
+	n := runtime.NumCPU()
+	if n < 1 {
+		n = 1
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
+}
+
+// withVerifySlot 在并发配额内执行一次慢速密码计算。
+// ran=false 表示等待超时、没有执行。
+func (a *Authenticator) withVerifySlot(fn func() bool) (ok, ran bool) {
+	if a.verifySem == nil {
+		return fn(), true
+	}
+	timer := time.NewTimer(authVerifyTimeout)
+	defer timer.Stop()
+	select {
+	case a.verifySem <- struct{}{}:
+		defer func() { <-a.verifySem }()
+		return fn(), true
+	case <-timer.C:
+		return false, false
+	}
+}
+
+// verifyDummy 对未知用户名执行一次与真实校验等成本的 PBKDF2。
+func (a *Authenticator) verifyDummy(password string) {
+	_, _ = a.withVerifySlot(func() bool {
+		_, _ = pbkdf2.Key(sha256.New, password, dummySalt, pwIterations, pwKeyLen)
+		return false
+	})
+}
+
 // passwordMatches 校验密码。明文账号直接定长比较；用户表的账号走 PBKDF2。
 //
 // 这里带一层结果缓存：PBKDF2 是按「故意很慢」设计的，而 HTTP Basic 意味着
@@ -347,8 +407,10 @@ func (a *Authenticator) passwordMatches(acc *account, password string) bool {
 	if ok, hit := a.pwCache.get(key); hit {
 		return ok
 	}
-	ok := acc.hash.verify(password)
-	a.pwCache.put(key, ok)
+	ok, ran := a.withVerifySlot(func() bool { return acc.hash.verify(password) })
+	if ran {
+		a.pwCache.put(key, ok)
+	}
 	return ok
 }
 
@@ -408,8 +470,14 @@ func (a *Authenticator) Lookup(urlPath, username, password string, authenticated
 	defer a.mu.RUnlock()
 
 	// 先尝试具名账号，再回落到匿名规则。
-	if acc := a.accountFor(username, password, authenticated); acc != nil {
+	acc := a.accountFor(username, password, authenticated)
+	if acc != nil {
 		return acc.match(urlPath)
+	}
+	// 未知用户名也执行一次等成本的 PBKDF2，避免通过响应时间枚举账号。
+	// 已知账号密码错误时 accountFor 已经算过，不应重复。
+	if authenticated && username != "" && a.lookupAccount(username) == nil {
+		a.verifyDummy(password)
 	}
 	return PermNone
 }

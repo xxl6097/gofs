@@ -2,7 +2,10 @@ package archive
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +13,50 @@ import (
 
 	"github.com/xxl6097/gofs/internal/fsutil"
 )
+
+// zip 中央目录预检的硬上限。
+//
+// zip.NewReader 会先读出并解析整个中央目录，条目数与目录体积都在压缩包
+// 里声明、完全由攻击者控制。一个几十 MB 的文件可以声明上百万条目，
+// 在服务器拿到 ExtractMaxFiles 之前就把内存吃光。打开前先看 EOCD，
+// 超过上限直接拒绝。
+const (
+	hardMaxZipEntries  = 200_000
+	hardMaxZipDirBytes = 64 << 20
+)
+
+// CheckZipDirectory 在 zip.NewReader 之前做一个有界的 EOCD 预检。
+//
+// 不是完整的 zip 校验，只回答「中央目录的声明值是否足以造成资源问题」。
+// Zip64（0xFFFF / 0xFFFFFFFF）一律拒绝：本服务的解压上限远低于该量级，
+// 没必要为了支持它承担额外解析风险。
+func CheckZipDirectory(f *os.File, size int64, maxEntries int, maxDirBytes int64) error {
+	if size < 22 {
+		return nil
+	}
+	tail := int64(1<<16 + 22)
+	if tail > size {
+		tail = size
+	}
+	buf := make([]byte, tail)
+	if _, err := f.ReadAt(buf, size-tail); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	idx := bytes.LastIndex(buf, []byte{'P', 'K', 5, 6})
+	if idx < 0 || len(buf)-idx < 22 {
+		return nil // 不是 zip（或 EOCD 损坏）：交给 zip.NewReader 报错
+	}
+	e := buf[idx:]
+	entries := binary.LittleEndian.Uint16(e[10:12])
+	dirSize := binary.LittleEndian.Uint32(e[12:16])
+	if entries == 0xFFFF || (maxEntries > 0 && int(entries) > maxEntries) {
+		return fmt.Errorf("zip 条目数 %d 超过上限 %d", entries, maxEntries)
+	}
+	if dirSize == 0xFFFFFFFF || (maxDirBytes > 0 && int64(dirSize) > maxDirBytes) {
+		return fmt.Errorf("zip 中央目录 %d 字节，超过上限 %d", dirSize, maxDirBytes)
+	}
+	return nil
+}
 
 // zipReader 实现 zip 归档的读取。
 type zipReader struct {
@@ -25,6 +72,10 @@ func (z *zipReader) SetLimits(l Limits) { z.limits = l }
 func newZipReader(f *os.File) (*zipReader, error) {
 	info, err := f.Stat()
 	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := CheckZipDirectory(f, info.Size(), hardMaxZipEntries, hardMaxZipDirBytes); err != nil {
 		f.Close()
 		return nil, err
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/xxl6097/gofs/internal/archive"
 	"github.com/xxl6097/gofs/internal/auth"
 	"github.com/xxl6097/gofs/internal/fsutil"
 	"github.com/xxl6097/gofs/internal/office"
@@ -78,6 +79,9 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
+	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+		return
+	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -102,10 +106,24 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 	// 单个文件的大小上限。OOXML 是压缩包，一个几十 KB 的文件解出来
 	// 可能有几百 MB —— 所以这里挡的是**压缩包本身**的尺寸，
 	// 解压后的量由 office 包自己的上限兜住。
-	if s.cfg.UploadMaxSize > 0 && st.Size() > s.cfg.UploadMaxSize {
+	// 未配置上限（0）时为 Office 预览单独兜一个 512MiB。
+	limit := s.settings.UploadMaxSize()
+	if limit <= 0 {
+		limit = 512 << 20
+	}
+	if st.Size() > limit {
 		http.Error(w, "413 Payload Too Large: 文件过大，请下载后打开", http.StatusRequestEntityTooLarge)
 		return
 	}
+
+	// 解析 OOXML（zip 中央目录 + XML）是重任务：先取名额。
+	release, ok := s.acquireJob(r.Context())
+	if !ok {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "503 Service Unavailable: 预览任务过多，请稍后重试", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 
 	f, err := os.Open(abs)
 	if err != nil {
@@ -114,6 +132,11 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	// 不信任中央目录里的声明：在 zip.NewReader 分配内存前先做有界预检。
+	if err := archive.CheckZipDirectory(f, st.Size(), 200_000, 64<<20); err != nil {
+		http.Error(w, "413 Payload Too Large: "+err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
 	zr, err := zip.NewReader(f, st.Size())
 	if err != nil {
 		// 不是合法的 zip：多半是内容与扩展名不符。

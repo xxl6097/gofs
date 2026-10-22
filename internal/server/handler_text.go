@@ -114,6 +114,9 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+		return
+	}
 
 	st, err := os.Stat(abs)
 	if err != nil {
@@ -191,8 +194,17 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// JSON 体积小、正常客户端瞬间就能发完：用绝对读取时限挡住
+	// 「一个字节一个字节发」占着并发名额；同时用 MaxBytesReader 兜住总量。
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
+	bodyLimit := textfile.MaxSaveSize + (1 << 20)
+	if !requestBody(w, r, bodyLimit, "编辑内容") {
+		return
+	}
+
 	var req textSaveRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, textfile.MaxSaveSize+(1<<20)))
+	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&req); err != nil {
 		if errors.Is(err, io.EOF) {
 			http.Error(w, "400 Bad Request: 请求体为空", http.StatusBadRequest)
@@ -226,6 +238,9 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.Perm != auth.PermReadWrite {
 		http.Error(w, "403 Forbidden: 保存需要读写权限", http.StatusForbidden)
+		return
+	}
+	if !s.requireRealPerm(w, r, abs, auth.PermReadWrite) {
 		return
 	}
 

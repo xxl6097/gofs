@@ -307,6 +307,21 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 			http.Error(w, "403 Forbidden: 对目标文件没有写权限", http.StatusForbidden)
 			return
 		}
+		// 目标目录/叶子可能是软链或大小写别名：按真实路径再复核一次。
+		if realURL, within := s.realURLOf(dst); within {
+			if p.UploadKey != nil {
+				if !p.UploadKey.AllowsPath(realURL) {
+					http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围", http.StatusForbidden)
+					return
+				}
+			} else if s.checkPerm(r, realURL) != auth.PermReadWrite {
+				http.Error(w, "403 Forbidden: 对目标文件的真实路径没有写权限", http.StatusForbidden)
+				return
+			}
+		} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+			http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+			return
+		}
 		if !s.cfg.AllowSymlink {
 			// 不接受写入到已存在的软链：悬空软链会写到根外，根内软链
 			// 也可能把内容导到另一条 ACL 路径上。
@@ -419,6 +434,11 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, urlPath, a
 			http.Error(w, "409 Conflict: 目录非空，删除需追加 ?recursive", http.StatusConflict)
 			return
 		}
+		// 递归删除会对每个后代生效：逐个复核，不能只看目录本身。
+		if bad, ok := s.requireDeleteTree(r, abs); !ok {
+			http.Error(w, "403 Forbidden: 目录内的 "+bad+" 没有写权限", http.StatusForbidden)
+			return
+		}
 		if err := os.RemoveAll(abs); err != nil {
 			s.writeErr(w, err)
 			return
@@ -488,7 +508,8 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 			destPath = strings.TrimPrefix(destPath, pre)
 		}
 	}
-	destPath = fsutil.CleanURLPath(destPath)
+	// 与源路径一样，按磁盘真实名字对齐（大小写/规范化/短名）。
+	destPath = s.canonicalPath(r, destPath)
 
 	// 目标名的长度也要挡：不挡的话，一个超长名会被文件系统拒成 ENAMETOOLONG，
 	// 透出去就是 500 —— 看起来像服务端故障，实际是请求本身不合法，而上传同一个
@@ -539,6 +560,16 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 		http.Error(w, "403 Forbidden: 对目标路径没有写权限", http.StatusForbidden)
 		return
 	}
+	// 目标路径本身也可能是软链/大小写别名，真实目标必须同样可写。
+	if realURL, within := s.realURLOf(dst); within {
+		if s.checkPerm(r, realURL) != auth.PermReadWrite {
+			http.Error(w, "403 Forbidden: 对目标真实路径没有写权限", http.StatusForbidden)
+			return
+		}
+	} else if shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+		http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+		return
+	}
 
 	// 目标落在源里面（含「就是它自己」）必须挡掉。
 	//
@@ -551,11 +582,27 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 
+	// 目录移动会改变所有后代的 URL：逐个比较新旧权限，禁止「搬到更宽
+	// 的规则下」把只读子项变成可写。
+	if srcInfo, lerr := os.Lstat(src); lerr == nil && srcInfo.IsDir() {
+		if bad, ok := s.requireMoveTree(r, src, urlPath, destPath); !ok {
+			http.Error(w, "403 Forbidden: "+bad, http.StatusForbidden)
+			return
+		}
+	}
+
 	overwrite := strings.EqualFold(r.Header.Get("Overwrite"), "T")
-	if _, err := os.Stat(dst); err == nil {
+	if st, lerr := os.Lstat(dst); lerr == nil {
 		if !overwrite {
 			http.Error(w, "412 Precondition Failed: 目标已存在", http.StatusPreconditionFailed)
 			return
+		}
+		// 覆盖目录 = 递归删除目标里的全部内容，同样要逐项复核。
+		if st.IsDir() {
+			if bad, ok := s.requireDeleteTree(r, dst); !ok {
+				http.Error(w, "403 Forbidden: 目标目录内的 "+bad+" 没有写权限", http.StatusForbidden)
+				return
+			}
 		}
 		if err := os.RemoveAll(dst); err != nil {
 			s.writeErr(w, err)

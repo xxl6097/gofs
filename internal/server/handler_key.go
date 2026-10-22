@@ -365,12 +365,18 @@ func (s *Server) handleWithUploadKey(w http.ResponseWriter, r *http.Request, url
 		http.Error(w, "403 Forbidden: 本服务未开启上传（--allow-upload）", http.StatusForbidden)
 		return
 	}
-	if !k.AllowsPath(r.URL.Path) {
+	if !k.AllowsPath(urlPath) {
 		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", k.Scope), http.StatusForbidden)
 		return
 	}
-	if _, err := s.res.Resolve(urlPath); err != nil {
+	abs, err := s.res.Resolve(urlPath)
+	if err != nil {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+	// 软链/大小写别名可能把实际写入位置带到 scope 之外。
+	if realURL, within := s.realURLOf(abs); !within || !k.AllowsPath(realURL) {
+		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", k.Scope), http.StatusForbidden)
 		return
 	}
 
