@@ -1573,16 +1573,23 @@
     // 不可达的上级渲染成普通文字而不是链接：它点下去必被服务端拒绝，
     // 而前端会把那次失败当成「登录已失效」（见 reachable 的说明）。
     var rootOK = reachable('/');
-    var rootCrumb = document.createElement(rootOK ? 'a' : 'span');
+    var parts = state.path.split('/').filter(Boolean);
+    var atRoot = parts.length === 0;
+    // 站在根目录时，根自己就是当前页：渲染成不可点的 current，而不是
+    // 一个点了没反应的链接。其它层级下它才是回到根目录的入口。
+    var rootCrumb = document.createElement(rootOK && !atRoot ? 'a' : 'span');
     rootCrumb.textContent = '根目录';
-    rootCrumb.className = rootOK ? '' : 'crumb flat';
-    if (rootOK) {
-      rootCrumb.href = raw('/');
-      rootCrumb.onclick = function (e) { e.preventDefault(); navigate('/'); };
+    if (atRoot) {
+      rootCrumb.className = rootOK ? 'crumb current' : 'crumb flat';
+      if (rootOK) rootCrumb.setAttribute('aria-current', 'page');
+    } else {
+      rootCrumb.className = rootOK ? '' : 'crumb flat';
+      if (rootOK) {
+        rootCrumb.href = raw('/');
+        rootCrumb.onclick = function (e) { e.preventDefault(); navigate('/'); };
+      }
     }
     bc.appendChild(rootCrumb);
-
-    var parts = state.path.split('/').filter(Boolean);
     parts.forEach(function (part, i) {
       var sep = document.createElement('span');
       sep.className = 'sep';
@@ -1595,6 +1602,8 @@
       var el = document.createElement(linkable ? 'a' : 'span');
       el.textContent = part;
       el.className = 'crumb' + (isLast ? ' current' : (linkable ? '' : ' flat'));
+      // 读屏能在路径导航里定位「你现在在哪儿」。
+      if (isLast) el.setAttribute('aria-current', 'page');
       if (linkable) {
         el.href = raw(encPath(target) + '/');
         el.onclick = function (e) { e.preventDefault(); navigate(target); };
@@ -1939,6 +1948,16 @@
     }
   }
 
+  // searchTextMatches 复述服务端的 fuzzy/exact 匹配口径，只用于判断
+  // 「这个名字/路径到底是不是因为查询而命中」。通配/正则返回 false，
+  // 前端不猜它们匹配到哪一段。
+  function searchTextMatches(text, query, mode) {
+    if (!query || (mode !== 'fuzzy' && mode !== 'exact')) return false;
+    var s = String(text == null ? '' : text).toLowerCase();
+    var q = String(query).toLowerCase();
+    return mode === 'exact' ? s === q : s.indexOf(q) !== -1;
+  }
+
   function renderTable() {
     var tbody = $('tbody');
     tbody.textContent = '';
@@ -2012,16 +2031,33 @@
       main.className = 'name-main';
       main.appendChild(label);
       if (state.query) {
-        var parent = e.path || '';
+        var fullPath = e.path || '';
+        var parent = fullPath;
         if (e.name && parent.slice(-e.name.length) === e.name) {
           parent = parent.slice(0, -e.name.length);
         }
         parent = parent.replace(/\/+$/, '') || '根目录';
+        var pathNoSlash = fullPath.replace(/^\/+/, '');
+
+        // 有些命中既不在文件名里、也不在父目录里，而是只在完整路径里
+        // （例如搜「项目文档/2026/路线图.md」）。这时副行展示完整路径，
+        // 否则用户会看到一条没有任何高亮的搜索结果，不知道为什么命中。
+        var nameHit = searchTextMatches(e.name, state.query, state.searchMode);
+        var parentHit = searchTextMatches(parent, state.query, state.searchMode);
+        var pathHit = searchTextMatches(fullPath, state.query, state.searchMode) ||
+          searchTextMatches(pathNoSlash, state.query, state.searchMode);
+        var pathOnly = !nameHit && !parentHit && pathHit;
+
         var sub = document.createElement('span');
         sub.className = 'name-sub';
-        // 命中可能来自路径而不是文件名（例如搜「项目文档」），
-        // 二级路径里也标出来，用户才知道为什么这一行会被搜到。
-        appendSearchHighlight(sub, parent, state.query, state.searchMode);
+        if (pathOnly) {
+          sub.appendChild(document.createTextNode('路径命中 · '));
+          appendSearchHighlight(sub, pathNoSlash || '根目录',
+            state.query, state.searchMode);
+        } else {
+          // 命中可能来自父路径（例如搜「项目文档」），二级路径里也标出来。
+          appendSearchHighlight(sub, parent, state.query, state.searchMode);
+        }
         // 手机上大小列被隐藏，顺手在这里补回来，避免搜索结果只有名字。
         if (isNarrow() && !e.is_dir) {
           sub.appendChild(document.createTextNode(' · ' + fmtSize(e.size)));
@@ -2178,7 +2214,13 @@
           focusTableRow(tr, 1);
         } else if (ev.key === 'ArrowUp') {
           ev.preventDefault();
-          focusTableRow(tr, -1);
+          // 搜索结果里从第一行按 ↑ 回到搜索框，形成一条闭环，
+          // 不用再手动 Tab 回顶栏继续改词。
+          if (state.query && tr === $('tbody').firstElementChild) {
+            $('search-input').focus();
+          } else {
+            focusTableRow(tr, -1);
+          }
         } else if (ev.key === 'Home') {
           ev.preventDefault();
           focusTableRow(tr, 'first');
@@ -2319,6 +2361,9 @@
     window.removeEventListener('resize', rowMenu.onScroll);
     var anchor = rowMenu.anchor;
     rowMenu = null;
+    // 行菜单的开关是 aria-expanded 的按钮，关闭后必须复位，
+    // 否则读屏会一直认为菜单还开着。
+    if (anchor && anchor.setAttribute) anchor.setAttribute('aria-expanded', 'false');
     if (focusInside && anchor && anchor.isConnected) {
       try { anchor.focus({ preventScroll: true }); } catch (e) { anchor.focus(); }
     }
@@ -6038,9 +6083,15 @@
 
     function closeMenu() {
       if (!openMenu) return;
+      // 焦点在菜单里时，关闭后要回到触发按钮，否则焦点会掉到 body。
+      var focusInside = openMenu.pop.contains(document.activeElement);
+      var trigger = openMenu.trigger;
       openMenu.pop.classList.remove('open');
-      if (openMenu.trigger) openMenu.trigger.setAttribute('aria-expanded', 'false');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
       openMenu = null;
+      if (focusInside && trigger && trigger.isConnected) {
+        try { trigger.focus({ preventScroll: true }); } catch (e) { trigger.focus(); }
+      }
     }
 
     function toggleMenu(wrapID, popID, triggerID) {
@@ -6052,6 +6103,32 @@
       pop.classList.add('open');
       if (trigger) trigger.setAttribute('aria-expanded', 'true');
       openMenu = { wrap: wrap, pop: pop, trigger: trigger };
+
+      // 下拉也是菜单：打开即聚焦第一项，方向键在项间移动。
+      // 不这样做，role="menu" 只是装饰，键盘用户 Tab 会直接离开触发器。
+      var items = Array.prototype.slice.call(
+        pop.querySelectorAll('.menu-item:not([disabled])')).filter(function (it) {
+          return !it.hidden;
+        });
+      if (items.length) {
+        items[0].focus();
+        pop.onkeydown = function (e) {
+          var idx = items.indexOf(document.activeElement);
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            items[(idx + 1) % items.length].focus();
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            items[(idx - 1 + items.length) % items.length].focus();
+          } else if (e.key === 'Home') {
+            e.preventDefault();
+            items[0].focus();
+          } else if (e.key === 'End') {
+            e.preventDefault();
+            items[items.length - 1].focus();
+          }
+        };
+      }
     }
 
     document.addEventListener('click', function (e) {
@@ -6321,6 +6398,23 @@
         // 触摸设备上顺便收起软键盘；桌面上保留焦点，便于继续改词。
         if (window.matchMedia && window.matchMedia('(hover: none)').matches) {
           e.target.blur();
+        }
+        return;
+      }
+      // 从搜索框按 ↓ 直接进入结果列表，不必再 Tab 过一排顶栏控件。
+      // 空结果时把焦点交给空状态里的第一个动作（清除搜索 / 换模式）；
+      // 列表还没回来则保持不动，免得焦点落空。
+      if (e.key === 'ArrowDown') {
+        var rows = $('tbody').children;
+        if (rows.length) {
+          e.preventDefault();
+          focusTableRow(null, 'first');
+        } else if (!$('empty').hidden) {
+          var emptyBtn = $('empty').querySelector('button');
+          if (emptyBtn) {
+            e.preventDefault();
+            emptyBtn.focus();
+          }
         }
       }
     };

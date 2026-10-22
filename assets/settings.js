@@ -262,6 +262,22 @@
     hint.appendChild(row);
   }
 
+  // addDisclosure 把低频但重要的长说明折进原生 <details>。
+  // 默认只露出第一行警告，需要时再展开；比把 3 行灰字直接铺在表单里清爽。
+  function addDisclosure(wrap, summaryText, bodyText) {
+    var d = document.createElement('details');
+    d.className = 'hint-disclosure';
+    var s = document.createElement('summary');
+    s.textContent = summaryText;
+    d.appendChild(s);
+    var body = document.createElement('div');
+    body.className = 'hint';
+    G.setRichText(body, bodyText);
+    d.appendChild(body);
+    wrap.appendChild(d);
+    return d;
+  }
+
   // addSection 在长表单里插入分组标题。设置项本身不变，只是让用户
   // 能先看到「这一段在管什么」，而不是一路往下读说明。
   function addSection(wrap, text) {
@@ -518,11 +534,12 @@
         value: cur.path_prefix,
         def: cur.path_prefix_default,
         current: function () { return cur.path_prefix; },
-        hintText: '留空表示服务在根路径（/）。挂在 nginx 等反向代理的子路径下时，' +
-          '这里必须与代理的 location 一致；保存后本页会跳到新地址，' +
-          '在代理改好之前它会打不开。'
+        hintText: '留空表示服务在根路径（/）；改错会让新旧地址都打不开。'
       });
       el.appendChild(prefixField.field);
+      addDisclosure(prefixField.field, '反向代理下怎么填？',
+        '挂在 nginx 等反向代理的子路径下时，这里必须与代理的 location 一致；' +
+        '保存后本页会跳到新地址，在代理改好之前它会打不开。');
       if (cur.path_prefix_locked) {
         addHint(prefixField.field,
           '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');

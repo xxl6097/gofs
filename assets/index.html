@@ -173,7 +173,8 @@
 <main class="content">
   <div class="toolbar" id="toolbar">
     <div class="toolbar-left">
-      <span class="stat" id="stat"></span>
+      <!-- 统计随选择 / 搜索实时变化，读屏用户也应听到结果规模。 -->
+      <span class="stat" id="stat" aria-live="polite" aria-atomic="true"></span>
       <label class="search-sort" id="search-sort" hidden>
         <span>排序</span>
         <select id="search-sort-select" aria-label="搜索结果排序"
@@ -226,18 +227,18 @@
   </div>
 
   <div class="table-wrap">
-    <table class="listing" id="table">
+    <table class="listing" id="table" aria-label="文件与目录列表">
       <thead>
         <tr>
-          <th class="col-check">
+          <th class="col-check" scope="col">
             <label class="check-hit">
               <input type="checkbox" id="check-all" aria-label="全选当前列表" title="全选当前列表">
             </label>
           </th>
-          <th class="col-name sortable" data-sort="name">名称</th>
-          <th class="col-size sortable" data-sort="size">大小</th>
-          <th class="col-time sortable" data-sort="mtime">修改时间</th>
-          <th class="col-ops">操作</th>
+          <th class="col-name sortable" data-sort="name" scope="col">名称</th>
+          <th class="col-size sortable" data-sort="size" scope="col">大小</th>
+          <th class="col-time sortable" data-sort="mtime" scope="col">修改时间</th>
+          <th class="col-ops" scope="col">操作</th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
