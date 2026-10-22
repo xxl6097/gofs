@@ -73,6 +73,9 @@ type pageData struct {
 	EditMaxSize int64 `json:"edit_max_size"`
 	// AuthRequired 表示这是一张尚未登录的应用外壳（无任何真实数据）。
 	AuthRequired bool `json:"auth_required"`
+	// NotFound 表示这是一张 404 外壳：目录不存在，但前端仍能显示
+	// 完整的顶栏/主题与「回到根目录」入口，而不是一张裸文本错误页。
+	NotFound bool `json:"not_found,omitempty"`
 	// AllowKeys 表示当前用户可以在页面上管理上传密钥。
 	AllowKeys bool `json:"allow_keys"`
 	// UploadMaxSize 为当前生效的单文件上传上限（字节），0 表示不限制。
@@ -218,6 +221,12 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 
 // writeHTML 把初始数据注入 index.html 后输出。
 func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
+	s.writeHTMLStatus(w, data, http.StatusOK)
+}
+
+// writeHTMLStatus 与 writeHTML 相同，但允许指定状态码：
+// 目录不存在时仍然返回完整外壳，只是 HTTP 状态为 404。
+func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status int) {
 	// 默认 JSON 编码会转义 < > &，可安全地放进 <script> 内。
 	raw, err := json.Marshal(data)
 	if err != nil {
@@ -232,6 +241,7 @@ func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
 	_, _ = w.Write(out)
 }
 

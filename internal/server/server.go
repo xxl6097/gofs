@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -868,6 +869,20 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 		if errors.Is(err, fs.ErrNotExist) {
 			if s.cfg.RenderSPA {
 				s.serveIndexFallback(w, r)
+				return
+			}
+			// 浏览器深链（不是 JSON 接口）也返回完整外壳，只是状态码 404。
+			// 否则从书签/历史进来只会看到一张裸文本页，看起来像服务挂了。
+			if r.Method == http.MethodGet && !wantsJSON(r) &&
+				!r.URL.Query().Has("json") {
+				listing := &fsutil.Listing{
+					Path:  fsutil.CleanURLPath(urlPath),
+					Name:  path.Base(urlPath),
+					IsDir: true,
+				}
+				data := s.newPageData(p, listing, "", s.isAdminRequest(r))
+				data.NotFound = true
+				s.writeHTMLStatus(w, data, http.StatusNotFound)
 				return
 			}
 			http.Error(w, "404 Not Found", http.StatusNotFound)

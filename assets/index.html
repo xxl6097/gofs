@@ -34,6 +34,9 @@
 </head>
 <body>
 
+<!-- 键盘用户不必 Tab 过顶栏与工具栏的十几个控件才能进列表。 -->
+<a class="skip-link" href="#table" id="skip-to-list">跳到文件列表</a>
+
 <header class="topbar">
   <a class="brand" href="__GOFS_BASE__/" title="回到根目录">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -227,21 +230,22 @@
   </div>
 
   <div class="table-wrap">
-    <table class="listing" id="table" aria-label="文件与目录列表">
-      <thead>
-        <tr>
-          <th class="col-check" scope="col">
+    <table class="listing" id="table" role="grid" aria-multiselectable="true"
+           aria-label="文件与目录列表" tabindex="-1">
+      <thead role="rowgroup">
+        <tr role="row">
+          <th class="col-check" scope="col" role="columnheader">
             <label class="check-hit">
               <input type="checkbox" id="check-all" aria-label="全选当前列表" title="全选当前列表">
             </label>
           </th>
-          <th class="col-name sortable" data-sort="name" scope="col">名称</th>
-          <th class="col-size sortable" data-sort="size" scope="col">大小</th>
-          <th class="col-time sortable" data-sort="mtime" scope="col">修改时间</th>
-          <th class="col-ops" scope="col">操作</th>
+          <th class="col-name sortable" data-sort="name" scope="col" role="columnheader">名称</th>
+          <th class="col-size sortable" data-sort="size" scope="col" role="columnheader">大小</th>
+          <th class="col-time sortable" data-sort="mtime" scope="col" role="columnheader">修改时间</th>
+          <th class="col-ops" scope="col" role="columnheader">操作</th>
         </tr>
       </thead>
-      <tbody id="tbody"></tbody>
+      <tbody id="tbody" role="rowgroup"></tbody>
     </table>
     <!-- 大目录分批渲染：首屏只画前 PAGE_SIZE 行，其余按需追加。
          放在 table 外、table-wrap 内，圆角与分隔线跟着卡片走。 -->

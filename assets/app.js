@@ -202,6 +202,14 @@
   // 真正需要滚完后 20k 行的场景也很少。
   var PAGE_SIZE = 200;
 
+  // 最近一次 renderTable 里生成的 load-more 刷新函数。syncSelection()
+  // 在选中集合变化时也要更新“已选中但未显示”的提示，所以把它放到作用域上。
+  var refreshLoadMoreUI = null;
+
+  // 记录每列是否已经点过：第一次点某列用它的首选方向（名称升序、
+  // 时间/大小降序），第二次才反向。目录与搜索各记一套。
+  var sortTouched = { dir: {}, search: {} };
+
   var state = {
     path: DATA.path || '/',
     query: DATA.query || '',
@@ -212,6 +220,8 @@
     // 里面带 total_all / truncated / dir_count / file_size，
     // 这些是「把 entries 再数一遍」算不出来的（尤其截断与隐藏文件的情况）。
     listing: DATA.listing || null,
+    // 服务端 404 外壳：目录不存在，但仍渲染完整界面。
+    notFound: !!DATA.not_found,
     selected: new Set(),
     sortKey: 'name',
     sortDir: 1,
@@ -1641,6 +1651,16 @@
     bc.scrollLeft = bc.scrollWidth;
     bc.onscroll = syncBreadcrumbFade;
     syncBreadcrumbFade();
+    // 首次渲染时顶栏 flex 可能还没定型，立刻量会得到「无溢出」。
+    // 下一帧再量一次，并用 ResizeObserver 兜住后续的布局变化。
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(syncBreadcrumbFade);
+    }
+    if (window.ResizeObserver) {
+      if (bc._fadeRO) bc._fadeRO.disconnect();
+      bc._fadeRO = new ResizeObserver(function () { syncBreadcrumbFade(); });
+      bc._fadeRO.observe(bc);
+    }
   }
 
   // syncBreadcrumbFade 按实际滚动位置给路径两侧加渐隐。
@@ -1732,6 +1752,12 @@
     return s;
   }
 
+  // defaultSortDir 给每列一个符合直觉的首选方向：
+  // 名称从小到大，时间和大小从新/大到旧/小。
+  function defaultSortDir(key) {
+    return (key === 'mtime' || key === 'size') ? -1 : 1;
+  }
+
   function sortedEntries() {
     // 搜索结果用独立的一套排序状态：默认相关度，切到名称/大小/时间后
     // 也会记住选择；退出搜索不影响普通目录的排序。
@@ -1805,6 +1831,8 @@
   //     得有数据才能下。未登录外壳里 state.listing 是 null，这时候报 0
   //     等于对着一个还没读过的目录下判断，刷新时就会闪一下假数字。
   function statText() {
+    // 404 的说明放在主区域，不在工具栏里再重复一遍。
+    if (state.notFound) return '';
     if (!state.listing) return '';
     var l = state.listing || {};
     var listed = state.entries.length;
@@ -1861,6 +1889,29 @@
   // 新建入口，搜索无结果时给清除搜索；不要只留一句灰字。
   function renderEmptyState(list) {
     var el = $('empty');
+    var table = $('table');
+    if (state.notFound) {
+      // 服务端返回了 404 外壳：界面保留，主区域只说明目录不存在，
+      // 并给一个明确出口，而不是一张裸文本 “404 Not Found”。
+      if (table) table.hidden = true;
+      el.hidden = false;
+      el.textContent = '';
+      var nfTitle = document.createElement('div');
+      nfTitle.className = 'empty-title';
+      nfTitle.textContent = '目录不存在';
+      el.appendChild(nfTitle);
+      var nfPath = document.createElement('div');
+      nfPath.className = 'name-sub';
+      nfPath.textContent = state.path || '/';
+      el.appendChild(nfPath);
+      var nfActions = document.createElement('div');
+      nfActions.className = 'empty-actions';
+      nfActions.appendChild(btn('回到根目录', 'primary', function () {
+        navigate(homePath() || '/');
+      }));
+      el.appendChild(nfActions);
+      return;
+    }
     // 「这个目录是空的」同样是个结论 —— 没取到列表之前不能下。
     // state.listing 为 null 表示「还没读过这个目录」（未登录外壳就是这样），
     // 此时保持空白：一个还在加载的目录不该被说成是空的。
@@ -1868,7 +1919,6 @@
     el.textContent = '';
     // 空目录 / 空搜索结果时整张表（含表头、全选框）一起收掉：
     // 留着一个没有行的表头，看起来像列表加载坏了。
-    var table = $('table');
     if (table) table.hidden = !!state.listing && list.length === 0;
     if (el.hidden) return;
 
@@ -2003,6 +2053,7 @@
     function makeRow(e, rowIndex) {
       var tr = document.createElement('tr');
       tr.dataset.path = e.path;
+      tr.setAttribute('role', 'row');
       // roving tabindex：Tab 进表格只停在第一行，之后用方向键移动。
       tr.tabIndex = rowIndex === 0 ? 0 : -1;
       if (state.selected.has(e.path)) tr.classList.add('selected');
@@ -2011,6 +2062,7 @@
       // 选择框（包一层 label，让可点面积覆盖整个格子）
       var tdCheck = document.createElement('td');
       tdCheck.className = 'col-check';
+      tdCheck.setAttribute('role', 'gridcell');
       var hit = document.createElement('label');
       hit.className = 'check-hit';
       var cb = document.createElement('input');
@@ -2032,27 +2084,22 @@
       // 名称
       var tdName = document.createElement('td');
       tdName.className = 'col-name';
+      tdName.setAttribute('role', 'gridcell');
       var cell = document.createElement('div');
       cell.className = 'name-cell' + (e.is_dir ? ' dir' : '') + (e.archive ? ' archive' : '');
       cell.appendChild(svgIcon(kindOf(e)));
       var label = document.createElement('span');
       label.className = 'label';
       appendSearchHighlight(label, e.name, state.query, state.searchMode);
-      label.title = e.path;
-      if (e.is_dir) {
-        label.onclick = function () { navigate(e.path); };
-      } else if (canEdit(e)) {
-        // 可编辑的文本文件，点名字直接进编辑器——这是最常用的动作。
-        label.onclick = function () { G.openEditor(e); };
-        label.title = e.path + '　（点击在线编辑）';
-      } else if (canPreview(e)) {
-        // 图片 / 视频 / 音频 / PDF 点名字直接看，而不是下载到本地再打开。
-        // 想存下来仍有「下载」按钮，预览弹窗里也有一个。
-        label.onclick = function () { openPreview(e); };
-        label.title = e.path + '　（点击预览）';
-      } else {
-        label.onclick = function () { downloadEntry(e); };
-      }
+      // 单击文件名直接打开（目录进入 / 文本编辑 / 预览 / 下载）；
+      // 多选仍由行首复选框负责，行本身不承担选中动作。
+      label.onclick = function () { openEntry(e); };
+      var actionHint = e.is_dir
+        ? ''
+        : (isHTMLFile(e) ? '　（点击打开）'
+          : (canEdit(e) ? '　（点击在线编辑）'
+            : (canPreview(e) ? '　（点击预览）' : '')));
+      label.title = e.path + actionHint;
       // 搜索结果是递归的，同名文件可能来自不同目录。只显示 e.name
       // 会让两行看起来完全一样，所以搜索态在名字下面补一行所在目录。
       var main = document.createElement('div');
@@ -2129,18 +2176,21 @@
       // 大小
       var tdSize = document.createElement('td');
       tdSize.className = 'size-cell col-size';
+      tdSize.setAttribute('role', 'gridcell');
       tdSize.textContent = e.is_dir ? '—' : fmtSize(e.size);
       tr.appendChild(tdSize);
 
       // 时间
       var tdTime = document.createElement('td');
       tdTime.className = 'time-cell col-time';
+      tdTime.setAttribute('role', 'gridcell');
       tdTime.textContent = fmtTime(e.mtime);
       tr.appendChild(tdTime);
 
       // 操作
       var tdOps = document.createElement('td');
       tdOps.className = 'col-ops';
+      tdOps.setAttribute('role', 'gridcell');
       var ops = document.createElement('div');
       ops.className = 'ops';
 
@@ -2151,6 +2201,11 @@
       if (e.is_dir) {
         actions.push({ kind: 'open', label: '打开', run: function () { navigate(e.path); } });
       } else {
+        // HTML 首先是一条可访问的页面：主操作是「打开」新标签渲染，
+        // 编辑源码退到「更多」里，避免把 html 默认当文本打开。
+        if (can('read') && isHTMLFile(e)) {
+          actions.push({ kind: 'open', label: '打开', run: function () { openHTMLFile(e); } });
+        }
         // 预览排在下载前面：能看的东西，「看一眼」通常比「存下来」更常用。
         if (canPreview(e)) {
           actions.push({ kind: 'preview', label: '预览', run: function () { openPreview(e); } });
@@ -2254,10 +2309,22 @@
           focusTableRow(tr, 'first');
         } else if (ev.key === 'End') {
           ev.preventDefault();
+          // End 必须真的到完整结果集的最后一行，而不是渲染边界。
+          // 还有未渲染项时先补齐（用户按 End 就是在要求看末尾），
+          // 否则焦点会停在第 200 行，后面 50 项键盘永远够不到。
+          if (state.renderLimit < list.length) {
+            state.renderLimit = list.length;
+            for (var endI = tbody.children.length; endI < list.length; endI++) {
+              tbody.appendChild(makeRow(list[endI], endI));
+            }
+            updateLoadMore(list.length, list.length);
+            collapseWrappedOps();
+            syncSelection();
+          }
           focusTableRow(tr, 'last');
         } else if (ev.key === 'Enter') {
           ev.preventDefault();
-          label.click();
+          openEntry(e);
         } else if (ev.key === ' ' || ev.key === 'Spacebar') {
           ev.preventDefault();
           cb.click();
@@ -2282,10 +2349,29 @@
       var text = $('load-more-text');
       var button = $('btn-load-more');
       if (!box) return;
-      box.hidden = total <= shown;
+
+      // 选中集合可能包含尚未渲染的行（全选 / 范围选跨批次）。
+      // 统计已渲染行里的选中数，差集就是“选中了但看不见”的条目。
+      var renderedSelected = 0;
+      Array.prototype.forEach.call(tbody.children, function (tr) {
+        if (state.selected.has(tr.dataset.path)) renderedSelected++;
+      });
+      var hiddenSelected = Math.max(0, state.selected.size - renderedSelected);
+
+      // ⚠️ 先更新文案再判断隐藏：否则全部展开后 text 会停在旧值。
+      var msg = '已显示 ' + shown + ' / ' + total + ' 项';
+      if (hiddenSelected > 0) {
+        msg += ' · 其中 ' + hiddenSelected + ' 项已选中但未显示';
+      }
+      text.textContent = msg;
+      button.hidden = total <= shown;
+      if (!button.hidden) {
+        button.textContent = '再显示 ' + Math.min(PAGE_SIZE, total - shown) + ' 项';
+      }
+      box.hidden = total <= shown && hiddenSelected === 0;
+      // 即使没有更多行，只要还有“选中但未显示”的条目，这条提示也要留着。
       if (box.hidden) return;
-      text.textContent = '已显示 ' + shown + ' / ' + total + ' 项';
-      button.textContent = '再显示 ' + Math.min(PAGE_SIZE, total - shown) + ' 项';
+
       button.onclick = function () {
         var from = Math.min(state.renderLimit, total);
         state.renderLimit = Math.min(from + PAGE_SIZE, total);
@@ -2296,8 +2382,18 @@
         updateLoadMore(total, state.renderLimit);
         collapseWrappedOps();
         syncSelection();
+
+        // 键盘焦点不能因为按钮消失而掉到 body：
+        // 还有更多就留在按钮上，否则落到新追加的第一行。
+        if (!box.hidden) {
+          button.focus();
+        } else if (from < state.renderLimit) {
+          var nextRow = tbody.children[from];
+          if (nextRow) focusTableRow(nextRow, 0);
+        }
       };
     }
+    refreshLoadMoreUI = updateLoadMore;
     updateLoadMore(list.length, limit);
 
     syncSelection();
@@ -2588,15 +2684,26 @@
     $('check-all').checked = listed > 0 && n >= listed;
     $('check-all').indeterminate = n > 0 && n < listed;
 
+    // 行单击 / 范围选 / 键盘切换最终都只改 state.selected；
+    // 这里统一把已渲染行回写一遍，避免 UI 与 state 分叉。
+    // 只遍历已渲染的行（最多就是当前批次），不会因为 20k 行而变慢。
+    Array.prototype.forEach.call($('tbody').children, function (tr) {
+      var on = state.selected.has(tr.dataset.path);
+      tr.classList.toggle('selected', on);
+      tr.setAttribute('aria-selected', on ? 'true' : 'false');
+      var cb = tr.querySelector('input[type=checkbox]');
+      if (cb && cb.checked !== on) cb.checked = on;
+    });
+
     // 多选时把工具栏吸在顶栏下方。这里只挂类，高度等下面所有按钮文案 /
     // 显隐都更新完再量 —— 手机端「删除 / 移动 / 重命名」的文案变化会让
     // 工具条折行，提前量到的是折行前的旧高度，表头会压住工具条。
     $('toolbar').classList.toggle('stuck', n > 0);
 
-    // 进入批量选择后，投放区不再相关；清空选择后自动回来。
+    // 批量选择 / 搜索 / 空目录 / 404 时收起投放区，把空间让给当前任务。
     var zone = $('drop-zone');
     if (zone) {
-      zone.hidden = !can('write') || n > 0 || !!state.query ||
+      zone.hidden = !can('write') || n > 0 || !!state.query || state.notFound ||
         (!!state.listing && listed === 0);
     }
 
@@ -2666,14 +2773,19 @@
 
     // 文案与显隐都落定后再量一次工具条高度，表头吸顶偏移才准确。
     syncToolbarOffset();
+    // 选中集合变化后，“其中 N 项已选中但未显示”的提示也要跟着更新。
+    if (refreshLoadMoreUI) {
+      refreshLoadMoreUI(state.entries.length, $('tbody').children.length);
+    }
   }
 
   function renderPerms() {
     // 上传 / 新建都是「触发按钮 + 下拉」。权限只挂在触发按钮上，
     // 菜单项跟着它一起显隐 —— 不必再单独隐藏每一项。
-    $('btn-upload').hidden = !can('write');
-    $('btn-upload-menu').hidden = !can('write');
-    $('btn-mkdir').hidden = !can('write');
+    // 404 外壳里没有可写的真实目录，上传 / 新建直接隐藏，别让人点了失败。
+    $('btn-upload').hidden = !can('write') || state.notFound;
+    $('btn-upload-menu').hidden = !can('write') || state.notFound;
+    $('btn-mkdir').hidden = !can('write') || state.notFound;
     // 搜索态、空目录下这个按钮没有意义：前者会让用户误以为打包的是
     // 搜索结果（实际打的是 state.path），后者只会产出一个空 zip。
     $('btn-zip').hidden = !can('archive') || !!state.query || state.entries.length === 0;
@@ -2730,9 +2842,8 @@
     var zone = $('drop-zone');
     if (!zone) return;
     var allowed = can('write');
-    // 搜索态、批量选择、空目录时，投放区与当前任务无关，收起来把空间让给结果。
-    // 空目录尤其明显：空状态里已经有「上传文件 / 新建文件夹」两个入口了。
-    zone.hidden = !allowed || !!state.query || state.selected.size > 0 ||
+    // 搜索态、批量选择、空目录、404 时收起投放区。
+    zone.hidden = !allowed || !!state.query || state.selected.size > 0 || state.notFound ||
       (!!state.listing && state.entries.length === 0);
     if (!allowed) return;
 
@@ -2876,8 +2987,10 @@
       state.entries = data.entries || [];
       state.renderLimit = PAGE_SIZE;
       state.listing = data;
+      state.notFound = false;
       state.query = '';
       state.selected.clear();
+      sortTouched.dir = {};
       $('search-input').value = '';
       // 换了目录，顶栏的「更多」下拉不该跨页留着。
       if (G.closeMore) G.closeMore();
@@ -2980,7 +3093,9 @@
       state.entries = data.entries || [];
       state.renderLimit = PAGE_SIZE;
       state.listing = data;
+      state.notFound = false;
       state.selected.clear();
+      sortTouched.search = {};
 
       if (historyMode !== 'none') {
         var how = historyMode || (hadQueryInURL ? 'replace' : 'push');
@@ -4814,6 +4929,15 @@
     head.className = 'action-path';
     body.appendChild(head);
 
+    if (opts.note) {
+      // ⚠️ 不能叫 note：下面有一个同名的 note() 辅助函数。
+      var notice = document.createElement('div');
+      notice.className = 'hint-box';
+      notice.style.marginBottom = '10px';
+      notice.textContent = opts.note;
+      body.appendChild(notice);
+    }
+
     var listBox = document.createElement('div');
     body.appendChild(listBox);
 
@@ -4918,10 +5042,22 @@
     var multi = entries.length > 1;
     var excludePaths = entries.map(function (e) { return e.path; });
 
+    // 同删除确认：移动批量可能包含分批渲染尚未显示的行。
+    var renderedPaths = {};
+    Array.prototype.forEach.call($('tbody').children, function (tr) {
+      renderedPaths[tr.dataset.path] = true;
+    });
+    var hiddenCount = entries.filter(function (e) {
+      return !renderedPaths[e.path];
+    }).length;
+
     openDirPicker({
       title: multi ? '移动 ' + entries.length + ' 项到…' : '移动「' + entries[0].name + '」到…',
       startPath: state.path || '/',
       excludePaths: excludePaths,
+      note: hiddenCount > 0
+        ? '其中 ' + hiddenCount + ' 项因列表分批显示未列出，但会一起移动。'
+        : '',
       onPick: function (dest) { doMove(entries, dest); }
     });
   }
@@ -4986,6 +5122,24 @@
     p.style.margin = '0 0 12px';
     p.textContent = '即将删除以下 ' + entries.length + ' 项，此操作不可撤销：';
     box.appendChild(p);
+
+    // 选中集合可能包含分批渲染尚未显示的行。删除确认必须把这件事
+    // 说出来，否则用户只看到可见清单，却会连带删除看不见的文件。
+    var renderedPaths = {};
+    Array.prototype.forEach.call($('tbody').children, function (tr) {
+      renderedPaths[tr.dataset.path] = true;
+    });
+    var hiddenCount = entries.filter(function (e) {
+      return !renderedPaths[e.path];
+    }).length;
+    if (hiddenCount > 0) {
+      var warn = document.createElement('div');
+      warn.className = 'hint-box danger';
+      warn.style.marginBottom = '12px';
+      warn.textContent = '另有 ' + hiddenCount + ' 项未显示（已选中），' +
+        '确认后会一并删除。';
+      box.appendChild(warn);
+    }
 
     var ul = document.createElement('div');
     ul.className = 'hint-box';
@@ -5104,6 +5258,37 @@
         return mediaPlayable(ext, false);
     }
     return false;
+  }
+
+  function isHTMLFile(e) {
+    if (!e || e.is_dir) return false;
+    var ext = String(e.ext || '').toLowerCase();
+    return ext === 'html' || ext === 'htm' || ext === 'xhtml';
+  }
+
+  // openHTMLFile 把 HTML 当成页面加载，而不是塞进编辑器。
+  // 服务端默认对 HTML 响应加 CSP sandbox：页面能正常渲染，
+  // 但脚本不能读本站数据；需要脚本时由部署方显式关掉沙箱。
+  function openHTMLFile(e) {
+    var url = fileURL(e.path);
+    var w = window.open(url, '_blank');
+    if (!w) {
+      toast('warn', '浏览器拦截了新标签页，请允许弹出窗口后重试');
+      return;
+    }
+    try { w.opener = null; } catch (err) { /* 某些浏览器不允许改，忽略 */ }
+  }
+
+  // openEntry 是「打开一行」的唯一入口：单击文件名、键盘 Enter 都走这里。
+  // 以前这些路径各写一份优先级，改了一处很容易漏掉另一处。
+  function openEntry(e) {
+    if (!e) return;
+    if (e.is_dir) { navigate(e.path); return; }
+    // HTML 默认按页面打开；要改源码仍可从行内「更多 → 编辑」进入。
+    if (isHTMLFile(e)) { openHTMLFile(e); return; }
+    if (canEdit(e)) { G.openEditor(e); return; }
+    if (canPreview(e)) { openPreview(e); return; }
+    downloadEntry(e);
   }
 
   // openPreview 在弹窗里预览单个文件。
@@ -6310,6 +6495,24 @@
 
     $('btn-refresh').onclick = function () { refreshCurrent(); };
 
+    // 跳到文件列表：有行就聚焦第一行（沿用 roving tabindex），
+    // 空目录则落到空状态动作，避免把焦点扔到一个没有内容的表格上。
+    var skipLink = $('skip-to-list');
+    if (skipLink) {
+      skipLink.onclick = function (e) {
+        e.preventDefault();
+        var first = $('tbody').firstElementChild;
+        if (first) {
+          focusTableRow(first, 'first');
+        } else if (!$('empty').hidden) {
+          var emptyAction = $('empty').querySelector('button');
+          if (emptyAction) emptyAction.focus();
+        } else {
+          $('table').focus();
+        }
+      };
+    }
+
     // 后退 / 前进直接借浏览器的历史栈，不另起一套 —— 地址栏、浏览器返回键
     // 与这两颗按钮因此永远同步（popstate 已经接在下面同一段里）。
     // 「上一级」和点面包屑一样是**一次普通导航**，照常入栈：
@@ -6328,38 +6531,62 @@
       var dirName = baseName(state.path) || 'root';
       var picked = pickedEntries();
       var label = picked.length ? ('所选 ' + picked.length + ' 项') : dirName;
-      // 优先走浏览器的原生下载（进度、暂停、续传都归它管）。
-      var zipURL = fileURL(state.path) + '?zip';
-      if (picked.length) {
-        picked.forEach(function (e) { zipURL += '&pick=' + encodeURIComponent(e.path); });
-      }
 
-      // URL 太长的兜底：几千个字符的地址会被网关直接拒掉（nginx 默认 8KB）。
-      // 真到那一步才退回 POST + fetch，那条路才有自定义进度与取消按钮。
-      if (zipURL.length <= MAX_ZIP_URL) {
-        nativeDownload(zipURL, '');
-        return;
-      }
-
-      var ctl = new AbortController();
-      var t = progressToast('打包 ' + label, function () { ctl.abort(); });
-      var onProgress = function (loaded, total) { t.update(loaded, total); };
-      downloadFile(fileURL(state.path) + '?zip', '', onProgress, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ctl.signal,
-        body: JSON.stringify({ picks: picked.map(function (e) { return e.path; }) })
-      }).then(function (res) {
-        t.done('已打包 ' + label);
-        var skipped = parseInt(res.headers.get('x-gofs-archive-skipped') || '0', 10);
-        if (skipped > 0) {
-          // 服务端跳过了部分选中项（不存在 / 越界 / 无权限），如实告知。
-          toast('warn', '有 ' + skipped + ' 项被跳过（不存在或没有读取权限）');
+      function doZip() {
+        // 优先走浏览器的原生下载（进度、暂停、续传都归它管）。
+        var zipURL = fileURL(state.path) + '?zip';
+        if (picked.length) {
+          picked.forEach(function (e) { zipURL += '&pick=' + encodeURIComponent(e.path); });
         }
-      }).catch(function (err) {
-        if (isAbort(err)) { t.done('已取消打包'); return; }
-        t.fail('打包失败：' + err.message);
+
+        // URL 太长的兜底：几千个字符的地址会被网关直接拒掉（nginx 默认 8KB）。
+        // 真到那一步才退回 POST + fetch，那条路才有自定义进度与取消按钮。
+        if (zipURL.length <= MAX_ZIP_URL) {
+          nativeDownload(zipURL, '');
+          return;
+        }
+
+        var ctl = new AbortController();
+        var t = progressToast('打包 ' + label, function () { ctl.abort(); });
+        var onProgress = function (loaded, total) { t.update(loaded, total); };
+        downloadFile(fileURL(state.path) + '?zip', '', onProgress, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctl.signal,
+          body: JSON.stringify({ picks: picked.map(function (e) { return e.path; }) })
+        }).then(function (res) {
+          t.done('已打包 ' + label);
+          var skipped = parseInt(res.headers.get('x-gofs-archive-skipped') || '0', 10);
+          if (skipped > 0) {
+            // 服务端跳过了部分选中项（不存在 / 越界 / 无权限），如实告知。
+            toast('warn', '有 ' + skipped + ' 项被跳过（不存在或没有读取权限）');
+          }
+        }).catch(function (err) {
+          if (isAbort(err)) { t.done('已取消打包'); return; }
+          t.fail('打包失败：' + err.message);
+        });
+      }
+
+      // 选中集合包含未渲染行时，打包同样会作用到看不见的文件。
+      // 普通目录/少量选择不打扰；只有存在隐藏项时才确认。
+      var renderedPaths = {};
+      Array.prototype.forEach.call($('tbody').children, function (tr) {
+        renderedPaths[tr.dataset.path] = true;
       });
+      var hiddenCount = picked.filter(function (e) {
+        return !renderedPaths[e.path];
+      }).length;
+      if (hiddenCount > 0) {
+        confirmDialog({
+          title: '打包所选',
+          message: '已选中 ' + picked.length + ' 项，其中 ' + hiddenCount +
+            ' 项因列表分批显示不在页面上。',
+          detail: '它们同样会被打包进 zip。',
+          okLabel: '继续打包'
+        }).then(function (yes) { if (yes) doZip(); });
+      } else {
+        doZip();
+      }
     };
 
     $('btn-settings').onclick = function () { G.openSettings(); };
@@ -6388,19 +6615,33 @@
     };
     $('search-sort-select').onchange = function (e) {
       state.searchSortKey = e.target.value || 'relevance';
-      state.searchSortDir = 1;
+      // 下拉是“选列”，第一次选到某列时用该列的首选方向。
+      state.searchSortDir = defaultSortDir(state.searchSortKey);
+      sortTouched.search[state.searchSortKey] = true;
       renderTable();
     };
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
       th.tabIndex = 0;
       th.onclick = function () {
         var k = th.dataset.sort;
-        if (state.query) {
-          if (state.searchSortKey === k) state.searchSortDir = -state.searchSortDir;
-          else { state.searchSortKey = k; state.searchSortDir = 1; }
+        var touched = state.query ? sortTouched.search : sortTouched.dir;
+        var active = state.query
+          ? state.searchSortKey === k
+          : state.sortKey === k;
+        var keyRef = state.query ? 'searchSortKey' : 'sortKey';
+        var dirRef = state.query ? 'searchSortDir' : 'sortDir';
+        if (active) {
+          // 首次点击当前列：落到该列的首选方向；再点才反向。
+          if (!touched[k]) {
+            state[dirRef] = defaultSortDir(k);
+            touched[k] = true;
+          } else {
+            state[dirRef] = -state[dirRef];
+          }
         } else {
-          if (state.sortKey === k) state.sortDir = -state.sortDir;
-          else { state.sortKey = k; state.sortDir = 1; }
+          state[keyRef] = k;
+          state[dirRef] = defaultSortDir(k);
+          touched[k] = true;
         }
         renderTable();
       };
@@ -6589,7 +6830,7 @@
         if (!state.entries.length) return;
         e.preventDefault();
         state.selected.clear();
-        state.entries.forEach(function (x) { state.selected.add(x.path); });
+          state.entries.forEach(function (x) { state.selected.add(x.path); });
         renderTable();
         return;
       }
@@ -6600,7 +6841,7 @@
         if (document.querySelector('.ops-menu')) return;
         e.preventDefault();
         state.selected.clear();
-        renderTable();
+          renderTable();
         return;
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') &&
