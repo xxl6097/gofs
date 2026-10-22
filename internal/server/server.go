@@ -1140,6 +1140,8 @@ func (s *Server) writeListing(w http.ResponseWriter, r *http.Request,
 	}
 	// 只要名字列表。
 	if q.Has("simple") {
+		w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
+		defer reset()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		for _, e := range listing.Entries {
 			name := e.Name
@@ -1284,6 +1286,11 @@ func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name
 	h.Set("X-Content-Type-Options", "nosniff")
 
 	if s.cfg.DisableHTMLSandbox {
+		return
+	}
+	// --unsafe-index-html 是显式承担风险：让 index.html 在 render-index
+	// 与直接访问两条路径上行为一致。其它 HTML 仍保持沙箱。
+	if s.cfg.UnsafeIndexHTML && strings.EqualFold(filepath.Base(name), "index.html") {
 		return
 	}
 	mediaType := contentType

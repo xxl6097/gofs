@@ -133,7 +133,9 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 
 	// 不信任中央目录里的声明：在 zip.NewReader 分配内存前先做有界预检。
-	if err := archive.CheckZipDirectory(f, st.Size(), 200_000, 64<<20); err != nil {
+	// 与 office.Extract 的 maxEntries 保持一致：预检先挡住，别让
+	// zip.NewReader 先为几十万条目分配内存、再在解析阶段才报错。
+	if err := archive.CheckZipDirectory(f, st.Size(), 20_000, 64<<20); err != nil {
 		http.Error(w, "413 Payload Too Large: "+err.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}

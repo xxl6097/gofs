@@ -201,7 +201,12 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 		s.writeErr(w, err)
 		return
 	}
-	p, _ := s.authorize(w, r, urlPath)
+	p, ok := s.authorize(w, r, urlPath)
+	if !ok {
+		// 第二次 authorize 可能因认证限速失败；它已经写好响应，
+		// 不能再继续写页面，否则 429/401 会和 HTML 拼在一起。
+		return
+	}
 	// 截断要如实上报：TotalAll 是命中总数、Truncated 表示只回了一部分。
 	// 少这两个字段的话，命中一万条只显示前 3000，界面上却看不出被截断 ——
 	// 用户会以为「就这么多」。目录列举早就是这么做的，搜索照同一口径。

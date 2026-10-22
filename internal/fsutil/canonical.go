@@ -17,12 +17,25 @@ import (
 // Linux casefold 目录仍是已知限制。
 var canonicalCasePaths = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 
+// DirLister 让调用方在一次请求内复用目录项读取结果。
+//
+// 对同一个目录里的多个目标（批量上传、解压、批量改名）做大小写规范化时，
+// 每次都 os.ReadDir 会把校验放大成 O(n²)；请求级缓存把它降到 O(n)。
+type DirLister interface {
+	ReadDir(dir string) ([]os.DirEntry, error)
+}
+
 // CanonicalURLPath 把 urlPath 中**已存在**的路径段替换为磁盘上的真实名字，
 // 使路径级 ACL 与文件系统的查找语义一致。
+func (r *Roots) CanonicalURLPath(urlPath string) (string, error) {
+	return r.CanonicalURLPathWith(urlPath, nil)
+}
+
+// CanonicalURLPathWith 与 CanonicalURLPath 相同，但目录项读取走 lister。
 //
 // 不跟随软链：软链叶子仍是链接名，目标权限由 ResolveReal/真实路径复核处理。
 // 不存在的尾部按原样保留（PUT 新文件时没有可映射的真实名字）。
-func (r *Roots) CanonicalURLPath(urlPath string) (string, error) {
+func (r *Roots) CanonicalURLPathWith(urlPath string, lister DirLister) (string, error) {
 	clean := CleanURLPath(urlPath)
 	if !canonicalCasePaths || clean == "/" {
 		return clean, nil
@@ -52,7 +65,7 @@ func (r *Roots) CanonicalURLPath(urlPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	real, err := canonicalCaseFrom(res.Root(), abs)
+	real, err := canonicalCaseFrom(res.Root(), abs, lister)
 	if err != nil {
 		return "", err
 	}
@@ -61,7 +74,7 @@ func (r *Roots) CanonicalURLPath(urlPath string) (string, error) {
 
 // canonicalCaseFrom 从 root 开始逐段查找 abs 在磁盘上的真实名字。
 // root 必须是已解析软链的绝对路径；abs 必须在其下。
-func canonicalCaseFrom(root, abs string) (string, error) {
+func canonicalCaseFrom(root, abs string, lister DirLister) (string, error) {
 	rel, err := filepath.Rel(root, abs)
 	if err != nil {
 		return "", err
@@ -79,7 +92,7 @@ func canonicalCaseFrom(root, abs string) (string, error) {
 		if part == "" || part == "." {
 			continue
 		}
-		actual, exists := actualName(cur, part)
+		actual, exists := actualName(cur, part, lister)
 		cur = filepath.Join(cur, actual)
 		if !exists {
 			// 从这里开始都不存在：原样拼回去。
@@ -98,12 +111,18 @@ func canonicalCaseFrom(root, abs string) (string, error) {
 //
 // 先做精确名字快速判断；不在目录项里时，再用 Lstat 解析 name（覆盖大小写、
 // Unicode 规范化、Windows 短名/尾随空格点），并用 SameFile 找回真实名字。
-func actualName(dir, name string) (string, bool) {
+func actualName(dir, name string, lister DirLister) (string, bool) {
 	full := filepath.Join(dir, name)
 	if _, err := os.Lstat(full); err != nil {
 		return name, false
 	}
-	entries, err := os.ReadDir(dir)
+	var entries []os.DirEntry
+	var err error
+	if lister != nil {
+		entries, err = lister.ReadDir(dir)
+	} else {
+		entries, err = os.ReadDir(dir)
+	}
 	if err != nil {
 		return name, true // 读不了目录：保持原名，后续操作会给出真实错误
 	}

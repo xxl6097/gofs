@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/xxl6097/gofs/internal/fsutil"
@@ -15,15 +16,45 @@ import (
 // 缓存能避免对同一目录反复 ReadDir。
 type canonicalCacheKey struct{}
 
+type dirListing struct {
+	entries []os.DirEntry
+	err     error
+}
+
+const canonicalDirCacheMax = 256
+
 type canonicalCache struct {
-	mu sync.Mutex
-	m  map[string]string
+	mu   sync.Mutex
+	m    map[string]string
+	dirs map[string]dirListing
+}
+
+// ReadDir 实现 fsutil.DirLister：同一请求内复用目录项。
+func (c *canonicalCache) ReadDir(dir string) ([]os.DirEntry, error) {
+	c.mu.Lock()
+	if v, ok := c.dirs[dir]; ok {
+		c.mu.Unlock()
+		return v.entries, v.err
+	}
+	c.mu.Unlock()
+
+	entries, err := os.ReadDir(dir)
+
+	c.mu.Lock()
+	if len(c.dirs) < canonicalDirCacheMax {
+		c.dirs[dir] = dirListing{entries: entries, err: err}
+	}
+	c.mu.Unlock()
+	return entries, err
 }
 
 // withCanonicalCache 为每个请求准备一个规范化缓存。
 func (s *Server) withCanonicalCache(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := &canonicalCache{m: make(map[string]string)}
+		c := &canonicalCache{
+			m:    make(map[string]string),
+			dirs: make(map[string]dirListing),
+		}
 		next.ServeHTTP(w, r.WithContext(
 			context.WithValue(r.Context(), canonicalCacheKey{}, c)))
 	})
@@ -45,7 +76,15 @@ func (s *Server) canonicalPath(r *http.Request, p string) string {
 		}
 	}
 
-	canon, err := s.res.CanonicalURLPath(clean)
+	var (
+		canon string
+		err   error
+	)
+	if c != nil {
+		canon, err = s.res.CanonicalURLPathWith(clean, c)
+	} else {
+		canon, err = s.res.CanonicalURLPath(clean)
+	}
 	if err != nil || canon == "" {
 		canon = clean
 	}
