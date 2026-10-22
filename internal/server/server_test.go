@@ -3023,8 +3023,17 @@ func TestInlineContentGuards(t *testing.T) {
 
 	// 上传的网页在同源下执行脚本 = 存储型 XSS，必须沙箱化。
 	r := do(t, s, http.MethodGet, "/evil.html", nil, nil)
-	if csp := r.head.Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox") {
+	csp := r.head.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "sandbox") {
 		t.Errorf("HTML 响应缺少 CSP sandbox，实际 = %q", csp)
+	}
+	// 静态页的脚本要能跑，但文档必须留在不透明源里：
+	// allow-scripts 要有，allow-same-origin 绝不能有。
+	if !strings.Contains(csp, "allow-scripts") {
+		t.Errorf("HTML 沙箱应允许脚本运行，实际 = %q", csp)
+	}
+	if strings.Contains(csp, "allow-same-origin") {
+		t.Errorf("HTML 沙箱绝不能带 allow-same-origin，实际 = %q", csp)
 	}
 	if r.head.Get("X-Content-Type-Options") != "nosniff" {
 		t.Errorf("缺少 nosniff")
@@ -3035,10 +3044,14 @@ func TestInlineContentGuards(t *testing.T) {
 		t.Errorf("普通文件缺少 nosniff")
 	}
 
-	// SVG 同样是可执行文档。
+	// SVG 同样是可执行文档，但比 HTML 更严格：连脚本也不开放。
 	writeFile(t, filepath.Join(root, "x.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`))
-	if r := do(t, s, http.MethodGet, "/x.svg", nil, nil); !strings.Contains(r.head.Get("Content-Security-Policy"), "sandbox") {
+	svgCSP := do(t, s, http.MethodGet, "/x.svg", nil, nil).head.Get("Content-Security-Policy")
+	if !strings.Contains(svgCSP, "sandbox") {
 		t.Errorf("SVG 响应缺少 CSP sandbox")
+	}
+	if strings.Contains(svgCSP, "allow-scripts") {
+		t.Errorf("SVG 沙箱不应允许脚本，实际 = %q", svgCSP)
 	}
 
 	// 关闭开关后不再注入（保留连脚本一起预览的能力）。

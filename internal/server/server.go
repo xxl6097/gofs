@@ -1094,10 +1094,13 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 //
 // 两道处理：
 //   - nosniff：禁止浏览器按内容猜测类型（否则一个无扩展名文件也能被当 HTML 执行）；
-//   - 对 HTML / SVG / XML 加 CSP sandbox：页面仍可正常预览渲染，
-//     但里面的脚本无法读取本站数据、也无法发起同源请求。
+//   - 对 HTML / SVG / XML 加 CSP sandbox：文档进入不透明源，
+//     读不到本站 cookie / 存储，也发不出带凭据的同源请求。
 //
-// 需要连脚本一起预览时用 --no-html-sandbox 关掉第二道。
+// HTML 的 sandbox 额外带 allow-scripts：静态页面里的脚本需要能运行，
+// 但没有 allow-same-origin，脚本仍在不透明源中，拿不到本站数据。
+// SVG / XML 更严格，连脚本也不开放。需要完全关闭沙箱（脚本 + 同源）
+// 时才用 --no-html-sandbox，那是部署方明确承担风险的选择。
 func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name string) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -1108,8 +1111,12 @@ func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name
 	if !isScriptableContent(name) {
 		return
 	}
-	// sandbox 不带 allow-same-origin：文档被放进一个不透明源，
-	// 同源请求与本地存储全部失效，而渲染与样式不受影响。
+	// 注意：绝不加 allow-same-origin —— 那会让上传的页面直接变回本站页面，
+	// 存储型 XSS 的第二道防线就没了。
+	if isHTMLContent(name) {
+		h.Set("Content-Security-Policy", "sandbox allow-scripts")
+		return
+	}
 	h.Set("Content-Security-Policy", "sandbox")
 }
 
@@ -1117,6 +1124,15 @@ func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name
 var scriptableExts = map[string]bool{
 	".html": true, ".htm": true, ".xhtml": true, ".svg": true,
 	".xml": true, ".xsl": true, ".mhtml": true,
+}
+
+// htmlExts 是允许在沙箱内运行脚本的 HTML 类文档。
+var htmlExts = map[string]bool{
+	".html": true, ".htm": true, ".xhtml": true,
+}
+
+func isHTMLContent(name string) bool {
+	return htmlExts[strings.ToLower(filepath.Ext(name))]
 }
 
 // isScriptableContent 判断该文件名是否属于「浏览器会当文档执行」的类型。

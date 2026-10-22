@@ -62,7 +62,8 @@
 
 - **单击**文件名直接看：**图片 / 视频 / 音频 / PDF / Office 文档**
   在弹窗里打开，而不是下载到本地再找程序
-- **HTML 文件**：主操作是「打开」，在新标签页按页面加载（服务端 CSP sandbox）；
+- **HTML 文件**：主操作是「打开」，在新标签页按页面加载（服务端 CSP
+  `sandbox allow-scripts`：脚本可运行，但不透明源读不到本站数据）；
   编辑源码仍可从「更多 → 编辑」进入
 - **Office 文档预览**（`docx` / `xlsx` / `pptx`）：自研解析，零第三方依赖，
   多工作表 / 多幻灯片用页签切换（见下文）
@@ -445,7 +446,8 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 
 SVG 走 `<img>`：图片上下文里脚本不会执行，是安全的。
 HTML 的「打开」是把文件 URL 交给**新标签页**，由服务端按普通 HTML 响应返回，
-并附带 CSP sandbox（默认禁止脚本、禁止同源访问）。要连脚本一起跑静态站点，
+并附带 `sandbox allow-scripts`：脚本可以运行，但文档在不透明源里，
+读不到本站 cookie / 本地存储，也发不出同源请求。要连脚本和同源能力都完整保留，
 部署时需要显式 `--no-html-sandbox`，这是部署方的安全决策。
 HTML 的源码仍可从行内「更多 → 编辑」进入编辑器修改。
 
@@ -1459,9 +1461,12 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 就能借管理员的登录态为所欲为。所以：
 
 - 所有文件响应带 `X-Content-Type-Options: nosniff`（禁止按内容猜类型）；
-- HTML / SVG / XML 额外带 `Content-Security-Policy: sandbox`，
-  页面仍可正常预览渲染，但里面的脚本读不到本站数据。需要连脚本一起预览时用
-  `--no-html-sandbox`。
+- HTML / SVG / XML 额外带 `Content-Security-Policy: sandbox`：
+  - HTML 用 `sandbox allow-scripts`：静态页脚本可以运行，但文档处于不透明源，
+    读不到本站 cookie / localStorage，也发不出带凭据的同源请求；
+  - SVG / XML 用 `sandbox`，连脚本也不开放；
+  - 需要脚本和同源能力都完整保留时，部署方可显式 `--no-html-sandbox`
+    （等于主动承担存储型 XSS 风险）。
 
 **日志注入。** URL、User-Agent 以及**文件名**都会进日志。文件名这一点容易被忽略 ——
 Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admin" 200'`

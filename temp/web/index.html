@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" class="no-js">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NEON LAB · 霓虹实验室</title>
+<meta name="description" content="一个由 HTML、CSS 与原生 JavaScript 驱动的交互式视觉实验页：粒子星云、光标辉光、3D 倾斜卡片与滚动叙事。" />
+<meta name="color-scheme" content="dark light" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%2322e6ff'/%3E%3Cstop offset='1' stop-color='%23a855f7'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Crect x='18' y='18' width='28' height='28' rx='8' fill='%2305060c'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="style.css" />
+<script src="script.js"></script>
+</head>
+<body>
+
+<!-- 背景层 -->
+<div class="aurora" aria-hidden="true"><span></span><span></span><span></span></div>
+<canvas id="bg" aria-hidden="true"></canvas>
+<div class="grain" aria-hidden="true"></div>
+<div class="cursor-glow" aria-hidden="true"></div>
+<div class="cursor-dot" aria-hidden="true"></div>
+<div class="scroll-progress" aria-hidden="true"><i></i></div>
+
+<!-- 导航 -->
+<header class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="logo" href="#top" aria-label="NEON LAB 首页">
+      <span class="logo-mark" aria-hidden="true"></span>
+      <span>NEON<b class="logo-accent">LAB</b></span>
+    </a>
+    <nav class="nav-links" aria-label="主导航">
+      <a href="#features">特性</a>
+      <a href="#playground">演示</a>
+      <a href="#code">源码</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="themeToggle" type="button" aria-label="切换明暗主题">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"></path>
+        </svg>
+      </button>
+      <a class="btn btn-primary btn-sm" href="#playground">开始探索</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ============ 首屏 ============ -->
+  <section class="hero">
+    <div class="container">
+      <span class="badge reveal" data-i="0"><i class="dot"></i> 交互式视觉实验 · 零依赖</span>
+      <h1 class="glitch reveal" data-i="1" data-text="霓虹实验室">霓虹实验室</h1>
+      <p class="hero-sub reveal" data-i="2">
+        一个由纯 HTML、CSS 与原生 JavaScript 驱动的视觉实验场。<br />
+        星尘、辉光、3D 倾斜与滚动叙事，全部装进一个文件里。
+      </p>
+      <div class="typing reveal" data-i="3" aria-live="polite">
+        <span class="prompt">❯</span>
+        <span id="typeText">正在初始化粒子场…</span><span class="caret" aria-hidden="true"></span>
+      </div>
+      <div class="hero-cta reveal" data-i="4">
+        <a class="btn btn-primary" href="#playground">
+          进入粒子游乐场
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 12h14M13 6l6 6-6 6"></path>
+          </svg>
+        </a>
+        <a class="btn btn-ghost" href="#features">探索特性</a>
+      </div>
+      <div class="stats reveal" data-i="5">
+        <div class="stat"><b data-count="60">0</b><span>目标帧率</span></div>
+        <div class="stat"><b data-count="0">0</b><span>第三方依赖</span></div>
+        <div class="stat"><b data-count="100">0</b><span>% 响应式</span></div>
+        <div class="stat"><b>∞</b><span>可玩性</span></div>
+      </div>
+    </div>
+    <div class="scroll-hint" aria-hidden="true">
+      <span class="mouse"></span>
+      <span>scroll</span>
+    </div>
+  </section>
+
+  <!-- ============ 跑马灯 ============ -->
+  <div class="marquee" aria-hidden="true">
+    <div class="marquee-track">
+      <div class="marquee-group">
+        <span>Canvas 2D</span><i>✦</i><span>CSS Variables</span><i>✦</i>
+        <span>Intersection Observer</span><i>✦</i><span>Request Animation Frame</span><i>✦</i>
+        <span>Glassmorphism</span><i>✦</i><span>Zero Dependencies</span><i>✦</i>
+      </div>
+      <div class="marquee-group">
+        <span>Canvas 2D</span><i>✦</i><span>CSS Variables</span><i>✦</i>
+        <span>Intersection Observer</span><i>✦</i><span>Request Animation Frame</span><i>✦</i>
+        <span>Glassmorphism</span><i>✦</i><span>Zero Dependencies</span><i>✦</i>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 特性 ============ -->
+  <section class="section" id="features">
+    <div class="container">
+      <header class="section-head reveal">
+        <span class="eyebrow">/ 01 特性</span>
+        <h2>把浏览器当成<br /><span class="grad">一块会呼吸的画布</span></h2>
+        <p>没有框架，没有构建步骤，也没有 npm install。打开这个 HTML 文件，所有效果就已经在跑。</p>
+      </header>
+
+      <div class="grid">
+        <article class="card" data-tilt data-i="0">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <circle cx="6" cy="18" r="2"></circle><circle cx="18" cy="6" r="2"></circle>
+              <circle cx="18" cy="18" r="2"></circle><circle cx="6" cy="6" r="2"></circle>
+              <path d="M8 18h8M18 8v8M6 8v8M8 6h8"></path>
+            </svg>
+          </div>
+          <h3>星尘粒子场</h3>
+          <p>上百颗会闪烁的星星铺在背景里，随光标产生视差。偶尔还有一颗流星划过夜空。</p>
+          <span class="card-tag">Canvas 2D</span>
+        </article>
+
+        <article class="card" data-tilt data-i="1">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <path d="M12 3v3M12 18v3M3 12h3M18 12h3"></path>
+              <circle cx="12" cy="12" r="3.2"></circle>
+              <circle cx="12" cy="12" r="7.5" stroke-dasharray="2 4"></circle>
+            </svg>
+          </div>
+          <h3>光标辉光</h3>
+          <p>一团用径向渐变点亮的柔光跟着指针缓缓移动，自带缓动，不抢内容的风头。</p>
+          <span class="card-tag">Pointer Events</span>
+        </article>
+
+        <article class="card" data-tilt data-i="2">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"></path>
+              <path d="M3 7l9 5 9-5M12 12v10"></path>
+            </svg>
+          </div>
+          <h3>3D 倾斜卡片</h3>
+          <p>指针位置换算成旋转角度，卡片会朝你倾斜，光斑也跟着在表面流动。</p>
+          <span class="card-tag">CSS Transform</span>
+        </article>
+
+        <article class="card" data-tilt data-i="3">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <path d="M12 20V4M6 10l6-6 6 6"></path>
+              <path d="M4 20h16"></path>
+            </svg>
+          </div>
+          <h3>滚动叙事</h3>
+          <p>IntersectionObserver 在元素进入视野时点亮它们，错峰出现，像被逐行渲染出来。</p>
+          <span class="card-tag">Scroll Reveal</span>
+        </article>
+
+        <article class="card" data-tilt data-i="4">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" opacity=".35" stroke="none"></path>
+            </svg>
+          </div>
+          <h3>一键换肤</h3>
+          <p>明暗两套配色全靠 CSS 变量，点一下按钮整页换装，选择会被记住。</p>
+          <span class="card-tag">CSS Variables</span>
+        </article>
+
+        <article class="card" data-tilt data-i="5">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+              <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"></path>
+            </svg>
+          </div>
+          <h3>为性能让路</h3>
+          <p>画布按设备像素比自适应，标签页隐藏时自动停摆，还照顾了「减少动态效果」设置。</p>
+          <span class="card-tag">60 FPS</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 演示 ============ -->
+  <section class="section" id="playground">
+    <div class="container">
+      <header class="section-head reveal">
+        <span class="eyebrow">/ 02 交互</span>
+        <h2>亲手推一把<span class="grad">粒子</span></h2>
+        <p>在画布里移动或按住鼠标，看看这团粒子会怎么回应你。下面的开关全部实时生效。</p>
+      </header>
+
+      <div class="lab reveal">
+        <div class="lab-bar">
+          <div class="lab-title">
+            <i class="pulse" aria-hidden="true"></i>
+            粒子游乐场
+            <span class="lab-sub">particle playground</span>
+          </div>
+          <div class="lab-meta">
+            <span id="fps">60 FPS</span>
+            <span class="sep" aria-hidden="true"></span>
+            <span id="pcount">120 粒子</span>
+          </div>
+        </div>
+
+        <div class="stage" id="stage">
+          <canvas id="particles" aria-hidden="true"></canvas>
+          <noscript>
+            <div class="noscript-note">
+              启用 JavaScript，即可唤醒这片粒子场
+            </div>
+          </noscript>
+          <div class="stage-hint" id="stageHint">移动指针或拖拽，推动粒子</div>
+        </div>
+
+        <div class="lab-controls">
+          <div class="segmented" role="group" aria-label="力的模式">
+            <button type="button" class="active" data-mode="repel" aria-pressed="true">斥力</button>
+            <button type="button" data-mode="attract" aria-pressed="false">引力</button>
+            <button type="button" data-mode="vortex" aria-pressed="false">涡旋</button>
+            <button type="button" data-mode="none" aria-pressed="false">自由</button>
+          </div>
+
+          <label class="slider">数量
+            <input type="range" id="countRange" min="40" max="240" step="10" value="120" aria-label="粒子数量" />
+            <output id="countOut">120</output>
+          </label>
+
+          <label class="slider">速度
+            <input type="range" id="speedRange" min="0.2" max="2" step="0.1" value="1" aria-label="粒子速度" />
+            <output id="speedOut">1.0</output>
+          </label>
+
+          <label class="slider">色相
+            <input type="range" id="hueRange" min="0" max="360" step="1" value="188" aria-label="粒子色相" />
+            <output id="hueOut">188</output>
+          </label>
+
+          <button type="button" class="btn btn-ghost btn-sm" id="pauseBtn">暂停</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="resetBtn">重置</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 源码 ============ -->
+  <section class="section" id="code">
+    <div class="container code-wrap">
+      <div class="code-copy reveal">
+        <span class="eyebrow">/ 03 源码</span>
+        <h2>复制走，<br /><span class="grad">随便改</span></h2>
+        <p>整个页面没有一行第三方代码。核心的斥力逻辑只有十几行——改一下半径和系数，手感就完全不同。</p>
+        <button type="button" class="btn btn-primary" id="copyBtn">复制片段</button>
+      </div>
+
+      <div class="code-panel reveal">
+        <div class="code-head">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>particle.js</span>
+          <span class="code-lang">JavaScript</span>
+        </div>
+        <pre><code id="codeBlock"><span class="tok-com">// 粒子会被光标推开 —— 就这么几行</span>
+<span class="tok-kw">function</span> <span class="tok-fn">repel</span>(p, mouse, R = <span class="tok-num">120</span>) {
+  <span class="tok-kw">const</span> dx = p.x - mouse.x;
+  <span class="tok-kw">const</span> dy = p.y - mouse.y;
+  <span class="tok-kw">const</span> d  = Math.<span class="tok-fn">hypot</span>(dx, dy) || <span class="tok-num">1</span>;
+
+  <span class="tok-kw">if</span> (d &lt; R) {
+    <span class="tok-kw">const</span> f = (<span class="tok-num">1</span> - d / R) * <span class="tok-num">2.4</span>;
+    p.vx += (dx / d) * f;
+    p.vy += (dy / d) * f;
+  }
+}
+
+<span class="tok-com">// 每帧调用一次，剩下的交给物理</span>
+<span class="tok-kw">for</span> (<span class="tok-kw">const</span> p <span class="tok-kw">of</span> particles) {
+  <span class="tok-fn">repel</span>(p, pointer);
+  p.x += p.vx;
+  p.y += p.vy;
+}</code></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="container footer-inner">
+    <a class="logo" href="#top">
+      <span class="logo-mark" aria-hidden="true"></span>
+      <span>NEON<b class="logo-accent">LAB</b></span>
+    </a>
+    <p>用 HTML · CSS · JavaScript 手工打造 · 无任何第三方依赖</p>
+    <a class="to-top" href="#top">回到顶部 ↑</a>
+  </div>
+</footer>
+
+</body>
+</html>
