@@ -22,6 +22,11 @@ const (
 	// sessionMaxEntries 是会话表的上限，防止只登录不登出把它撑爆。
 	// 满了先清一遍过期的；仍然满就拒绝新会话（宁可让人重登，也不无限吃内存）。
 	sessionMaxEntries = 4096
+	// sessionMaxPerUser 是单个账号的会话数上限。
+	//
+	// 没有它，一个有效账号（哪怕是低权限账号）反复登录就能把整张表占满，
+	// 让其他所有用户都登不进来；有了它，超出的旧会话会被最旧的替换掉。
+	sessionMaxPerUser = 16
 	// sessionTokenBytes 是 token 的随机字节数。256 位，不可枚举。
 	sessionTokenBytes = 32
 )
@@ -48,6 +53,25 @@ func (s *Session) expired(now time.Time) bool {
 // 调用方需持有锁，故以此为名。
 func (a *Authenticator) newSessionLocked(user string) (string, bool) {
 	now := time.Now()
+	// 先按账号淘汰最旧的会话：防止单个账号把全局会话表占满，
+	// 导致其他人全部无法登录。
+	if sessionMaxPerUser > 0 {
+		count := 0
+		oldestToken := ""
+		var oldest time.Time
+		for token, s := range a.sessions {
+			if s.User != user {
+				continue
+			}
+			count++
+			if oldestToken == "" || s.Created.Before(oldest) {
+				oldestToken, oldest = token, s.Created
+			}
+		}
+		if count >= sessionMaxPerUser && oldestToken != "" {
+			delete(a.sessions, oldestToken)
+		}
+	}
 	// 惰性清理：只在表满时才扫一遍。为一个短生命周期对象常驻 goroutine
 	// 不划算，而「满了才清」足以保证它不会无限增长。
 	if len(a.sessions) >= sessionMaxEntries {

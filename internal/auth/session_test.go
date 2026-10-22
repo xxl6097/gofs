@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -217,8 +218,10 @@ func TestSessionExpiry(t *testing.T) {
 // 也不无限吃内存。这里所有会话都是新鲜的，清不掉，所以到顶就该拒绝。
 func TestSessionTableBounded(t *testing.T) {
 	a := newSessionAuth(t)
+	// 用不同账号填满全局表：同一个账号会先触发 per-user 上限，
+	// 那测的就不是这里要验证的「全局上限」了。
 	for i := 0; i < sessionMaxEntries; i++ {
-		if _, ok := a.NewSession("admin"); !ok {
+		if _, ok := a.NewSession(fmt.Sprintf("user-%d", i)); !ok {
 			t.Fatalf("第 %d 次就建不出会话了，离上限还早", i)
 		}
 	}
@@ -226,7 +229,7 @@ func TestSessionTableBounded(t *testing.T) {
 		t.Fatalf("会话数 %d，期望正好到上限 %d", n, sessionMaxEntries)
 	}
 	// 顶上再要一个：应当被拒绝，而不是把表撑大。
-	if _, ok := a.NewSession("admin"); ok {
+	if _, ok := a.NewSession("another-user"); ok {
 		t.Fatal("会话表已满且无过期项，仍然发出了新会话")
 	}
 	if n := a.SessionCount(); n > sessionMaxEntries {
@@ -265,4 +268,25 @@ func TestSessionConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestSessionPerUserBounded 确认单个账号不能占满整张会话表。
+func TestSessionPerUserBounded(t *testing.T) {
+	a := newSessionAuth(t)
+	for i := 0; i < sessionMaxPerUser+10; i++ {
+		if _, ok := a.NewSession("admin"); !ok {
+			t.Fatalf("第 %d 次登录失败（per-user 上限不该拒绝，只该淘汰旧的）", i)
+		}
+	}
+	a.mu.RLock()
+	n := 0
+	for _, s := range a.sessions {
+		if s.User == "admin" {
+			n++
+		}
+	}
+	a.mu.RUnlock()
+	if n != sessionMaxPerUser {
+		t.Fatalf("admin 的会话数 = %d，期望 %d", n, sessionMaxPerUser)
+	}
 }

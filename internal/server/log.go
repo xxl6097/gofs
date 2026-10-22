@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -21,12 +22,15 @@ type Logger struct {
 	file    *os.File
 	format  string
 	enabled bool
+	// trusted 是可信反向代理网段；只有直连对端落在其中时才采信转发头。
+	trusted []*net.IPNet
 }
 
 // NewLogger 依据配置构造日志器。
 // format 为空串表示关闭访问日志；file 为空串表示输出到 stdout。
-func NewLogger(format, file string) (*Logger, error) {
-	l := &Logger{out: os.Stdout, format: format, enabled: true}
+// trusted 为空表示不信任任何转发头。
+func NewLogger(format, file string, trusted []*net.IPNet) (*Logger, error) {
+	l := &Logger{out: os.Stdout, format: format, enabled: true, trusted: trusted}
 	if format == "" {
 		// 未显式指定时使用默认格式；显式传空串（GOFS_LOG_FORMAT=""）仍按默认处理，
 		// 需要关闭访问日志请传 --log-format=none。
@@ -36,7 +40,8 @@ func NewLogger(format, file string) (*Logger, error) {
 		l.enabled = false
 	}
 	if file != "" {
-		f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		// 日志里可能出现 URL、用户名等敏感信息；默认只给当前用户读写。
+		f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("打开日志文件失败: %w", err)
 		}
@@ -71,25 +76,41 @@ func (l *Logger) Log(r *http.Request, status int, user string, start time.Time) 
 // 不是最长匹配。所以所有 $request_* 都必须排在 $request 之前 —— 否则
 // $request_method 会先被 $request 吃掉，渲染成 "GET /a HTTP/1.1_method"。
 func (l *Logger) render(r *http.Request, status int, user string, start time.Time) string {
+	// 查询串里可能带着密码、上传密钥或分享令牌；它们都是 bearer 凭据，
+	// 不能原样落进访问日志。
+	uri := redactURI(r.URL.RequestURI())
 	repl := strings.NewReplacer(
 		"$time_iso8601", start.Format(time.RFC3339),
 		"$time_local", start.Format("2006-01-02T15:04:05-07:00"),
 		"$log_level", levelFor(status),
-		"$remote_addr", clientIP(r),
+		"$remote_addr", clientIP(r, l.trusted),
 		"$remote_user", user,
 		"$request_method", r.Method,
-		"$request_uri", r.URL.RequestURI(),
+		"$request_uri", uri,
 		// $request_time 与 nginx 同名同义：从开始处理到响应完成的秒数，保留毫秒。
 		// 上传排查时它就派上用场 —— 服务端真正花了多久，和客户端观察到的时间
 		// 一比，就能立刻分清「慢在服务端」还是「慢在链路/客户端」。
 		"$request_time", fmt.Sprintf("%.3f", time.Since(start).Seconds()),
 		// $request 必须排在最后：它是上面几个变量的前缀。
-		"$request", fmt.Sprintf("%s %s %s", r.Method, r.URL.RequestURI(), r.Proto),
+		"$request", fmt.Sprintf("%s %s %s", r.Method, uri, r.Proto),
 		"$status", fmt.Sprintf("%d", status),
 	)
 	out := repl.Replace(l.format)
 	out = replaceHTTPHeaders(out, r)
 	return sanitizeLogLine(out)
+}
+
+// sensitiveQueryRe 匹配查询串里的敏感参数值。
+//
+// 覆盖 gofs 自己支持的所有凭据入口：?pass= 登录、?key= 上传密钥、
+// ?share= 分享令牌，以及第三方客户端常用的 token/api_key 等写法。
+var sensitiveQueryRe = regexp.MustCompile(
+	`(?i)([?&](?:pass|password|pwd|key|token|access_token|share|secret|api_?key)=)[^&#]*`,
+)
+
+// redactURI 把 URI 查询串中的敏感值替换为 ***。
+func redactURI(uri string) string {
+	return sensitiveQueryRe.ReplaceAllString(uri, "${1}***")
 }
 
 // sanitizeLogLine 清理日志行里的控制字符。
@@ -157,7 +178,14 @@ func replaceHTTPHeaders(line string, r *http.Request) string {
 			end++
 		}
 		key := strings.ReplaceAll(line[idx+len("$http_"):end], "_", "-")
-		b.WriteString(r.Header.Get(key))
+		value := r.Header.Get(key)
+		// Authorization / Cookie 里是可直接复用的凭据，自定义日志格式
+		// 即使显式写了它们，也不该把值原样落盘。
+		switch strings.ToLower(key) {
+		case "authorization", "proxy-authorization", "cookie":
+			value = "***"
+		}
+		b.WriteString(value)
 		// 只继续扫**原始行**剩下的部分，替换进来的值不再回头处理。
 		line = line[end:]
 	}
@@ -182,21 +210,103 @@ func levelFor(status int) string {
 }
 
 // clientIP 提取客户端地址（不含端口）。
-func clientIP(r *http.Request) string {
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		if i := strings.Index(v, ","); i >= 0 {
-			return strings.TrimSpace(v[:i])
-		}
-		return strings.TrimSpace(v)
+//
+// ⚠️ 转发头只在**直连对端是可信代理**时才采信。否则任何客户端都能用
+// 一个伪造的 X-Forwarded-For 绕过认证限速、伪造日志里的来源地址，
+// 甚至故意把某个 IP 打进封禁名单。
+//
+// X-Forwarded-For 从右往左找第一个非可信地址：右侧是代理追加的，
+// 最左侧那一段可能是客户端自己塞进来的，不能直接信。
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	if v := r.Header.Get("X-Real-Ip"); v != "" {
-		return v
+	host = strings.TrimSpace(host)
+
+	if !trustedPeer(r, trusted) {
+		return host
+	}
+
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			s := strings.TrimSpace(parts[i])
+			ip := net.ParseIP(s)
+			if ip == nil {
+				continue
+			}
+			if !ipInAny(ip, trusted) {
+				return ip.String()
+			}
+		}
+		// 全是可信地址：退回最左侧的合法地址（多层可信代理的场景）。
+		for _, p := range parts {
+			if ip := net.ParseIP(strings.TrimSpace(p)); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Real-Ip")); v != "" {
+		if ip := net.ParseIP(v); ip != nil {
+			return ip.String()
+		}
+	}
+	return host
+}
+
+// trustedPeer 判断直连对端是否是可信代理。
+//
+// 对端地址不是 IP 时（unix socket 的 RemoteAddr 为空），只有在显式配置了
+// 可信代理的前提下才接受：能连上 socket 的本就只有有权访问该文件的进程，
+// 转发头正是由它填进来的。
+func trustedPeer(r *http.Request, trusted []*net.IPNet) bool {
+	if len(trusted) == 0 {
+		return false
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return true
+	}
+	return ipInAny(ip, trusted)
+}
+
+// ipInAny 判断 ip 是否落在任一网段内。
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTrustedProxies 把配置里的 IP / CIDR 字符串解析成网段。
+// 非法项在 config.Normalize 已经拒绝，这里再静默跳过一道。
+func parseTrustedProxies(vals []string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, raw := range vals {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if ip := net.ParseIP(raw); ip != nil {
+			bits := 128
+			if ip = ip.To4(); ip != nil {
+				bits = 32
+			}
+			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		if _, n, err := net.ParseCIDR(raw); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // Infof 输出内部信息日志。

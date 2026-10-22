@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -85,8 +86,8 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 放宽本次请求的读取时限：大文件上传需要时间。
 	// 用的是「无进展超时」——只要还在往里传就不会被打断，
 	// 只有连接真正停滞（比如每秒发几个字节占着名额）才会被断开。
-	// [实验] 暂时去掉无进展超时包装
-	_ = w
+	resetRead := withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	defer resetRead()
 	// 单文件大小上限：没有它，一个请求就能把磁盘写满。
 	// 取值走 settings 而不是 cfg —— 它可以在页面上被管理员随时调整。
 	maxSize := s.settings.UploadMaxSize()
@@ -201,8 +202,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 	defer release()
-	// [实验] 暂时去掉无进展超时包装
-	_ = w
+	resetRead := withReadProgress(w, r, s.cfg.UploadReadTimeout)
+	defer resetRead()
 	formMax := s.settings.UploadMaxSize()
 	if !requestBody(w, r, formMax, "表单内容") {
 		return
@@ -273,7 +274,13 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 
-	saved := make([]string, 0, len(files))
+	// 先做完整校验，再开始写盘：权限/软链检查要覆盖每一个目标文件，
+	// 且不能出现「前几个已覆盖、后面才发现越权」的半完成状态。
+	type uploadTarget struct {
+		fh  *multipart.FileHeader
+		dst string
+	}
+	targets := make([]uploadTarget, 0, len(files))
 	skipped := make([]string, 0)
 	for _, fh := range files {
 		name := filepath.Base(strings.ReplaceAll(fh.Filename, "\\", "/"))
@@ -287,18 +294,48 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 			continue
 		}
 		dst := filepath.Join(base, name)
-		src, err := fh.Open()
+		// 目标路径按**文件本身**复核权限，而不是只看目标目录：
+		// ACL 支持最长前缀，`/docs:rw` + `/docs/secret.txt:r` 这种
+		// 「目录可写、单文件只读」的规则不能被一次表单上传绕过。
+		fileURL := path.Join(destDir, name)
+		if p.UploadKey != nil {
+			if !p.UploadKey.AllowsPath(fileURL) {
+				http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围", http.StatusForbidden)
+				return
+			}
+		} else if s.checkPerm(r, fileURL) != auth.PermReadWrite {
+			http.Error(w, "403 Forbidden: 对目标文件没有写权限", http.StatusForbidden)
+			return
+		}
+		if !s.cfg.AllowSymlink {
+			// 不接受写入到已存在的软链：悬空软链会写到根外，根内软链
+			// 也可能把内容导到另一条 ACL 路径上。
+			if fi, err := os.Lstat(dst); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				http.Error(w, "403 Forbidden: 目标文件是符号链接", http.StatusForbidden)
+				return
+			}
+			if err := fsutil.EnsureWithin(base, dst); err != nil {
+				http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+				return
+			}
+		}
+		targets = append(targets, uploadTarget{fh: fh, dst: dst})
+	}
+
+	saved := make([]string, 0, len(targets))
+	for _, t := range targets {
+		src, err := t.fh.Open()
 		if err != nil {
 			s.writeErr(w, err)
 			return
 		}
-		err = savePart(dst, src)
+		err = savePart(t.dst, src)
 		src.Close()
 		if err != nil {
 			s.writeErr(w, err)
 			return
 		}
-		rel, _ := s.res.Rel(dst)
+		rel, _ := s.res.Rel(t.dst)
 		saved = append(saved, rel)
 	}
 
@@ -535,7 +572,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 			s.writeErr(w, err)
 			return
 		}
-		if err := copyTree(src, dst); err != nil {
+		if err := copyTree(src, dst, s.cfg.AllowSymlink); err != nil {
 			s.writeErr(w, err)
 			return
 		}
@@ -548,10 +585,24 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 }
 
 // copyTree 递归复制文件或目录。
-func copyTree(src, dst string) error {
-	info, err := os.Stat(src)
+//
+// followSymlinks 为 false（默认的 !--allow-symlink）时跳过软链，不跟随。
+// 否则跨设备 MOVE 的兜底分支会把根外文件内容复制进来，或者沿着
+// 「软链 → 上级目录」无限递归。
+func copyTree(src, dst string, followSymlinks bool) error {
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		if !followSymlinks {
+			return nil
+		}
+		// 显式允许软链的部署保持旧语义：复制软链指向的内容。
+		info, err = os.Stat(src)
+		if err != nil {
+			return err
+		}
 	}
 	if !info.IsDir() {
 		in, err := os.Open(src)
@@ -569,7 +620,7 @@ func copyTree(src, dst string) error {
 		return err
 	}
 	for _, e := range entries {
-		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), followSymlinks); err != nil {
 			return err
 		}
 	}

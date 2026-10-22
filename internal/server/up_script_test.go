@@ -236,7 +236,10 @@ func TestUpScriptRequiresUploadEnabled(t *testing.T) {
 // 用户拿到的脚本会连不上（或者被中间层重定向掉）。这是很常见的部署形态。
 func TestUpScriptHonoursForwardedProto(t *testing.T) {
 	root := t.TempDir()
-	s := newSessionServer(t, root, "--allow-upload")
+	cfg := testConfig(t, root, "-a", "admin:secret@/:rw", "--allow-upload")
+	// 转发头只有在直连对端是可信代理时才会被采信。
+	cfg.TrustedProxies = []string{"192.0.2.0/24"}
+	s := newTestServer(t, cfg)
 	token := makeKey(t, s, "/")
 
 	got := fetchScript(t, s, upScriptName+"?key="+token,

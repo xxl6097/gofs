@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -339,6 +340,13 @@ type Config struct {
 	AuthFailLimit int
 	// AuthFailWindow 为认证失败的统计窗口与封禁时长。
 	AuthFailWindow time.Duration
+	// TrustedProxies 是允许提供 X-Forwarded-For / X-Real-IP /
+	// X-Forwarded-Proto 的反向代理地址（IP 或 CIDR）。
+	//
+	// 默认为空：此时只认 r.RemoteAddr，客户端伪造转发头没有意义。
+	// 部署在反向代理之后时必须显式配置，否则限速与访问日志看到的
+	// 都会是代理的地址。
+	TrustedProxies []string
 	// MaxHeaderBytes 为请求行 + 请求头允许的最大字节数。
 	MaxHeaderBytes int
 	// MaxNameBytes 为允许的单个文件名最大字节数。
@@ -653,6 +661,7 @@ func (c *Config) ApplyEnv() {
 	c.MaxConcurrentJobs = envInt("GOFS_MAX_CONCURRENT_JOBS", c.MaxConcurrentJobs)
 	c.AuthFailLimit = envInt("GOFS_AUTH_FAIL_LIMIT", c.AuthFailLimit)
 	c.AuthFailWindow = envDuration("GOFS_AUTH_FAIL_WINDOW", c.AuthFailWindow)
+	c.TrustedProxies = envList("GOFS_TRUSTED_PROXIES", c.TrustedProxies)
 	c.MaxHeaderBytes = envInt("GOFS_MAX_HEADER_BYTES", c.MaxHeaderBytes)
 	c.MaxNameBytes = envInt("GOFS_MAX_NAME_BYTES", c.MaxNameBytes)
 	c.DisableCSRFProtect = envBool("GOFS_DISABLE_CSRF_PROTECT", c.DisableCSRFProtect)
@@ -776,6 +785,10 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 			return fmt.Errorf("无法解析时长 %q: %w", v, err)
 		}
 		cfg.AuthFailWindow = d
+		return nil
+	})
+	fs.Func("trusted-proxies", "可信反向代理地址（IP 或 CIDR，逗号分隔）；只有它们发来的转发头才会被采信", func(v string) error {
+		cfg.TrustedProxies = append(cfg.TrustedProxies, splitList(v)...)
 		return nil
 	})
 	fs.IntVar(&cfg.MaxHeaderBytes, "max-header-bytes", cfg.MaxHeaderBytes,
@@ -1006,6 +1019,26 @@ func (c *Config) Normalize() error {
 	if c.AuthFailLimit > 0 && c.AuthFailWindow <= 0 {
 		return errors.New("--auth-fail-window 必须为正时长")
 	}
+	// 转发头只在直连对端是可信代理时才采信；地址写错会让限速与日志
+	// 悄悄退回代理 IP，所以这里直接拒绝非法值。
+	{
+		var normalized []string
+		for _, raw := range c.TrustedProxies {
+			for _, item := range splitList(raw) {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
+				}
+				if net.ParseIP(item) == nil {
+					if _, _, err := net.ParseCIDR(item); err != nil {
+						return fmt.Errorf("--trusted-proxies 里的 %q 不是合法 IP 或 CIDR", item)
+					}
+				}
+				normalized = append(normalized, item)
+			}
+		}
+		c.TrustedProxies = normalized
+	}
 	if c.MaxHeaderBytes < 4096 {
 		// 4 KiB 已经放不下正常的 Cookie 与长 URL，再小只会伤到自己。
 		return errors.New("--max-header-bytes 至少为 4096")
@@ -1174,6 +1207,10 @@ func usageText() string {
                              同时进行的上传/解压任务数上限，默认 64
       --auth-fail-limit <n>  同一来源认证失败多少次后临时封禁，默认 10；0 表示关闭
       --auth-fail-window <d> 认证失败的统计窗口与封禁时长，默认 5m
+      --trusted-proxies <ips>
+                            可信反向代理地址（IP/CIDR，逗号分隔）。
+                            只有直连对端在列表内时才采信 X-Forwarded-For /
+                            X-Real-IP；默认不信任任何转发头
       --max-header-bytes <n> 请求行+请求头允许的最大字节数，默认 64KiB
       --max-name-bytes <n>   允许的单个文件名最大字节数，默认 255
       --hash-max-size <n>    允许计算 ?hash 摘要的最大文件字节数，默认 512MiB

@@ -7,13 +7,19 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // zipReader 实现 zip 归档的读取。
 type zipReader struct {
-	f  *os.File
-	zr *zip.Reader
+	f      *os.File
+	zr     *zip.Reader
+	limits Limits
 }
+
+// SetLimits 设置列表与单条目预览上限。
+func (z *zipReader) SetLimits(l Limits) { z.limits = l }
 
 // newZipReader 构造 zip 读取器。
 func newZipReader(f *os.File) (*zipReader, error) {
@@ -41,10 +47,17 @@ func isEncrypted(f *zip.File) bool { return f.Flags&0x1 != 0 }
 
 // List 遍历 zip 内所有条目。
 func (z *zipReader) List(ctx context.Context) ([]Entry, error) {
-	out := make([]Entry, 0, len(z.zr.File))
+	capHint := len(z.zr.File)
+	if z.limits.MaxFiles > 0 && capHint > z.limits.MaxFiles {
+		capHint = z.limits.MaxFiles
+	}
+	out := make([]Entry, 0, capHint)
 	for _, f := range z.zr.File {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if z.limits.MaxFiles > 0 && len(out) >= z.limits.MaxFiles {
+			break
 		}
 		out = append(out, zipEntry(f))
 	}
@@ -74,6 +87,10 @@ func (z *zipReader) OpenEntry(_ context.Context, name string) (io.ReadCloser, En
 		}
 		if isEncrypted(f) {
 			return nil, Entry{}, ErrEncrypted
+		}
+		if z.limits.MaxEntryBytes > 0 && int64(f.UncompressedSize64) > z.limits.MaxEntryBytes {
+			return nil, Entry{}, fmt.Errorf("%w：%s 解压后 %d 字节，超过预览上限 %d",
+				ErrEntryTooLarge, f.Name, f.UncompressedSize64, z.limits.MaxEntryBytes)
 		}
 		rc, err := f.Open()
 		if err != nil {
@@ -125,6 +142,17 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			// 早先只在写文件的路径上 checkNext，目录分支整个绕过了上限。
 			if err := limit.checkNext(f.Name, 0); err != nil {
 				return rep, err // 与文件分支一致：超限即中止，不静默跳过
+			}
+			// 目录条目同样要防软链：目标位置可能已有一条指向根外的软链，
+			// os.MkdirAll 会顺着它在根外建目录。
+			if !opts.AllowSymlink {
+				if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
+					rep.Warnings = append(rep.Warnings, err.Error())
+					prog.Skipped++
+					rep.Skipped++
+					report()
+					continue
+				}
 			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return rep, err

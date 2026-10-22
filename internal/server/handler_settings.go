@@ -204,6 +204,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req settingsRequest
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
 	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<10))
 	if err := dec.Decode(&req); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -459,9 +461,9 @@ func (s *Server) migrateSessionCookie(w http.ResponseWriter, r *http.Request, ol
 	}
 	oldPath, newPath := cookiePathForPrefix(oldPrefix), cookiePathForPrefix(newPrefix)
 	if oldPath != newPath {
-		s.clearSessionCookieAt(w, oldPath)
+		s.clearSessionCookieAt(w, r, oldPath)
 	}
-	s.setSessionCookie(w, tok)
+	s.setSessionCookie(w, r, tok)
 }
 
 // maxTitleRunes 是站点标题允许的最大字符数（按字符数，不是字节数）。
@@ -668,14 +670,22 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 	if !s.auth.Enabled() {
 		return permResult{Perm: auth.PermReadWrite, Authenticated: true}, true
 	}
-	user, pass, ok := credentials(r)
-	if !ok || user == "" || !s.auth.Verify(user, pass) {
+	ip, ok := s.checkAuthLimit(w, r)
+	if !ok {
+		return permResult{}, false
+	}
+	user, pass, hasCred := credentials(r)
+	if !hasCred || user == "" || !s.auth.Verify(user, pass) {
+		if hasCred {
+			s.noteAuthFailure(ip)
+		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 		}
 		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 		return permResult{}, false
 	}
+	s.noteAuthSuccess(ip)
 	perm := s.auth.Lookup("/", user, pass, true)
 	return permResult{Perm: perm, User: user, Authenticated: true}, true
 }
@@ -727,16 +737,47 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 	if !s.auth.Enabled() {
 		return true
 	}
-	if s.isAdminRequest(r) {
-		return true
+	ip, ok := s.checkAuthLimit(w, r)
+	if !ok {
+		return false
 	}
-	if _, _, ok := credentials(r); !ok {
-		// 没带凭据：让他先登录，而不是直接判定「无权限」。
+
+	user, pass, hasCred := credentials(r)
+	if hasCred {
+		// 显式凭据：先验密码，再判断权限。密码错误才计入失败，
+		// 一个合法的普通账号访问管理接口得到的是 403，而不是被封禁。
+		if !s.auth.Verify(user, pass) {
+			s.noteAuthFailure(ip)
+			if shouldChallenge(r) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+			}
+			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+			return false
+		}
+		s.noteAuthSuccess(ip)
+		if s.isAdminRequest(r) {
+			return true
+		}
+		http.Error(w, "403 Forbidden: "+action+"需要对服务根拥有读写权限",
+			http.StatusForbidden)
+		return false
+	}
+
+	// 没有 Basic 凭据时只能靠会话 cookie。无效 cookie 计入失败
+	// （伪造/过期 cookie 和猜密码是一回事）；合法但非管理员的会话
+	// 只回 403，不能把正常用户打进封禁名单。
+	if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
+		if sessionToken(r) != "" {
+			s.noteAuthFailure(ip)
+		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 		}
 		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 		return false
+	}
+	if s.isAdminRequest(r) {
+		return true
 	}
 	http.Error(w, "403 Forbidden: "+action+"需要对服务根拥有读写权限",
 		http.StatusForbidden)

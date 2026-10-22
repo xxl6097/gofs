@@ -248,6 +248,12 @@ func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status in
 // tryServeIndex 在目录下尝试返回 index.html。
 func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir string) bool {
 	idx := filepath.Join(dir, "index.html")
+	if !s.cfg.AllowSymlink {
+		// 不服务指向根外的 index.html：它会被浏览器当成同源页面执行。
+		if fi, err := os.Lstat(idx); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+	}
 	st, err := os.Stat(idx)
 	if err != nil || st.IsDir() {
 		return false
@@ -257,6 +263,7 @@ func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir strin
 		return false
 	}
 	defer f.Close()
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
 	return true
 }
@@ -264,6 +271,12 @@ func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir strin
 // serveIndexFallback 在 SPA 模式下把未命中的路径回退到根目录 index.html。
 func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 	idx := filepath.Join(s.res.Root(), "index.html")
+	if !s.cfg.AllowSymlink {
+		if fi, err := os.Lstat(idx); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
+	}
 	f, err := os.Open(idx)
 	if err != nil {
 		if s.ui.notFound != nil {
@@ -281,6 +294,7 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
 }
 

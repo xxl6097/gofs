@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
 // tempFileThreshold 超过该大小的包内文件在预览下载时改落临时文件，避免占用过多内存。
@@ -24,7 +26,11 @@ type tarReader struct {
 	format  Format
 	gzipped bool
 	mu      sync.Mutex
+	limits  Limits
 }
+
+// SetLimits 设置列表与单条目预览上限。
+func (t *tarReader) SetLimits(l Limits) { t.limits = l }
 
 // newTarReader 构造未压缩 tar 读取器。
 func newTarReader(f *os.File) (*tarReader, error) {
@@ -80,6 +86,9 @@ func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取 tar 失败: %w", err)
 		}
+		if t.limits.MaxFiles > 0 && len(out) >= t.limits.MaxFiles {
+			break
+		}
 		out = append(out, tarEntry(hdr))
 	}
 	return out, nil
@@ -132,6 +141,10 @@ func (t *tarReader) OpenEntry(ctx context.Context, name string) (io.ReadCloser, 
 		}
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
 			return nil, Entry{}, fmt.Errorf("%q 不是普通文件，无法直接下载", want)
+		}
+		if t.limits.MaxEntryBytes > 0 && hdr.Size > t.limits.MaxEntryBytes {
+			return nil, Entry{}, fmt.Errorf("%w：%s 解压后 %d 字节，超过预览上限 %d",
+				ErrEntryTooLarge, want, hdr.Size, t.limits.MaxEntryBytes)
 		}
 
 		if hdr.Size <= tempFileThreshold {
@@ -226,6 +239,16 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			if err := limit.checkNext(hdr.Name, 0); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()
 				return rep, err // 与文件分支一致：超限即中止
+			}
+			// 同 zip 侧：目录目标也不能穿过根外软链。
+			if !opts.AllowSymlink {
+				if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
+					prog.Skipped++
+					rep.Skipped++
+					rep.Warnings = append(rep.Warnings, err.Error())
+					report()
+					continue
+				}
 			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()

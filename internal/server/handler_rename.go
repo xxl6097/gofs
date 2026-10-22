@@ -114,6 +114,8 @@ func (s *Server) handleRenameBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req renameReqJSON
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
 	dec := json.NewDecoder(io.LimitReader(r.Body, renameBodyLimit))
 	if err := dec.Decode(&req); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -399,6 +401,11 @@ func (s *Server) planRenameItem(r *http.Request, pl *renamePlan, vacating map[st
 	// 会放行一次注定 EACCES 的改名，按目录判才是对的。
 	if s.checkPerm(r, pl.dirURL) != auth.PermReadWrite {
 		return "对所在目录没有写权限"
+	}
+	// 源路径本身也要有写权限：规则可能给出「目录 rw + 某个文件/子目录 r」，
+	// 只看目录会把只读条目改名（等于绕过只读限制）。
+	if s.checkPerm(r, pl.path) != auth.PermReadWrite {
+		return "对源路径没有写权限"
 	}
 	if pl.srcAbs == pl.dstAbs {
 		// 名称没变：不是错误，外面按 skipped 报（放在「目标已存在」之前判，

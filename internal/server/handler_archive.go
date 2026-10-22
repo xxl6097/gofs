@@ -106,6 +106,8 @@ func (s *Server) handleZipRequest(w http.ResponseWriter, r *http.Request, urlPat
 		http.Error(w, "400 Bad Request: 打包目标必须是目录", http.StatusBadRequest)
 		return
 	}
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
 	picks, err := picksFromBody(r)
 	if err != nil {
 		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
@@ -193,6 +195,10 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 	name := zipDownloadName(dir, items, picked)
 
 	// ---- 阶段二：流式写出 ----
+	// 打包也是大响应：客户端连上不读时同样要有「无进展超时」，
+	// 否则会一直占着并发名额（普通文件下载走 serveFile，已有这层保护）。
+	w, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer resetWrite()
 	h := w.Header()
 	h.Set("Content-Type", "application/zip")
 	h.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`,

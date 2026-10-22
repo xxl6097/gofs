@@ -74,14 +74,26 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	// 这里刻意不用 authorize("/")：完全不相关的路径级权限不应成为
 	// 管理密钥的门槛。先验凭据，再看是否在任一目录上有写权限。
 	user, pass, hasCred := credentials(r)
+	admin := !s.auth.Enabled()
 	if s.auth.Enabled() {
+		// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
+		// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
+		ip, ok := s.checkAuthLimit(w, r)
+		if !ok {
+			return
+		}
 		if !hasCred || !s.auth.Verify(user, pass) {
+			if hasCred {
+				s.noteAuthFailure(ip)
+			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		s.noteAuthSuccess(ip)
+		admin = s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
 	}
 	if !s.auth.HasAnyWrite(user, pass, hasCred) {
 		http.Error(w, "403 Forbidden: 管理上传密钥需要有可写的目录权限", http.StatusForbidden)
@@ -90,22 +102,28 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		s.keyList(w)
+		s.keyList(w, user, admin)
 	case http.MethodPost:
 		s.keyCreate(w, r, user)
 	case http.MethodDelete:
-		s.keyRevoke(w, r)
+		s.keyRevoke(w, r, user, admin)
 	default:
 		w.Header().Set("Allow", "GET, HEAD, POST, DELETE")
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// keyList 返回全部密钥。
-func (s *Server) keyList(w http.ResponseWriter) {
+// keyList 返回密钥列表。
+//
+// 非管理员只能看到**自己创建的**密钥：否则一个只在某个子目录有写权限的
+// 账号可以看到全站密钥的范围、创建者等信息，并据此发起越权撤销。
+func (s *Server) keyList(w http.ResponseWriter, user string, admin bool) {
 	keys := s.keys.List()
 	views := make([]keyView, 0, len(keys))
 	for _, k := range keys {
+		if !admin && k.Creator != user {
+			continue
+		}
 		views = append(views, s.keyView(k))
 	}
 	s.writeJSON(w, map[string]any{
@@ -119,6 +137,8 @@ func (s *Server) keyList(w http.ResponseWriter) {
 // keyCreate 创建密钥并返回**只此一次**的明文。
 func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator string) {
 	var req keyCreateRequest
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
 	dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
 	if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
@@ -229,10 +249,23 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 }
 
 // keyRevoke 删除指定密钥。
-func (s *Server) keyRevoke(w http.ResponseWriter, r *http.Request) {
+//
+// 非管理员只能撤销自己创建的密钥。只按 id 撤销意味着任何有写权限的
+// 账号都能吊销管理员的分享链接或 CI 使用的上传密钥 —— 这是跨账号的
+// 权限破坏。
+func (s *Server) keyRevoke(w http.ResponseWriter, r *http.Request, user string, admin bool) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "400 Bad Request: 缺少 id 参数", http.StatusBadRequest)
+		return
+	}
+	k, ok := s.keys.Get(id)
+	if !ok {
+		http.Error(w, "404 Not Found: 密钥不存在或已被撤销", http.StatusNotFound)
+		return
+	}
+	if !admin && k.Creator != user {
+		http.Error(w, "403 Forbidden: 只能撤销自己创建的密钥", http.StatusForbidden)
 		return
 	}
 	if err := s.keys.Revoke(id); err != nil {

@@ -14,10 +14,36 @@ import (
 
 // gzReader 实现单文件 gzip 的读取。
 type gzReader struct {
-	f   *os.File
-	mu  sync.Mutex
-	out string // 解压后的文件名
+	f      *os.File
+	mu     sync.Mutex
+	out    string // 解压后的文件名
+	limits Limits
 }
+
+// SetLimits 设置单条目预览上限。
+func (g *gzReader) SetLimits(l Limits) { g.limits = l }
+
+// limitedReadCloser 在解压流超过上限时返回 ErrEntryTooLarge。
+// gzip 头部不携带解压后大小，只能在读取过程中累计。
+type limitedReadCloser struct {
+	rc     io.ReadCloser
+	remain int64
+	max    int64
+}
+
+func (l *limitedReadCloser) Read(p []byte) (int, error) {
+	if l.remain < 0 {
+		return 0, fmt.Errorf("%w：超过预览上限 %d 字节", ErrEntryTooLarge, l.max)
+	}
+	n, err := l.rc.Read(p)
+	l.remain -= int64(n)
+	if l.remain < 0 {
+		return n, fmt.Errorf("%w：超过预览上限 %d 字节", ErrEntryTooLarge, l.max)
+	}
+	return n, err
+}
+
+func (l *limitedReadCloser) Close() error { return l.rc.Close() }
 
 // newGzReader 构造单文件 gzip 读取器。
 func newGzReader(f *os.File) (*gzReader, error) {
@@ -86,6 +112,10 @@ func (g *gzReader) OpenEntry(ctx context.Context, name string) (io.ReadCloser, E
 	if err != nil {
 		zr.Close()
 		return nil, Entry{}, err
+	}
+	if g.limits.MaxEntryBytes > 0 {
+		return &limitedReadCloser{rc: zr, remain: g.limits.MaxEntryBytes, max: g.limits.MaxEntryBytes},
+			entries[0], nil
 	}
 	return zr, entries[0], nil
 }

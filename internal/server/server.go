@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,6 +50,8 @@ type Server struct {
 	assets   fs.FS
 	ui       *uiTemplate
 	logger   *Logger
+	// trustedProxies 是允许提供转发头的反向代理网段；空表示不信任。
+	trustedProxies []*net.IPNet
 
 	// assetTags 缓存内嵌资源的 ETag（按内容算，只算一次）。
 	// 为什么不能只用 modTime+size：见 handler_list.go 的 assetETag。
@@ -93,9 +97,16 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		return nil, err
 	}
 
-	logger, err := NewLogger(cfg.LogFormat, cfg.LogFile)
+	trustedProxies := parseTrustedProxies(cfg.TrustedProxies)
+
+	logger, err := NewLogger(cfg.LogFormat, cfg.LogFile, trustedProxies)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.AllowUpload && (cfg.RenderIndex || cfg.RenderTryIndex || cfg.RenderSPA) {
+		logger.Errorf("安全提示：已启用 render-index/SPA 且允许上传。" +
+			"服务目录中的 index.html 会作为同源页面执行（这是该模式的定义），" +
+			"请确保可上传目录存放的不是不可信内容")
 	}
 
 	// 上传密钥存储：路径为空时只保存在内存中。
@@ -106,15 +117,16 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	}
 
 	srv := &Server{
-		cfg:      cfg,
-		res:      roots,
-		auth:     authn,
-		keys:     keys,
-		guard:    newGuard(cfg),
-		settings: newRuntimeSettings(cfg, roots.Root()),
-		assets:   assetsFS,
-		ui:       ui,
-		logger:   logger,
+		cfg:            cfg,
+		res:            roots,
+		auth:           authn,
+		keys:           keys,
+		guard:          newGuard(cfg),
+		settings:       newRuntimeSettings(cfg, roots.Root()),
+		assets:         assetsFS,
+		ui:             ui,
+		logger:         logger,
+		trustedProxies: trustedProxies,
 	}
 	// 恢复上次落盘的附加站点。**尽力而为**：单条坏数据只记日志、不阻止启动
 	// （与读取标题同一口径）—— 一个坏掉的设置文件不该让整个服务起不来。
@@ -189,7 +201,26 @@ func (s *Server) Handler() http.Handler {
 	// 先按前缀剥离（/files/s/<token>/… -> /s/<token>/…），再改写分享路径。
 	h = s.withSharePath(h)
 	h = s.withPathPrefix(h)
+	// 安全响应头放在最外层，连前缀不匹配的 404 也带上。
+	h = s.withSecurityHeaders(h)
 	return h
+}
+
+// withSecurityHeaders 注入一组与具体业务无关的安全响应头。
+//
+// 不引入会破坏前端脚本的严格 CSP；HTML/SVG/XML 的 sandbox 由
+// guardInlineContent 单独追加。X-Frame-Options 用 SAMEORIGIN 而不是 DENY，
+// 因为前端的 PDF 预览依赖同源 iframe。
+func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		// SAMEORIGIN 而不是 DENY：前端的 PDF 预览依赖同源 <iframe>。
+		// 跨站嵌入仍然被挡住，足以防点击劫持。
+		h.Set("X-Frame-Options", "SAMEORIGIN")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Root 返回被服务的根目录绝对路径。
@@ -474,7 +505,7 @@ func shareTokenOf(r *http.Request) string {
 // 部署时 URL 是 /files/docs/…，只写 /docs/ 的话浏览器根本不会带上这条
 // cookie，分享页面里的 XHR 就全 401（页面能打开、列表却刷不出来）。
 // 所以要先把访问前缀拼进去。
-func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expires time.Time) {
+func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, token, scope string, expires time.Time) {
 	if token == "" {
 		return
 	}
@@ -500,8 +531,16 @@ func (s *Server) setShareCookie(w http.ResponseWriter, token, scope string, expi
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cfg.TLSCert != "",
+		Secure:   s.cookieSecure(r),
 	})
+}
+
+// cookieSecure 判断 cookie 是否应带 Secure。
+//
+// 直接跑 HTTPS，或请求来自可信代理且代理声明外部协议是 HTTPS 时都要加；
+// 只判断本地是否配置证书会在 TLS 终止于反向代理的常见部署里漏掉 Secure。
+func (s *Server) cookieSecure(r *http.Request) bool {
+	return s.cfg.TLSCert != "" || s.externalScheme(r) == "https"
 }
 
 // sessionCookiePath 返回 cookie 的作用路径。
@@ -535,7 +574,7 @@ func cookiePathForPrefix(prefix string) string {
 //	对写方法的同源校验兜住，与本次改动无关。）
 //
 // Secure：仅在 HTTPS 下加，否则纯 HTTP 部署会收不到 cookie。
-func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -543,20 +582,20 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, token string) {
 		MaxAge:   int(auth.SessionTTL().Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cfg.TLSCert != "",
+		Secure:   s.cookieSecure(r),
 	})
 }
 
 // clearSessionCookie 让浏览器丢掉会话 cookie（值留空 + MaxAge<0）。
-func (s *Server) clearSessionCookie(w http.ResponseWriter) {
-	s.clearSessionCookieAt(w, s.sessionCookiePath())
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	s.clearSessionCookieAt(w, r, s.sessionCookiePath())
 }
 
 // clearSessionCookieAt 按指定 Path 清掉会话 cookie。
 //
 // 前缀变更时要清的是**旧 Path** 的那条：浏览器的 cookie 是按 (name, domain,
 // path) 三元组存的，新 Path 上那条清不掉旧 Path 上那条。
-func (s *Server) clearSessionCookieAt(w http.ResponseWriter, path string) {
+func (s *Server) clearSessionCookieAt(w http.ResponseWriter, r *http.Request, path string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -564,7 +603,7 @@ func (s *Server) clearSessionCookieAt(w http.ResponseWriter, path string) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cfg.TLSCert != "",
+		Secure:   s.cookieSecure(r),
 	})
 }
 
@@ -632,6 +671,24 @@ func (s *Server) checkPerm(r *http.Request, urlPath string) auth.Permission {
 	return perm
 }
 
+// clientIP 返回经可信代理校正后的客户端地址。
+func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trustedProxies) }
+
+// checkAuthLimit 在验证凭据前检查来源是否已被封禁。
+//
+// 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
+// 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
+// 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
+func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request) (string, bool) {
+	ip := s.clientIP(r)
+	if blocked, remain := s.authBlocked(ip); blocked {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
+		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
+		return ip, false
+	}
+	return ip, true
+}
+
 // authorize 解析请求凭据并计算对 urlPath 的权限。
 // 需要质询时直接写响应并返回 false。
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath string) (permResult, bool) {
@@ -641,10 +698,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 
 	// 认证限速：Basic 认证可以被无限次尝试，不设闸门就等于把口令交给
 	// 字典攻击。这里按来源统计失败次数，超限后临时封禁。
-	ip := clientIP(r)
-	if blocked, remain := s.authBlocked(ip); blocked {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
-		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
+	ip, ok := s.checkAuthLimit(w, r)
+	if !ok {
 		return permResult{}, false
 	}
 
@@ -673,7 +728,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 			// 所以判据改成「这次用的令牌不是从 cookie 来的」：两种形式都覆盖，
 			// 而已经在用 cookie 的请求不再重设，避免每个 XHR 都带一次 Set-Cookie。
 			if c, err := r.Cookie(shareCookieName); err != nil || c.Value != tok {
-				s.setShareCookie(w, tok, k.Scope, k.ExpiresAt)
+				s.setShareCookie(w, r, tok, k.Scope, k.ExpiresAt)
 			}
 			return permResult{
 				Perm:          sharePerm(k),
@@ -729,7 +784,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		// cookie 无效就顺手清掉，免得浏览器每个后续请求都带着一张废票
 		// 反复撞限速闸门。
 		if hadCookie && cookieUser == "" {
-			s.clearSessionCookie(w)
+			s.clearSessionCookie(w, r)
 		}
 		// 前端的 fetch 会带 X-Gofs-Ajax 标记，此时只回 401 不带挑战，
 		// 让应用自己的登录框处理，而不是弹出浏览器原生对话框。
@@ -1077,58 +1132,116 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 	if etag := fmt.Sprintf(`"%x-%x"`, info.ModTime().UnixNano(), info.Size()); etag != "" {
 		w.Header().Set("ETag", etag)
 	}
+	// 先按与 http.ServeContent 相同的规则确定 Content-Type，再据此决定沙箱。
+	//
+	// ⚠️ 不能只看扩展名：ServeContent 对不认识的扩展名会嗅探内容，
+	// 一份 .md / 无扩展名文件只要以 <!DOCTYPE html> 开头就会被标成 text/html，
+	// 浏览器会当页面执行；而 .shtml / .xht 本身就是 HTML 类文档，却不在
+	// 早先的白名单里。按最终 Content-Type 判断才能覆盖这些路径。
+	ct := detectContentType(f, info.Name())
+	w.Header().Set("Content-Type", ct)
 	// 给下载也设一个「无进展超时」：没有它，一个「连上就不读数据」的客户端
 	// 会一直占着并发名额（服务端阻塞在写 socket 上），几十个就能拖垮服务。
 	// 用进展而不是总时长，是为了不误杀慢速的大文件传输。
-	w = withWriteProgress(w, s.cfg.DownloadTimeout)
-	s.guardInlineContent(w, r, info.Name())
+	w, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer resetWrite()
+	s.guardInlineContent(w, r, info.Name(), ct)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// detectContentType 按 http.ServeContent 的规则确定响应 Content-Type：
+// 先查扩展名，查不到时读取前 512 字节做内容嗅探。
+//
+// 单独抽出来是为了让「决定要不要加 CSP sandbox」和「真正写出的
+// Content-Type」使用同一个值 —— 两边各算一次迟早会漂移。
+func detectContentType(f *os.File, name string) string {
+	if ct := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); ct != "" {
+		return ct
+	}
+	buf := make([]byte, 512)
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(buf[:n])
 }
 
 // guardInlineContent 抑制「上传的文件在同源下执行脚本」带来的风险。
 //
-// 文件服务器天然会把用户上传的 .html / .svg 原样吐回浏览器，而浏览器
-// 会把它当作**本站页面**渲染。于是一个能上传文件的人只要放一个
-// <script>fetch('/fs/keys',{method:'POST'...})</script> 的页面，
+// 文件服务器天然会把用户上传的内容原样吐回浏览器，而浏览器会把它当作
+// **本站页面**渲染。于是一个能上传文件的人只要放一个带 <script> 的页面，
 // 再诱导管理员打开，就能借管理员已登录的会话为所欲为。这是典型的存储型 XSS。
 //
 // 两道处理：
-//   - nosniff：禁止浏览器按内容猜测类型（否则一个无扩展名文件也能被当 HTML 执行）；
-//   - 对 HTML / SVG / XML 加 CSP sandbox：文档进入不透明源，
+//   - nosniff：禁止浏览器按内容猜测类型；
+//   - 对 HTML / XHTML / SVG / XML 加 CSP sandbox：文档进入不透明源，
 //     读不到本站 cookie / 存储，也发不出带凭据的同源请求。
+//
+// ⚠️ 判据必须是**最终 Content-Type**，而不是扩展名：ServeContent 会把
+// 未知扩展名的 HTML 内容嗅探成 text/html，.shtml / .xht 也天然是 HTML
+// 文档。早先只认扩展名白名单，这三类都能绕过沙箱。
 //
 // HTML 的 sandbox 额外带 allow-scripts：静态页面里的脚本需要能运行，
 // 但没有 allow-same-origin，脚本仍在不透明源中，拿不到本站数据。
 // SVG / XML 更严格，连脚本也不开放。需要完全关闭沙箱（脚本 + 同源）
 // 时才用 --no-html-sandbox，那是部署方明确承担风险的选择。
-func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) guardInlineContent(w http.ResponseWriter, r *http.Request, name, contentType string) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 
 	if s.cfg.DisableHTMLSandbox {
 		return
 	}
-	if !isScriptableContent(name) {
+	mediaType := contentType
+	if mt, _, err := mime.ParseMediaType(contentType); err == nil {
+		mediaType = mt
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+
+	// 扩展名作为兜底：有些类型（如 .mhtml）在部分平台的 MIME 表里
+	// 没有映射，Content-Type 会被嗅探成 text/plain，但浏览器仍可能按
+	// 文档处理。两条判据取并集。
+	scriptable := scriptableMediaTypes[mediaType] || isScriptableContent(name)
+	if !scriptable {
 		return
 	}
 	// 注意：绝不加 allow-same-origin —— 那会让上传的页面直接变回本站页面，
 	// 存储型 XSS 的第二道防线就没了。
-	if isHTMLContent(name) {
-		h.Set("Content-Security-Policy", "sandbox allow-scripts")
+	if htmlMediaTypes[mediaType] || isHTMLContent(name) {
+		h.Set("Content-Security-Policy", "sandbox allow-scripts; frame-ancestors 'none'")
 		return
 	}
-	h.Set("Content-Security-Policy", "sandbox")
+	h.Set("Content-Security-Policy", "sandbox; frame-ancestors 'none'")
+}
+
+// scriptableMediaTypes 是浏览器会当作可执行文档渲染的 MIME 类型。
+var scriptableMediaTypes = map[string]bool{
+	"text/html":             true,
+	"application/xhtml+xml": true,
+	"image/svg+xml":         true,
+	"application/xml":       true,
+	"text/xml":              true,
+	"application/xsl+xml":   true,
+	"text/xsl":              true,
+}
+
+// htmlMediaTypes 是允许在沙箱内运行脚本的 HTML 类文档。
+var htmlMediaTypes = map[string]bool{
+	"text/html":             true,
+	"application/xhtml+xml": true,
 }
 
 // scriptableExts 是浏览器会当作可执行文档渲染的扩展名。
 var scriptableExts = map[string]bool{
-	".html": true, ".htm": true, ".xhtml": true, ".svg": true,
-	".xml": true, ".xsl": true, ".mhtml": true,
+	".html": true, ".htm": true, ".shtml": true, ".shtm": true,
+	".xhtml": true, ".xht": true, ".svg": true,
+	".xml": true, ".xsl": true, ".mhtml": true, ".mht": true,
 }
 
 // htmlExts 是允许在沙箱内运行脚本的 HTML 类文档。
 var htmlExts = map[string]bool{
-	".html": true, ".htm": true, ".xhtml": true,
+	".html": true, ".htm": true, ".shtml": true, ".shtm": true,
+	".xhtml": true, ".xht": true,
 }
 
 func isHTMLContent(name string) bool {
@@ -1179,6 +1292,9 @@ func (s *Server) writeJSONStatus(w http.ResponseWriter, code int, v any) {
 	// 万一被某条路径当成 text/html 渲染，那就是一个 XSS。
 	// 声明成 JSON + nosniff，它就只是数据。
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// 认证/设置/密钥等响应可能包含账号名、根目录、一次性明文密钥；
+	// 不允许浏览器或中间缓存留下副本。
+	w.Header().Set("Cache-Control", "no-store")
 	if code != http.StatusOK {
 		w.WriteHeader(code)
 	}
@@ -1197,8 +1313,10 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, fs.ErrPermission):
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 	default:
+		// 内部错误只进日志，不回给客户端：err.Error() 里常带绝对路径、
+		// 系统调用细节，对攻击者是免费的信息泄露。
 		s.logger.Errorf("请求处理失败: %v", err)
-		http.Error(w, "500 "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 	}
 }
 

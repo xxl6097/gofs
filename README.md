@@ -53,7 +53,9 @@
   （换根受 `--no-root-switch` / `--root-allow` 约束，详见下文）
 - **面向大文件与恶意使用的防护**：流式传输（内存与文件大小无关）、
   「无进展」超时（慢速大文件不被误杀）、断点续传、CSRF / 暴力破解 /
-  慢速攻击 / 资源耗尽防护、存储型 XSS 与日志注入防护（详见下文）
+  慢速攻击 / 资源耗尽防护、存储型 XSS 与日志注入防护；
+  **转发头默认不采信**（只认可信代理）、所有能验口令的接口共用失败限速、
+  访问日志自动脱敏凭据、软链逃逸防护（详见下文）
 - 自定义日志格式（`$remote_addr` `$status` `$http_user_agent` …）
 - 可替换的自定义前端资源（`--assets`）
 - 内嵌 SPA / index.html 渲染模式（`--render-index` / `--render-try-index` / `--render-spa`）
@@ -212,8 +214,8 @@ gofs [选项] [serve-path ...]
       --upload-max-size <n>  单次上传的最大字节数，默认 10GiB；0 表示不限制
                              （登录后也可以在页面的「服务设置」里改）
       --upload-read-timeout <d>
-                             单次上传的最长读取时间，默认 30m
-      --download-timeout <d> 单次下载的最长写出时间，默认 30m；0 表示不限制
+                             上传「连续多久没有进展」就断开，默认 2m
+      --download-timeout <d> 下载「连续多久没有进展」就断开，默认 2m；0 表示不限制
       --list-max-entries <n> 单次目录列举最多返回多少条，默认 20000
       --archive-max-items <n> 单次打包的条目数上限，默认 200000
       --archive-max-bytes <n> 单次打包的原始字节上限，默认 50GiB
@@ -222,6 +224,10 @@ gofs [选项] [serve-path ...]
                              同时进行的上传/解压任务数上限，默认 64
       --auth-fail-limit <n>  同一来源认证失败多少次后临时封禁，默认 10
       --auth-fail-window <d> 认证失败的统计窗口与封禁时长，默认 5m
+      --trusted-proxies <ips>
+                             可信反向代理地址（IP / CIDR，逗号分隔）。
+                             只有直连对端在列表内时才采信 X-Forwarded-For /
+                             X-Real-IP / X-Forwarded-Proto；默认不信任任何转发头
       --max-header-bytes <n> 请求行+请求头允许的最大字节数，默认 64KiB
       --max-name-bytes <n>   允许的单个文件名最大字节数，默认 255
       --hash-max-size <n>    允许计算 ?hash 摘要的最大文件字节数，默认 512MiB
@@ -256,6 +262,9 @@ GOFS_AUTH='admin:123@/:rw|guest:guest@/' ./gofs ./data
 - **一次移动多项**时逐个发请求，结束后统一报「成功 / 已在该目录 / 冲突 / 失败」
   各多少项；有失败会带出第一条原因。
 - 目标必须在服务根之内（越界会明确报「超出服务范围」，与「路径非法」区分开）。
+- **跨设备移动（回退到「复制 + 删除」）默认不跟随软链**：软链条目会被跳过，
+  而不是把根外文件的内容复制进来，也不会沿着「软链指回上级目录」无限递归。
+  显式 `--allow-symlink` 的部署保持旧语义（复制软链指向的内容）。
 
 协议层面就是 WebDAV 风格的 `MOVE` + `Destination` 头，所以脚本也能直接用：
 
@@ -424,15 +433,21 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 | | |
 | --- | --- |
 | 有效性 | 服务端会话表，30 天绝对寿命 + 7 天空闲上限 |
+| 单账号上限 | 16 个；超出时替换该账号最旧的会话，单个账号占不满整张表 |
 | 撤销 | 登出、**改密码**、删账号都会立即作废已有会话 |
 | HttpOnly | JS 读不到 token，XSS 偷不走 |
 | SameSite=Lax | 跨站子资源请求不带它，挡住借已登录身份读私有文件那类攻击 |
-| Secure | 仅在 HTTPS 下附加，纯 HTTP 部署照常工作 |
+| Secure | HTTPS 下附加（含可信代理声明的 HTTPS），纯 HTTP 部署照常工作 |
 | 路径 | 跟随 `--path-prefix`，前缀部署下依然生效 |
 
 登录接口（`GET/POST /fs/auth`）与其它接口一样受认证失败限速约束
 （`--auth-fail-limit` / `--auth-fail-window`）—— 它会发一张 30 天有效的通行证，
 不限速等于把口令交给字典攻击。
+
+⚠️ **`GET /fs/auth?user=…&pass=…` 不下发会话 cookie**（仍会校验凭据并返回身份）。
+查询串是跨站 `<img src="…">` 唯一能带上的凭据形式，若它也能建立会话，
+攻击者就能让受害者浏览器悄悄登录成攻击者账号（登录 CSRF）。
+需要 cookie 的登录请走 `POST /fs/auth`，或带 `Authorization` 头。
 
 登出走 `DELETE /fs/auth`：cookie 是 HttpOnly 的，JS 删不掉，
 必须由服务端撤销会话再清 cookie，否则「退出登录」只是把界面上的名字抹掉。
@@ -615,7 +630,12 @@ chmod +x gofs-up.sh
 - **校验用定长时间比较**，避免通过响应耗时逐字节猜测。
 - **创建者的权限是上限**：签发时会检查调用者对该目录是否有写权限，
   只对 `/docs` 有权限的账号签不出覆盖 `/` 的密钥。
+- **只能管理自己的密钥**：非管理员在列表里只看到自己创建的密钥，
+  也只能撤销自己的；否则任何有写权限的账号都能吊销别人（乃至管理员）的
+  上传密钥与分享链接。
 - **作用范围在归一化路径上比对**，`//uploads`、`/uploads/../etc` 这类写法绕不过去。
+- **管理接口同样限速**：`/fs/keys` 能验口令，因此与其它认证入口共用
+  失败计数与封禁（`--auth-fail-limit` / `--auth-fail-window`）。
 
 ### 用法
 
@@ -791,6 +811,11 @@ alice 的规则： /docs 可读写　/ 只读
 
 界面上就是一列「路径 + 权限」行，可以加多行。想给某人「只有某个目录能写、
 其他位置能看」，就是上面这两行。
+
+因为规则可以细到单个文件（`/docs:rw` + `/docs/secret.txt:r`），
+**写操作按目标文件本身复核，而不只看所在目录**：表单上传、批量重命名、
+解压（逐个条目）都会在动手前检查最终路径；任一目标没权限就整体拒绝，
+不会出现「前几个已改、后面才发现越权」的半完成状态。
 
 ### 安全设计
 
@@ -1322,11 +1347,16 @@ curl 'http://127.0.0.1:5000/fs/extract?path=/backup.zip'
   "format": "zip",
   "default_dest": "/backup",
   "total": 3,
+  "truncated": false,
   "entries": [
     {"name": "a.txt", "size": 12, "compressed_size": 14, "is_dir": false, "modtime": "2026-09-28T11:00:00+08:00"}
   ]
 }
 ```
+
+清单与单条目预览同样受 `--extract-max-files` / `--extract-max-total` 约束：
+条目超过上限时只返回前 `--extract-max-files` 条并置 `truncated: true`；
+预览一个超限条目返回 `413`，而不是把内容读进内存或临时目录。
 
 **取出包内单个文件（流式，不解压落盘）**
 
@@ -1371,6 +1401,8 @@ curl -N -X PUT 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored
 | --- | --- |
 | **Zip Slip**（`../../x` 写到目标目录外） | 每个条目路径先统一分隔符、拒绝绝对路径与盘符，再 `SafeJoin` 校验必须落在目标目录内；越界条目跳过并记入 `warnings` |
 | **软链接逃逸**（tar 里的 symlink 指向 `/etc/passwd`） | `TypeSymlink` / `TypeLink` 条目一律跳过，不落盘 |
+| **目标路径上的软链**（目标目录里预置一条指向根外的软链） | 每个条目（含目录）写出前用 `EnsureWithin` 从卷根逐段解析，悬空软链、软链环一律跳过；`--allow-symlink` 才显式放开 |
+| **越过文件级 ACL** | 解压前逐个条目复核最终路径的写权限 —— 「目录可写、单文件只读」的规则同样生效，不通过就整次拒绝 |
 | **解压炸弹**（高压缩比 + 小体积） | 三重限制：条目数上限、写出总字节上限、单文件压缩比上限；实时累计，超限立即中止 |
 | **权限位提权**（包内 4755 的 setuid 文件） | 忽略包内 mode，文件恒为 `0644`、目录恒为 `0755` |
 | **路径歧义** | `dest` / `path` 中出现 `..` 段直接 400 拒绝，而不是静默规范化 |
@@ -1461,8 +1493,34 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 只有「带了凭据但不对」才算失败 —— 完全没带凭据只是未登录，
 否则一个不带凭据的爬虫就能把正常用户的来源封掉。成功登录会清零计数。
 
+**所有能验口令的接口共用同一套计数**：除了文件接口与 `/fs/auth`，
+`/fs/settings`、`/fs/users`、`/fs/keys`、`/fs/upgrade` 也会验证凭据。
+漏掉其中任何一个，它就成了不限速的口令猜测入口。伪造/过期的会话 cookie
+同样计入失败；合法但非管理员的会话只回 403，不会把人打进封禁名单。
+
+**来源地址与转发头（`--trusted-proxies`）。** `X-Forwarded-For` / `X-Real-IP` /
+`X-Forwarded-Proto` 默认**一概不采信**。否则任何客户端都能随手伪造来源，
+绕过认证限速、在日志里冒充别的地址，甚至故意把某个 IP 打进封禁名单。
+只有在启动时显式配置了可信代理（IP 或 CIDR）后，且**直连对端**落在列表中，
+才会解析转发头：
+
+- `X-Forwarded-For` 从右往左取第一个非可信地址（右侧是代理追加的，
+  最左侧可能是客户端自己塞的）；
+- `X-Forwarded-Proto` 只认 `http` / `https`，用于判断外部协议 ——
+  它同时影响 cookie 的 `Secure`、CSRF 的协议比较与分享链接的生成；
+- 同源校验除主机外也比协议：直接跑 HTTPS 时，来自同主机 HTTP 页面的
+  写请求会被拒绝；确定不了外部协议时不做协议比较，避免误杀。
+
+```bash
+gofs --trusted-proxies 127.0.0.1,::1 -b 127.0.0.1 -p 5000 /data
+GOFS_TRUSTED_PROXIES='10.0.0.0/8,192.168.1.10' ./gofs -A /data
+```
+
 **慢速攻击。** `ReadHeaderTimeout` 10 秒掐断「连上后慢慢发请求头」（Slowloris）；
 请求头总量限制 64 KiB（标准库默认 1 MiB，请求头是每个连接都要缓冲的）。
+上传/下载/打包/SSE 都用「无进展超时」；JSON 等小型 API 请求体则另设
+**30 秒绝对时限** —— 几 KB 的请求一个字节一个字节地发，不该长期占着并发名额。
+解压接口在读取请求体**之前**就检查功能开关，默认配置下连解析都不会发生。
 
 **资源耗尽。**
 
@@ -1472,7 +1530,9 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 | 目录列举 | 20000 条 | 十万级文件的目录一次性序列化会吃掉大量内存；响应带 `truncated` 与 `total_all` |
 | 打包 | 20 万条 / 50 GiB | 扫描阶段就累计检查，超限返回 413 而不是把内存撑爆 |
 | 解压 | 10 GiB / 10 万条 / 200 倍压缩比 | 防解压炸弹；超限时清理残缺文件 |
+| 压缩包清单 / 单条目预览 | 10 万条 / 单条目 ≤1 GiB | 列表与预览不是绕过上限的后门：超出截断（`truncated`）或返回 413 |
 | `?hash` | 512 MiB | 算摘要要读完整个文件，对超大文件开放等于送出一个 CPU/IO 耗尽入口 |
+| 会话表 | 全局 4096 / 单账号 16 | 全局满时拒绝新会话；单账号超出时替换自己最旧的，占不满整张表 |
 | 认证失败记录 | 惰性清理 | 避免被大量伪造来源撑爆内存 |
 
 **存储型 XSS。** 文件服务器天然会把上传的 `.html` / `.svg` 原样吐回浏览器，
@@ -1480,17 +1540,38 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 `<script>fetch('/fs/keys',{method:'POST'…})</script>` 再诱导管理员打开，
 就能借管理员的登录态为所欲为。所以：
 
-- 所有文件响应带 `X-Content-Type-Options: nosniff`（禁止按内容猜类型）；
+- 所有响应带 `X-Content-Type-Options: nosniff`（禁止按内容猜类型），
+  另加 `X-Frame-Options: SAMEORIGIN`（防点击劫持，同时保留 PDF 同源预览）
+  与 `Referrer-Policy: no-referrer`；
 - HTML / SVG / XML 额外带 `Content-Security-Policy: sandbox`：
   - HTML 用 `sandbox allow-scripts`：静态页脚本可以运行，但文档处于不透明源，
     读不到本站 cookie / localStorage，也发不出带凭据的同源请求；
   - SVG / XML 用 `sandbox`，连脚本也不开放；
   - 需要脚本和同源能力都完整保留时，部署方可显式 `--no-html-sandbox`
     （等于主动承担存储型 XSS 风险）。
+- **判据是最终 `Content-Type`，不是扩展名白名单。** `ServeContent` 会把不认识的
+  扩展名按内容嗅探，一份 `.md` 或无扩展名文件只要以 `<!DOCTYPE html>` 开头就会被
+  当成 `text/html` 执行；`.shtml` / `.xht` 本身就是 HTML 类文档。
+  这两类现在都打上沙箱，`frame-ancestors 'none'` 一并封掉嵌入。
+- JSON 响应带 `Cache-Control: no-store`：认证、设置、密钥等响应可能含账号名、
+  根目录与一次性明文，不该被浏览器或中间缓存留下副本。
 
-**日志注入。** URL、User-Agent 以及**文件名**都会进日志。文件名这一点容易被忽略 ——
+**路径与软链边界。** 路径校验不是「拼字符串后看前缀」，而是从卷根开始逐段
+`Lstat`：遇到软链就解析它，最后比较解析结果是否仍在根内。这挡住了两类旧实现
+漏掉的逃逸 —— **悬空软链**（叶子指向根外尚不存在的文件，`OpenFile` 会跟过去
+创建）与软链环（直接拒绝）。`--allow-symlink` 是部署方显式放开的口子，
+默认关闭。
+
+**日志注入与凭据脱敏。** URL、User-Agent 以及**文件名**都会进日志。文件名这一点容易被忽略 ——
 Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admin" 200'`
 这样一个名字就能在日志里伪造出额外一行。所有日志行在写出前会清理控制字符与 ANSI 转义。
+查询串里的 `pass` / `password` / `pwd` / `key` / `token` / `share` / `secret` /
+`api_key` 等参数值在落盘前替换成 `***`；自定义日志格式即使显式写了
+`$http_authorization` / `$http_cookie`，值也只会是 `***`。日志文件默认权限 `0600`。
+
+**错误信息不外泄。** 未预期的 500 只记服务端日志，响应统一是
+`500 Internal Server Error` —— 原始错误里常带绝对路径与系统调用细节，
+对攻击者是免费的信息。
 
 ### 防护选项一览
 
@@ -1506,6 +1587,8 @@ Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admi
 --max-concurrent-jobs <n>  同时进行的上传/解压数上限，默认 64
 --auth-fail-limit <n>      认证失败多少次后封禁，默认 10；0 表示关闭
 --auth-fail-window <d>     失败统计窗口与封禁时长，默认 5m
+--trusted-proxies <ips>    可信反向代理（IP/CIDR，逗号分隔），默认不信任转发头
+                           （也可用 GOFS_TRUSTED_PROXIES）
 --max-header-bytes <n>     请求头上限，默认 64KiB
 --max-name-bytes <n>       单个文件名最大字节数，默认 255
 --hash-max-size <n>        ?hash 摘要的最大文件尺寸，默认 512MiB
@@ -1523,7 +1606,7 @@ gofs 是个自包含的 HTTP 服务，可以直接听公网端口，也可以躲
 完整可拷贝的示例见 [`examples/nginx/gofs.conf`](examples/nginx/gofs.conf)，
 下面只说清楚**为什么**要那么写。
 
-### 三条硬性约束
+### 四条硬性约束
 
 漏掉任何一条都会出问题，而症状往往和原因看起来不相关：
 
@@ -1532,10 +1615,21 @@ gofs 是个自包含的 HTTP 服务，可以直接听公网端口，也可以躲
 | `proxy_set_header Host $http_host;` | 写操作全部 403、分享链接指向 `127.0.0.1` | 跨站写校验比的是 `Origin` 的 host 与 `r.Host` 是否同源（`internal/server/guard.go`）；分享链接与一键脚本的地址也取自 `r.Host`（`internal/server/up_script.go`） |
 | `proxy_buffering off;` | 在线解压进度条全程不动，结束才刷新 | 解压进度走 SSE（`text/event-stream`），nginx 默认会把响应缓冲起来 |
 | `client_max_body_size 0;` | 稍大的文件上传返回 413 | nginx 默认 1m，而 gofs 单次上传默认允许 10GiB |
+| 启动参数加 `--trusted-proxies 127.0.0.1` | 限速与日志看到的都是代理 IP；分享链接退回 `http://`，Secure cookie 不生效 | gofs **默认不采信任何转发头**。nginx 与 gofs 同机时直连对端就是 `127.0.0.1`（unix socket 同理） |
 
 再配上 `proxy_request_buffering off;`：否则 nginx 会先把整个上传体缓冲到磁盘
 再转发给 gofs，几百 MB 以上的上传会先卡一阵，还可能写满临时目录。
 gofs 自己会限速、限大小、限并发（见上一节），把缓冲交给它更合适。
+
+gofs 这一侧还要显式声明谁可以给转发头（nginx 与 gofs 同机时是回环地址）：
+
+```bash
+gofs -b 127.0.0.1 -p 5000 --trusted-proxies 127.0.0.1,::1 -a 'admin:密码@/:rw' /data
+```
+
+没这一行时，上面的 `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto`
+会被**安全地忽略**：服务照常可用，但限速按代理 IP 统计（所有人共用一个桶），
+访问日志里也全是 `127.0.0.1`。
 
 ### 最小配置
 
@@ -1593,7 +1687,7 @@ location /files/ {
 的风险：
 
 ```bash
-gofs -b /run/gofs.sock /data -a 'admin:密码@/data:rw'
+gofs -b /run/gofs.sock --trusted-proxies 127.0.0.1 /data -a 'admin:密码@/data:rw'
 ```
 
 ```nginx
@@ -1604,19 +1698,23 @@ upstream gofs_backend {
 ```
 
 socket 由 gofs 以 `0660` 创建，nginx 运行用户需要有访问权限（同组或改权限）。
+unix socket 的对端没有 IP，`--trusted-proxies` 在这里表示「显式信任本地 socket
+对端」—— 不配的话，nginx 递进来的转发头同样会被忽略。
 
 ### HTTPS
 
 推荐让 nginx 终止 TLS：在 server 块里加 `listen 443 ssl;` 与证书即可。
-gofs 会读 `X-Forwarded-Proto`（`internal/server/up_script.go`）来判断对外
-协议，所以纯 HTTP 上游也能生成 https 的分享链接与脚本地址 —— 这是它采信
-`X-Forwarded-*` 头的前提：**只部署在可信代理之后**。
+**配置了 `--trusted-proxies` 之后**，gofs 会采信 `X-Forwarded-Proto`
+（`internal/server/up_script.go`）判断对外协议，所以纯 HTTP 上游也能生成
+https 的分享链接与脚本地址，cookie 也会带上 `Secure`；CSRF 同源校验同样按
+这个协议比较。没配可信代理时这些头一律被忽略。
 
 也可以用 gofs 自带的 `--tls-cert` / `--tls-key` 让上游直接是 https，
 nginx 侧 `proxy_pass https://127.0.0.1:5000;`，或改用 `stream` 模块做四层转发。
 
-> 部署在 nginx 之后就不需要 `--path-prefix` 之外的额外开关了。
-> 唯一的例外是：如果你的代理**必须**改写 Host（比如多域名共享一个后端），
+> 部署在 nginx 之后，额外开关只有 `--path-prefix`（子路径时）与
+> `--trusted-proxies`（要真实来源 IP / 外部协议时）。
+> 例外是：如果你的代理**必须**改写 Host（比如多域名共享一个后端），
 > 那 `Origin` 与 `Host` 就不同源，写操作会被 CSRF 校验挡住 ——
 > 这种情况用 `--no-csrf-protect` 关闭校验（只影响浏览器发起的跨站请求，
 > curl 等不带 `Origin` 的客户端不受影响）。

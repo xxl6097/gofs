@@ -85,6 +85,9 @@ type Options struct {
 	MaxFiles int
 	// MaxRatio 单文件压缩比上限。
 	MaxRatio int
+	// AllowSymlink 对应服务的 --allow-symlink：为 true 时允许经由目标
+	// 路径上已有的软链写出（保留旧的显式放开语义）。
+	AllowSymlink bool
 }
 
 // Progress 描述解压进度。
@@ -128,6 +131,25 @@ var ErrEncrypted = errors.New("该压缩包已加密，暂不支持在线解压"
 
 // ErrUnsupported 表示格式不受支持。
 var ErrUnsupported = errors.New("不支持的压缩包格式")
+
+// ErrEntryTooLarge 表示单个条目的解压后体积超过预览上限。
+var ErrEntryTooLarge = errors.New("压缩包条目过大")
+
+// Limits 限制「列表 / 单条目预览」的规模。
+//
+// 这些操作与 Extract 共用同一份配置，但语义不同：列表只是给界面看，
+// 不需要为了展示几十万个条目把内存吃光；预览一个条目也不该允许
+// 一个几十 GB 的稀疏文件把临时目录写满。
+type Limits struct {
+	MaxFiles      int
+	MaxTotalBytes int64
+	MaxEntryBytes int64
+}
+
+// LimitSetter 是可选能力：支持限额的 Reader 实现它。
+type LimitSetter interface {
+	SetLimits(Limits)
+}
 
 // Open 打开一个压缩包并返回对应的 Reader。
 func Open(filename string) (Reader, error) {
@@ -359,8 +381,10 @@ func writeFile(target string, src io.Reader, opts Options, limit *limiter, compr
 	// 有一条**本来就存在**的软链指向根外 —— MkdirAll/OpenFile 会跟过去，
 	// 于是解压把文件写到服务根之外。这条检查与 HTTP 层用的是同一个实现
 	//（fsutil.EnsureWithin），只堵一边等于没堵。
-	if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
-		return 0, err
+	if !opts.AllowSymlink {
+		if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
+			return 0, err
+		}
 	}
 	if !opts.Overwrite {
 		if _, err := os.Stat(target); err == nil {

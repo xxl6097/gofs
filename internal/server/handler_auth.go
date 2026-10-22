@@ -44,7 +44,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 与 authorize 用同一套限速：这个接口现在会下发会话 cookie，
 	// 不设闸门等于把口令交给字典攻击 —— 而且登录成功一次就能拿到
 	// 一张长期有效的 cookie，比逐个请求试密码划算得多。
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if blocked, remain := s.authBlocked(ip); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
@@ -74,15 +74,26 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// <a download> 的下载）会带上它，于是 Range 流式播放与原生下载都可用，
 	// 不再需要把整个文件读成 blob —— 那是大文件播不了的根本原因。
 	//
-	// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
-	token, ok := s.auth.NewSession(user)
-	if !ok {
-		s.writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
-			"message": "会话数已达上限，请稍后再试",
-		})
-		return
+	// ⚠️ GET 且凭据来自查询串时**不下发**会话：跨站页面可以用
+	// <img src=".../fs/auth?user=attacker&pass=x"> 让受害者浏览器
+	// 登录到攻击者账号（登录 CSRF）。查询串是 `<img>` 唯一能带上的
+	// 凭据形式；而 Authorization 头跨站设置不了，POST 又有同源校验。
+	// 这类 GET 仍然可以做一次凭据校验，只是不产生会话。
+	fromQuery := false
+	if _, _, ok := r.BasicAuth(); !ok && r.Method == http.MethodGet {
+		fromQuery = true
 	}
-	s.setSessionCookie(w, token)
+	if !fromQuery {
+		// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
+		token, ok := s.auth.NewSession(user)
+		if !ok {
+			s.writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
+				"message": "会话数已达上限，请稍后再试",
+			})
+			return
+		}
+		s.setSessionCookie(w, r, token)
+	}
 
 	// 该账号的权限用于决定页面按钮显隐。
 	// 默认按根目录计算，但对根目录无权限时退化为只读，避免整页按钮全灭。
@@ -162,6 +173,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if token := sessionToken(r); token != "" {
 		s.auth.DropSession(token)
 	}
-	s.clearSessionCookie(w)
+	s.clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }

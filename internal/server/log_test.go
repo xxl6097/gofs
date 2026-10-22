@@ -46,3 +46,53 @@ func TestReplaceHTTPHeadersTerminates(t *testing.T) {
 		t.Errorf("无变量时被改写了：%q", got)
 	}
 }
+
+// TestClientIPTrust 确认只有可信代理提供的 X-Forwarded-For 才会被采信，
+// 且从右往左跳过可信代理，防止客户端自带的左侧地址被误当真实来源。
+func TestClientIPTrust(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.9:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := clientIP(req, nil); got != "192.0.2.9" {
+		t.Fatalf("未配置可信代理时 clientIP = %q，期望 RemoteAddr", got)
+	}
+
+	trusted := parseTrustedProxies([]string{"192.0.2.0/24"})
+	if got := clientIP(req, trusted); got != "1.2.3.4" {
+		t.Fatalf("可信代理下 clientIP = %q，期望 1.2.3.4", got)
+	}
+	// 右侧是另一层可信代理时，应返回最右侧的**非可信**地址。
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 192.0.2.10")
+	if got := clientIP(req, trusted); got != "1.2.3.4" {
+		t.Fatalf("多层代理下 clientIP = %q，期望 1.2.3.4", got)
+	}
+}
+
+// TestUnixSocketPeerTrust 确认 unix socket 的对端没有 IP 时，
+// 只有显式配置了可信代理才会采信转发头 —— 否则 nginx 走 socket 时
+// X-Real-IP / X-Forwarded-Proto 会静默失效。
+func TestUnixSocketPeerTrust(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "" // unix socket 的 RemoteAddr 为空
+	req.Header.Set("X-Real-Ip", "203.0.113.7")
+	if got := clientIP(req, nil); got != "" {
+		t.Fatalf("未配置可信代理时不应采信转发头，得到 %q", got)
+	}
+	trusted := parseTrustedProxies([]string{"127.0.0.1"})
+	if got := clientIP(req, trusted); got != "203.0.113.7" {
+		t.Fatalf("unix socket 对端 + 可信代理：clientIP = %q，期望 203.0.113.7", got)
+	}
+}
+
+// TestRedactURI 确认访问日志里的凭据参数不会被原样落盘。
+func TestRedactURI(t *testing.T) {
+	got := redactURI("/fs/auth?user=boss&pass=secret&key=gofs_x&share=tok&x=1")
+	for _, leak := range []string{"secret", "gofs_x", "tok"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("redactURI 泄漏了 %q：%s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "user=boss") || !strings.Contains(got, "x=1") {
+		t.Fatalf("非敏感参数被误删：%s", got)
+	}
+}

@@ -160,18 +160,9 @@ func (s *Server) handleUpScript(w http.ResponseWriter, r *http.Request) {
 // 那会让脚本里的地址不可用。所以优先采信 X-Forwarded-Proto，
 // 与 clientIP 采信 X-Forwarded-For 是同一个前提：部署在可信代理之后。
 func (s *Server) publicBaseURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); proto != "" {
-		// 可能形如 "https,http"（多层代理），取第一段。
-		if i := strings.IndexByte(proto, ','); i >= 0 {
-			proto = proto[:i]
-		}
-		if proto = strings.TrimSpace(strings.ToLower(proto)); proto == "http" || proto == "https" {
-			scheme = proto
-		}
+	scheme := s.externalScheme(r)
+	if scheme == "" {
+		scheme = "http"
 	}
 	return scheme + "://" + r.Host + s.PathPrefix()
 }

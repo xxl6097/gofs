@@ -62,6 +62,13 @@ func newGuard(cfg *config.Config) *guard {
 // 但也不能无限排队 —— 排队本身要占内存，排太久反而放大风险。
 const queueWait = 3 * time.Second
 
+// apiBodyReadTimeout 是 JSON 等小型 API 请求体的绝对读取时限。
+//
+// 上传/解压的文件体不走它（那类请求用 --upload-read-timeout 的
+// 「无进展」语义）；这里只约束「几 KB 的 JSON 却永远发不完」这种
+// 占着并发名额的慢速请求。
+const apiBodyReadTimeout = 30 * time.Second
+
 // withConcurrency 限制同时处理的请求数。
 func (s *Server) withConcurrency(next http.Handler) http.Handler {
 	g := s.guard
@@ -150,7 +157,7 @@ func (s *Server) withCSRFProtect(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeMethods[r.Method] && !sameOrigin(r) {
+		if writeMethods[r.Method] && !s.sameOrigin(r) {
 			s.logger.Errorf("拒绝跨站写请求：%s %s from origin=%q host=%q",
 				r.Method, r.URL.Path, originOf(r), r.Host)
 			http.Error(w, "403 Forbidden: 跨站请求被拒绝（如需关闭请使用 --no-csrf-protect）",
@@ -171,7 +178,12 @@ func originOf(r *http.Request) string {
 
 // sameOrigin 判断请求是否来自本站。
 // 没有来源信息时返回 true —— 那是非浏览器客户端，不是 CSRF 关心的情况。
-func sameOrigin(r *http.Request) bool {
+//
+// 除主机外还比较协议：直接跑 HTTPS 时，来自同主机 HTTP 页面的写请求
+// 也应拒绝。代理终止 TLS 的部署只有在配置了可信代理、且代理给了
+// X-Forwarded-Proto 时才能确定外部协议；确定不了就不做协议比较，
+// 避免把正常的 HTTPS 写入误杀。
+func (s *Server) sameOrigin(r *http.Request) bool {
 	raw := originOf(r)
 	if raw == "" {
 		return true
@@ -181,7 +193,35 @@ func sameOrigin(r *http.Request) bool {
 		// 解析不出主机名的一律当作可疑来源（包括 Origin: null）。
 		return false
 	}
-	return strings.EqualFold(u.Host, r.Host)
+	if !strings.EqualFold(u.Host, r.Host) {
+		return false
+	}
+	if scheme := s.externalScheme(r); scheme != "" && !strings.EqualFold(u.Scheme, scheme) {
+		return false
+	}
+	return true
+}
+
+// externalScheme 返回客户端实际使用的协议；无法确定时返回空串。
+func (s *Server) externalScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if !trustedPeer(r, s.trustedProxies) {
+		return ""
+	}
+	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	// 多层代理时常见 "https,http"：最左侧才是客户端看到的那一段。
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = strings.TrimSpace(proto[:i])
+	}
+	switch proto {
+	case "https":
+		return "https"
+	case "http":
+		return "http"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -294,13 +334,18 @@ func (p *progressWriter) Flush() {
 func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
 
 // withWriteProgress 给响应加上「无进展超时」。
-func withWriteProgress(w http.ResponseWriter, d time.Duration) http.ResponseWriter {
+//
+// 返回的 cleanup 会把写期限清掉：连接可能被 keep-alive 复用，
+// 留着一条未来的 deadline 会影响下一个请求。
+func withWriteProgress(w http.ResponseWriter, d time.Duration) (http.ResponseWriter, func()) {
 	if d <= 0 {
-		return w
+		return w, func() {}
 	}
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Now().Add(d))
-	return &progressWriter{ResponseWriter: w, rc: rc, timeout: d}
+	return &progressWriter{ResponseWriter: w, rc: rc, timeout: d}, func() {
+		_ = rc.SetWriteDeadline(time.Time{})
+	}
 }
 
 // progressReader 与 progressWriter 对称：每次读到数据就顺延读期限。
@@ -322,13 +367,38 @@ func (p *progressReader) Close() error { return p.r.Close() }
 
 // withReadProgress 给请求体加上「无进展超时」。
 // 上传大文件时只要还在传就不会被掐断，只有真正停滞才断开。
-func withReadProgress(w http.ResponseWriter, r *http.Request, d time.Duration) {
+//
+// 返回的 cleanup 负责清除读期限（keep-alive 连接会被复用）。
+func withReadProgress(w http.ResponseWriter, r *http.Request, d time.Duration) func() {
 	if d <= 0 || r.Body == nil {
-		return
+		return func() {}
 	}
 	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(d))
+	if err := rc.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return func() {}
+	}
 	r.Body = &progressReader{r: r.Body, rc: rc, timeout: d}
+	return func() {
+		_ = rc.SetReadDeadline(time.Time{})
+	}
+}
+
+// withBodyReadDeadline 给一次 API 请求体读取加上**绝对**时限。
+//
+// 与 withReadProgress 的区别：不因收到少量字节而续期。它用于 JSON 这类
+// 体积很小、正常客户端瞬间就能发完的请求 —— 一个字节一字节地慢慢发
+// 不该能把并发名额永远占住。
+func withBodyReadDeadline(w http.ResponseWriter, d time.Duration) func() {
+	if d <= 0 {
+		return func() {}
+	}
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return func() {}
+	}
+	return func() {
+		_ = rc.SetReadDeadline(time.Time{})
+	}
 }
 
 // uploadCopyBuf 是搬运上传请求体时单次读写的字节数。

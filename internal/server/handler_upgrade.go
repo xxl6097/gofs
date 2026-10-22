@@ -82,6 +82,8 @@ func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
 		Release *config.Release `json:"release"`
 	}
 	if r.Body != nil {
+		resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+		defer resetRead()
 		dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
 		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
@@ -94,7 +96,9 @@ func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 连上 SSE 之后才开始干活，这样进度不会丢。
-	sse, err := newSSEWriter(w)
+	tw, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer resetWrite()
+	sse, err := newSSEWriter(tw)
 	if err != nil {
 		http.Error(w, "500 Internal Server Error: "+err.Error(), http.StatusInternalServerError)
 		return

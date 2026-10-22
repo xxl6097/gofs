@@ -122,3 +122,29 @@ func TestEnsureWithinAllowsInRootSymlinkDir(t *testing.T) {
 		t.Errorf("EnsureWithin 对根内软链目录误报逃逸: %v", err)
 	}
 }
+
+// TestEnsureWithinRejectsDanglingSymlink 钉住软链写逃逸：
+//
+// 叶子是悬空软链时，EvalSymlinks 会失败；旧实现只解析「已存在的祖先」，
+// 会把叶子原样拼回去并判定为在根内，随后的 OpenFile 却会跟随软链
+// 在根外创建文件。
+func TestEnsureWithinRejectsDanglingSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "pwned.txt"), filepath.Join(root, "upload.txt")); err != nil {
+		t.Skipf("本平台不支持软链: %v", err)
+	}
+	if _, err := NewResolver(root, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureWithin(root, filepath.Join(root, "upload.txt")); err == nil {
+		t.Fatal("悬空软链被判定为根内路径，写入会逃逸到根外")
+	}
+}

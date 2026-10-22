@@ -363,8 +363,9 @@ func sitesServer(t *testing.T, settingsFile string) (*Server, string, string) {
 	writeFile(t, filepath.Join(siteDir, "s.txt"), []byte("site"))
 
 	// --root-allow 指到 base，这样 main 与 site 都在允许范围内。
+	// guest 是合法的只读账号，供「非管理员」用例使用。
 	cfg := testConfigRoots(t, []string{mainDir}, "-A", "-a", "boss:pw@/:rw",
-		"--root-allow", base)
+		"-a", "guest:g@/:r", "--root-allow", base)
 	cfg.SettingsFile = settingsFile
 	return newTestServer(t, cfg), mainDir, siteDir
 }

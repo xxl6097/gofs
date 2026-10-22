@@ -132,7 +132,31 @@ func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath 
 		s.writeErr(w, err)
 		return nil, "", false
 	}
+	s.applyArchiveLimits(rd)
 	return rd, clean, true
+}
+
+// applyArchiveLimits 把解压配置里的上限同步给「列表 / 单条目预览」。
+//
+// 这些上限原本只在 Extract 中生效，导致列表和预览成了绕过口：
+// 一个 tar.gz 可以包含海量条目或一个巨大的稀疏条目，而 List/OpenEntry
+// 没有额度就把它全读进内存或临时目录。
+func (s *Server) applyArchiveLimits(rd archive.Reader) {
+	ls, ok := rd.(archive.LimitSetter)
+	if !ok {
+		return
+	}
+	maxEntry := s.cfg.ExtractMaxTotal
+	// 单条目预览再收紧一道：总量上限是给整次解压用的，单个条目
+	// 在预览时落到临时目录不该同样宽松。0（不限制）时用 1GiB 兜底。
+	if maxEntry <= 0 || maxEntry > 1<<30 {
+		maxEntry = 1 << 30
+	}
+	ls.SetLimits(archive.Limits{
+		MaxFiles:      s.cfg.ExtractMaxFiles,
+		MaxTotalBytes: s.cfg.ExtractMaxTotal,
+		MaxEntryBytes: maxEntry,
+	})
 }
 
 // extractList 列出压缩包内容，或流式输出包内单个文件。
@@ -154,6 +178,10 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, archive.ErrEncrypted) {
 				http.Error(w, "403 Forbidden: "+err.Error(), http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, archive.ErrEntryTooLarge) {
+				http.Error(w, "413 Payload Too Large: "+err.Error(), http.StatusRequestEntityTooLarge)
 				return
 			}
 			s.writeErr(w, err)
@@ -181,12 +209,14 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	truncated := s.cfg.ExtractMaxFiles > 0 && len(entries) >= s.cfg.ExtractMaxFiles
 	s.writeJSON(w, map[string]any{
 		"path":         clean,
 		"format":       rd.Format().String(),
 		"default_dest": s.defaultDest(clean),
 		"entries":      entries,
 		"total":        len(entries),
+		"truncated":    truncated,
 		"limits": map[string]any{
 			"max_total_bytes": s.cfg.ExtractMaxTotal,
 			"max_files":       s.cfg.ExtractMaxFiles,
@@ -197,12 +227,22 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 
 // extractRun 执行在线解压，并通过 SSE 持续推送进度。
 func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
-	// 先做一次权限与配置校验，避免建立起 SSE 之后才报错。
+	// 先做配置校验：功能没开时连请求体都不该读。
+	// 早先 body 解析在开关检查之前，导致默认配置下也能用一个永远发不完的
+	// JSON 请求体长期占住并发名额（未认证 DoS）。
+	if !s.cfg.AllowExtract {
+		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
+		return
+	}
+
 	urlPath := r.URL.Query().Get("path")
 
 	// 支持两种入参：JSON 请求体（推荐），或查询参数（便于 curl 一行搞定）。
+	// JSON 体积很小，用绝对时限兜住「一个字节一个字节发」的慢速请求。
 	req := extractRequest{}
 	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "application/json") {
+		resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+		defer resetRead()
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 			http.Error(w, "400 Bad Request: 请求体不是合法 JSON", http.StatusBadRequest)
@@ -226,11 +266,6 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	// CleanURLPath 会把 .. 静默消解，写盘前必须显式拒绝，避免歧义。
 	if fsutil.HasParentSegment(req.Path) || fsutil.HasParentSegment(req.Dest) {
 		http.Error(w, "400 Bad Request: 路径中不允许出现 ..", http.StatusBadRequest)
-		return
-	}
-
-	if !s.cfg.AllowExtract {
-		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
 		return
 	}
 
@@ -296,6 +331,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	s.applyArchiveLimits(rd)
 	defer rd.Close()
 
 	// 解压是最重的操作：长时间占 CPU、磁盘 IO 和一条连接。
@@ -314,7 +350,21 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sse, err := newSSEWriter(w)
+	// 逐个条目的**最终目标路径**复核写权限。
+	//
+	// 只检查 dest 目录是不够的：ACL 支持最长前缀，部署方完全可能给出
+	// `/docs:rw` + `/docs/secret.txt:r` 这种「目录可写、单文件只读」的规则。
+	// 不逐条检查的话，解压可以覆盖那些只读文件。
+	if bad, ok := s.extractTargetsAllowed(r, destClean, entries); !ok {
+		http.Error(w, "403 Forbidden: 压缩包内条目 "+bad+" 没有写权限", http.StatusForbidden)
+		return
+	}
+
+	// 解压进度是 SSE，写端也要有「无进展超时」：客户端连上不读时，
+	// 不能让它一直占着并发名额。
+	tw, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
+	defer resetWrite()
+	sse, err := newSSEWriter(tw)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -352,6 +402,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		MaxTotalBytes: s.cfg.ExtractMaxTotal,
 		MaxFiles:      s.cfg.ExtractMaxFiles,
 		MaxRatio:      s.cfg.ExtractMaxRatio,
+		AllowSymlink:  s.cfg.AllowSymlink,
 	}
 
 	rep, exErr := rd.Extract(r.Context(), opts, onProgress)
@@ -381,6 +432,23 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		"report": rep,
 		"url":    s.PathPrefix() + quotePath(relDest) + "/",
 	})
+}
+
+// extractTargetsAllowed 对压缩包内每个条目的最终 URL 路径做写权限复核。
+//
+// 返回第一个不通过的路径（用于错误提示）与是否全部通过。
+func (s *Server) extractTargetsAllowed(r *http.Request, destClean string, entries []archive.Entry) (string, bool) {
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name == "" {
+			continue
+		}
+		target := fsutil.CleanURLPath(path.Join(destClean, name))
+		if s.checkPerm(r, target) != auth.PermReadWrite {
+			return target, false
+		}
+	}
+	return "", true
 }
 
 // defaultDest 依据压缩包路径推导默认解压目录。

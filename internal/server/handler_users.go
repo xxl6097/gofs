@@ -169,6 +169,8 @@ func (s *Server) buildUsers() usersReply {
 
 // decodeJSON 解析请求体，出错时写出 4xx 并返回 false。
 func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
+	defer resetRead()
 	dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
 	if err := dec.Decode(v); err != nil {
 		if errors.Is(err, io.EOF) {
