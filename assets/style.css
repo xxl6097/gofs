@@ -1275,6 +1275,20 @@ table.listing {
   font-size: var(--fs-md);
 }
 
+/* 大目录分批渲染的底部提示。放在卡片内部，跟随圆角与分隔线。 */
+.load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text-mute);
+  font-size: var(--fs-sm);
+}
+
 .empty {
   padding: 56px 20px;
   text-align: center;

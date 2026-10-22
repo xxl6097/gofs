@@ -197,11 +197,17 @@
     return !!(window.matchMedia && window.matchMedia('(max-width: 560px)').matches);
   }
 
+  // 大目录首屏只建这么多行，其余由底部的「再显示」分批追加。
+  // 20k 行一次性建 DOM 会让首屏和设备都很难受；文件管理器里
+  // 真正需要滚完后 20k 行的场景也很少。
+  var PAGE_SIZE = 200;
+
   var state = {
     path: DATA.path || '/',
     query: DATA.query || '',
     name: DATA.name || '/',
     entries: (DATA.listing && DATA.listing.entries) || [],
+    renderLimit: PAGE_SIZE,
     // listing 保存服务端返回的完整目录信息，统计口径以它为准：
     // 里面带 total_all / truncated / dir_count / file_size，
     // 这些是「把 entries 再数一遍」算不出来的（尤其截断与隐藏文件的情况）。
@@ -1994,7 +2000,7 @@
       if (state.query) $('search-sort-select').value = state.searchSortKey;
     }
 
-    list.forEach(function (e, rowIndex) {
+    function makeRow(e, rowIndex) {
       var tr = document.createElement('tr');
       tr.dataset.path = e.path;
       // roving tabindex：Tab 进表格只停在第一行，之后用方向键移动。
@@ -2261,8 +2267,38 @@
         }
       };
 
-      tbody.appendChild(tr);
-    });
+      return tr;
+    }
+
+    // 首屏只画前 renderLimit 行。list 本身仍是完整结果集，
+    // 统计、全选、打包都以它为准，只有 DOM 是分批的。
+    var limit = Math.min(state.renderLimit || PAGE_SIZE, list.length);
+    for (var ri = 0; ri < limit; ri++) {
+      tbody.appendChild(makeRow(list[ri], ri));
+    }
+
+    function updateLoadMore(total, shown) {
+      var box = $('load-more');
+      var text = $('load-more-text');
+      var button = $('btn-load-more');
+      if (!box) return;
+      box.hidden = total <= shown;
+      if (box.hidden) return;
+      text.textContent = '已显示 ' + shown + ' / ' + total + ' 项';
+      button.textContent = '再显示 ' + Math.min(PAGE_SIZE, total - shown) + ' 项';
+      button.onclick = function () {
+        var from = Math.min(state.renderLimit, total);
+        state.renderLimit = Math.min(from + PAGE_SIZE, total);
+        // 只追加新行，不重建已有 DOM：用户滚到哪儿，已渲染的行就留在哪儿。
+        for (var i = from; i < state.renderLimit; i++) {
+          tbody.appendChild(makeRow(list[i], i));
+        }
+        updateLoadMore(total, state.renderLimit);
+        collapseWrappedOps();
+        syncSelection();
+      };
+    }
+    updateLoadMore(list.length, limit);
 
     syncSelection();
     renderSortHeader();
@@ -2838,6 +2874,7 @@
       state.path = data.path || path;
       state.name = data.name || path;
       state.entries = data.entries || [];
+      state.renderLimit = PAGE_SIZE;
       state.listing = data;
       state.query = '';
       state.selected.clear();
@@ -2941,6 +2978,7 @@
       if (state.path !== searchPath) return;
       state.query = q;
       state.entries = data.entries || [];
+      state.renderLimit = PAGE_SIZE;
       state.listing = data;
       state.selected.clear();
 

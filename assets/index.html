@@ -243,6 +243,12 @@
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+    <!-- 大目录分批渲染：首屏只画前 PAGE_SIZE 行，其余按需追加。
+         放在 table 外、table-wrap 内，圆角与分隔线跟着卡片走。 -->
+    <div class="load-more" id="load-more" hidden>
+      <span id="load-more-text" aria-live="polite"></span>
+      <button class="btn" id="btn-load-more" type="button">再显示</button>
+    </div>
     <div class="empty" id="empty" hidden></div>
   </div>
 </main>
