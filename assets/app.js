@@ -1891,6 +1891,54 @@
     if (next.scrollIntoView) next.scrollIntoView({ block: 'nearest' });
   }
 
+  // appendSearchHighlight 把搜索命中的片段包成 <mark>。
+  //
+  // 只对模糊/精确两种模式做高亮：通配符与正则的命中范围需要真正解析模式，
+  // 前端再实现一遍容易和服务端算得不一样。宁可不高亮，也不标错。
+  // 全程 createElement/textContent，文件名是不可信输入，不能拼 HTML。
+  function appendSearchHighlight(parent, text, query, mode) {
+    var s = String(text == null ? '' : text);
+    var q = String(query == null ? '' : query);
+    if (!q || (mode !== 'fuzzy' && mode !== 'exact')) {
+      parent.textContent = s;
+      return;
+    }
+    if (mode === 'exact') {
+      if (s.toLowerCase() === q.toLowerCase()) {
+        var whole = document.createElement('mark');
+        whole.className = 'search-hit';
+        whole.textContent = s;
+        parent.appendChild(whole);
+      } else {
+        parent.textContent = s;
+      }
+      return;
+    }
+    var lower = s.toLowerCase();
+    var needle = q.toLowerCase();
+    var from = 0;
+    var idx;
+    var hit = false;
+    while ((idx = lower.indexOf(needle, from)) !== -1) {
+      hit = true;
+      if (idx > from) {
+        parent.appendChild(document.createTextNode(s.slice(from, idx)));
+      }
+      var mark = document.createElement('mark');
+      mark.className = 'search-hit';
+      mark.textContent = s.slice(idx, idx + needle.length);
+      parent.appendChild(mark);
+      from = idx + needle.length;
+    }
+    if (!hit) {
+      parent.textContent = s;
+      return;
+    }
+    if (from < s.length) {
+      parent.appendChild(document.createTextNode(s.slice(from)));
+    }
+  }
+
   function renderTable() {
     var tbody = $('tbody');
     tbody.textContent = '';
@@ -1942,7 +1990,7 @@
       cell.appendChild(svgIcon(kindOf(e)));
       var label = document.createElement('span');
       label.className = 'label';
-      label.textContent = e.name;
+      appendSearchHighlight(label, e.name, state.query, state.searchMode);
       label.title = e.path;
       if (e.is_dir) {
         label.onclick = function () { navigate(e.path); };
@@ -1969,12 +2017,15 @@
           parent = parent.slice(0, -e.name.length);
         }
         parent = parent.replace(/\/+$/, '') || '根目录';
-        var subParts = [parent];
-        // 手机上大小列被隐藏，顺手在这里补回来，避免搜索结果只有名字。
-        if (isNarrow() && !e.is_dir) subParts.push(fmtSize(e.size));
         var sub = document.createElement('span');
         sub.className = 'name-sub';
-        sub.textContent = subParts.join(' · ');
+        // 命中可能来自路径而不是文件名（例如搜「项目文档」），
+        // 二级路径里也标出来，用户才知道为什么这一行会被搜到。
+        appendSearchHighlight(sub, parent, state.query, state.searchMode);
+        // 手机上大小列被隐藏，顺手在这里补回来，避免搜索结果只有名字。
+        if (isNarrow() && !e.is_dir) {
+          sub.appendChild(document.createTextNode(' · ' + fmtSize(e.size)));
+        }
         sub.title = e.path;
         main.appendChild(sub);
       }
@@ -2415,7 +2466,15 @@
   function syncToolbarOffset() {
     var tb = document.querySelector('.topbar');
     if (!tb) return;
-    document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+    var topbarH = tb.offsetHeight;
+    document.documentElement.style.setProperty('--topbar-h', topbarH + 'px');
+    // 表头吸顶要让开「顶栏 + 吸顶后的批量工具条」。
+    // 工具条是否吸顶由这个类决定，量一次高度写进变量，CSS 只负责用。
+    var toolbar = $('toolbar');
+    var extra = (toolbar && toolbar.classList.contains('stuck'))
+      ? toolbar.offsetHeight : 0;
+    document.documentElement.style.setProperty(
+      '--table-head-top', (topbarH + extra) + 'px');
   }
 
   function syncSelection() {
@@ -2426,9 +2485,10 @@
     $('check-all').checked = listed > 0 && n >= listed;
     $('check-all').indeterminate = n > 0 && n < listed;
 
-    // 多选时把工具栏吸在顶栏下方。先量高度再挂类，保证第一次吸顶就定位正确。
+    // 多选时把工具栏吸在顶栏下方。这里只挂类，高度等下面所有按钮文案 /
+    // 显隐都更新完再量 —— 手机端「删除 / 移动 / 重命名」的文案变化会让
+    // 工具条折行，提前量到的是折行前的旧高度，表头会压住工具条。
     $('toolbar').classList.toggle('stuck', n > 0);
-    if (n > 0) syncToolbarOffset();
 
     // 进入批量选择后，投放区不再相关；清空选择后自动回来。
     var zone = $('drop-zone');
@@ -2500,22 +2560,27 @@
       btnZip.setAttribute('aria-label', '打包当前目录并下载');
       btnZip.title = '把当前目录整个打包成 zip 下载';
     }
+
+    // 文案与显隐都落定后再量一次工具条高度，表头吸顶偏移才准确。
+    syncToolbarOffset();
   }
 
   function renderPerms() {
     // 上传 / 新建都是「触发按钮 + 下拉」。权限只挂在触发按钮上，
     // 菜单项跟着它一起显隐 —— 不必再单独隐藏每一项。
     $('btn-upload').hidden = !can('write');
+    $('btn-upload-menu').hidden = !can('write');
     $('btn-mkdir').hidden = !can('write');
     // 搜索态、空目录下这个按钮没有意义：前者会让用户误以为打包的是
     // 搜索结果（实际打的是 state.path），后者只会产出一个空 zip。
     $('btn-zip').hidden = !can('archive') || !!state.query || state.entries.length === 0;
     $('btn-settings').hidden = !allowAnySettings();
     if (can('write')) {
-      $('btn-upload').title = '上传：文件，或整个文件夹　·　' + uploadLimitHint();
+      $('btn-upload').title = uploadLimitHint();
       // 文件夹上传的提示：说清「会保留结构」，这是它和普通上传最大的区别。
       $('btn-upload-dir').title = '上传整个文件夹（保留目录结构）　·　' +
         uploadLimitHint();
+      $('btn-upload-menu').title = '更多上传方式：上传文件夹（保留目录结构）';
       $('btn-mkdir').title = '新建：空文件，或目录';
     }
     if (!$('btn-settings').hidden) {
@@ -5940,6 +6005,9 @@
     // （工具条统计口径、页脚能力、投放区那句话），要重算一次；
     // 不重算就得刷新页面才正确。只在真的跨过断点时才算，避免拖动时抖动。
     var wasNarrow = isNarrow();
+    // 首屏没有选择态/Toast 时也要把顶栏高度写进变量，
+    // 否则吸顶表头拿不到默认偏移。
+    syncToolbarOffset();
     window.addEventListener('resize', function () {
       // 操作列的收起与否取决于实际宽度，所以每次改宽都要重算 ——
       // 不能只在跨过断点时算（拖动窗口时列宽一直在变）。
@@ -5995,9 +6063,16 @@
     });
     G.closeTopMenus = closeMenu;
 
+    // 分裂按钮：主按钮直接打开文件选择器，caret 才展开菜单。
+    // 主按钮不再有 aria-haspopup，读屏不会把它当菜单开关。
     $('btn-upload').onclick = function (e) {
+      e.stopPropagation();
+      closeMenu();
+      $('file-input').click();
+    };
+    $('btn-upload-menu').onclick = function (e) {
       e.stopPropagation();   // 别让上面的 document 监听立刻把它关掉
-      toggleMenu('upload-wrap', 'upload-menu', 'btn-upload');
+      toggleMenu('upload-wrap', 'upload-menu', 'btn-upload-menu');
     };
 
     $('btn-theme').onclick = function (e) {

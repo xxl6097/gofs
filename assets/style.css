@@ -389,8 +389,12 @@
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
 }
+/* ⚠️ 不要把 body 固定成 100% 高：body 同时是 flex 容器，
+   内容会溢出到 body 盒子之外。body 只有一屏高时，顶栏 sticky
+   的包含块也只到一屏，滚过一屏后整条顶栏会跟着滚走。
+   交给 min-height:100vh + 内容自然撑高即可。 */
+html { height: 100%; }
 
 body {
   background: var(--bg);
@@ -791,6 +795,26 @@ svg {
    桌面端是浮层；手机端「新建」位于「更多」面板里，由文件末尾的 820px
    断点把同一个浮层改成就地展开（accordion），不弹第二层。 */
 .menu-wrap { position: relative; display: inline-flex; }
+
+/* 上传分裂按钮：两半贴在一起，共用主按钮的强调色。
+   中间那条半透明白线在深浅主题的蓝底上都可辨。 */
+.upload-split { gap: 0; }
+.upload-split #btn-upload {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.upload-split #btn-upload-menu {
+  padding: 7px 6px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255, 255, 255, .28);
+}
+.upload-split #btn-upload-menu .caret {
+  width: 12px;
+  height: 12px;
+  opacity: .8;
+  margin: 0;
+}
 .menu-pop {
   position: absolute;
   top: calc(100% + 6px);
@@ -825,6 +849,12 @@ svg {
 .menu-item svg { width: 17px; height: 17px; color: var(--text-dim); flex: none; }
 /* 触发按钮上的小箭头：有它才看得出「这里会展开」。 */
 .menu-wrap .caret { width: 12px; height: 12px; opacity: .65; margin-left: 1px; }
+
+/* 桌面端主题是低频工具，收成「图标 + caret」即可；文字标签留给
+   手机端「更多」面板（那里一整列都是文字，突然只剩图标反而难认）。 */
+@media (min-width: 821px) {
+  #btn-theme > span { display: none; }
+}
 
 /* ---------------------------------------------------------------- 主体 */
 
@@ -937,7 +967,11 @@ svg {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-elev);
+  /* overflow:hidden 会建立滚动容器，表头的 position:sticky 就只在这个
+     不滚动的容器里生效，等于不吸顶。overflow:clip 同样裁圆角，
+     但不会建立滚动容器；不支持 clip 的旧浏览器退回 hidden，只是不吸顶。 */
   overflow: hidden;
+  overflow: clip;
 }
 
 table.listing {
@@ -956,6 +990,10 @@ table.listing {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   user-select: none;
+  /* 长列表滚动时保留列标题。偏移由 JS 写入：顶栏高度 + 吸顶工具条高度。 */
+  position: sticky;
+  top: var(--table-head-top, var(--topbar-h, 0px));
+  z-index: 5;
 }
 
 .listing th.sortable { cursor: pointer; }
@@ -1024,6 +1062,16 @@ table.listing {
   line-height: 1.4;
 }
 .name-cell .label:hover { color: var(--accent); text-decoration: underline; }
+/* 搜索命中片段。用半透明强调色，深浅主题都不用单独调；去掉 <mark>
+   浏览器默认的黄色底，它和整套色板不搭。 */
+.name-cell .search-hit {
+  background: var(--accent-soft);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.name-cell .label:hover .search-hit { color: inherit; }
 .name-cell .tag {
   font-size: var(--fs-2xs);
   padding: 1px 6px;
@@ -2821,6 +2869,8 @@ html.booting body::after {
   .rn-check input { width: 18px; height: 18px; }
   /* 可点的「可解压」标签也按触摸目标放大。 */
   .name-cell .tag-action { min-height: 30px; }
+  /* 分裂按钮的 caret 在桌面上只有 24px 宽；触摸端撑到 40px。 */
+  .upload-split #btn-upload-menu { min-width: 40px; }
   /* 设置页的标签页与「恢复默认」也是可点控件，别让它们停在 30px 上下。 */
   .tab, .office-tab {
     display: inline-flex;

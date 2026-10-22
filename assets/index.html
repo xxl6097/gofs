@@ -83,14 +83,16 @@
     <button class="btn icon" id="btn-refresh" title="刷新" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
     </button>
-    <!-- 上传 / 新建都收成下拉：看一眼就知道有「文件」和「文件夹」两种，
-         不必让工具栏同时摆两对按钮。桌面端弹浮层，手机端在「更多」里
-         就地展开（见 CSS 里 .more-panel .menu-pop 那条）。 -->
-    <div class="menu-wrap" id="upload-wrap">
-      <button class="btn primary" id="btn-upload" type="button" hidden
-              aria-haspopup="menu" aria-expanded="false" aria-controls="upload-menu">
+    <!-- 上传做成分裂按钮：左边直接选文件（最常用的动作少一次点击），
+         右边 caret 展开「上传文件夹」。两半共用 .menu-wrap 的浮层定位。 -->
+    <div class="menu-wrap upload-split" id="upload-wrap">
+      <button class="btn primary" id="btn-upload" type="button" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6"/><path d="m6 11 6-6 6 6"/><path d="M4 20h16"/></svg>
         <span>上传</span>
+      </button>
+      <button class="btn primary upload-caret" id="btn-upload-menu" type="button" hidden
+              title="上传文件夹" aria-label="更多上传方式"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="upload-menu">
         <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
       </button>
       <div class="menu-pop" id="upload-menu" role="menu">
