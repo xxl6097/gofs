@@ -1578,6 +1578,36 @@ table.listing {
   color: var(--accent);
   font-size: var(--fs-xs);
 }
+/* 高级网络设置：低频、高风险，默认收起；摘要里给出当前端点。 */
+.settings-advanced {
+  margin: 10px 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  overflow: hidden;
+}
+.settings-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 9px 12px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.settings-advanced > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::before {
+  content: '▸';
+  color: var(--text-mute);
+  font-size: 11px;
+}
+.settings-advanced[open] > summary::before { content: '▾'; }
+.settings-advanced[open] > summary { border-bottom: 1px solid var(--border); }
+.settings-advanced-body { padding: 12px 12px 2px; }
+.settings-advanced-body .field:last-child { margin-bottom: 12px; }
+
 /* 设置页的低频长说明：默认收起，避免每个字段都铺 3 行灰字。 */
 .hint-disclosure {
   margin-top: 5px;
@@ -2901,6 +2931,7 @@ html.booting body::after {
   }
   .field-meta .reset-control { min-height: 40px; padding: 0 6px; }
   .hint-disclosure summary { min-height: 40px; }
+  .settings-advanced > summary { min-height: 40px; }
   /* 账号芯片里的「退出」也是按钮：原先是 12px 文字 + 1px 内边距，
      实际可点高度约 20px，旁边就是用户名，误触成本还不低。 */
   .user { min-height: 40px; padding: 2px 10px; }

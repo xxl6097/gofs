@@ -989,6 +989,17 @@
     var m = document.createElement('div');
     m.className = 'msg';
     m.textContent = title;
+    // 进度提示如果跟着普通的 live region 每次更新都播报，读屏会一直被打断。
+    // 把它降级成 progressbar（可按需读取），并在这条 toast 上关闭 live；
+    // 完成/失败时再恢复 polite，只播报最终结果。
+    m.setAttribute('role', 'progressbar');
+    m.setAttribute('aria-label', title);
+    m.setAttribute('aria-valuemin', '0');
+    m.setAttribute('aria-valuemax', '100');
+    m.setAttribute('aria-valuenow', '0');
+    m.setAttribute('aria-valuetext', title);
+    el.setAttribute('aria-live', 'off');
+    el.setAttribute('aria-busy', 'true');
     el.appendChild(m);
     // 「取消」按钮只在调用方给了回调时才出现（上传进度等不可取消的场景不显示）。
     var cancelBtn = null;
@@ -1011,39 +1022,50 @@
     var sp = makeSpeedometer();
     // 结束（成功 / 失败 / 取消）后取消按钮就没意义了，收掉。
     function dropCancel() { if (cancelBtn) { cancelBtn.remove(); cancelBtn = null; } }
+
+    function finish(kind, icon, msg, ms) {
+      killed = true;
+      dropCancel();
+      el.className = 'toast ' + kind;
+      el.removeAttribute('aria-busy');
+      el.setAttribute('aria-live', 'polite');
+      el.setAttribute('aria-atomic', 'true');
+      // 不再是进行中的进度条，把 widget 语义与数值一并摘掉，
+      // 只留下一句可播报的最终状态。
+      m.removeAttribute('role');
+      m.removeAttribute('aria-label');
+      m.removeAttribute('aria-valuemin');
+      m.removeAttribute('aria-valuemax');
+      m.removeAttribute('aria-valuenow');
+      m.removeAttribute('aria-valuetext');
+      svg.innerHTML = icon;
+      m.textContent = msg;
+      setTimeout(function () {
+        el.style.transition = 'opacity .2s';
+        el.style.opacity = '0';
+        setTimeout(function () { el.remove(); }, 220);
+      }, ms);
+    }
+
     return {
       update: function (loaded, total) {
         if (killed) return;
         var pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
         var s = sp.sample(loaded, total);
-        m.textContent = title + '　' + fmtSize(loaded) + ' / ' + fmtSize(total) +
+        var text = title + '　' + fmtSize(loaded) + ' / ' + fmtSize(total) +
           '（' + pct + '%）' + speedSuffix(s);
+        m.textContent = text;
+        m.setAttribute('aria-valuenow', String(pct));
+        m.setAttribute('aria-valuetext',
+          title + '：' + pct + '%，已传 ' + fmtSize(loaded) + ' / ' + fmtSize(total));
       },
       done: function (msg) {
         if (killed) return;
-        killed = true;
-        dropCancel();
-        el.className = 'toast ok';
-        svg.innerHTML = '<path d="M20 6 9 17l-5-5"/>';
-        m.textContent = msg;
-        setTimeout(function () {
-          el.style.transition = 'opacity .2s';
-          el.style.opacity = '0';
-          setTimeout(function () { el.remove(); }, 220);
-        }, 2600);
+        finish('ok', '<path d="M20 6 9 17l-5-5"/>', msg, 2600);
       },
       fail: function (msg) {
         if (killed) return;
-        killed = true;
-        dropCancel();
-        el.className = 'toast err';
-        svg.innerHTML = '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>';
-        m.textContent = msg;
-        setTimeout(function () {
-          el.style.transition = 'opacity .2s';
-          el.style.opacity = '0';
-          setTimeout(function () { el.remove(); }, 220);
-        }, 6000);
+        finish('err', '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>', msg, 6000);
       }
     };
   }

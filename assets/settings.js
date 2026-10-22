@@ -552,6 +552,21 @@
       // 服务端只在「当前请求确实是直达监听端口」时才给跳转地址（见
       // listen_jump_url），其余情况（unix socket、前面挡着代理）只提示不跳。
       if (cur.listen_editable) {
+        // 监听地址/端口是低频且高风险的设置（牵扯 Docker 端口映射、防火墙、
+        // systemd、反代 upstream），默认收起来，摘要里直接给出当前端点。
+        var listenAddr = cur.listen_addr || '0.0.0.0';
+        var endpoint = listenAddr.charAt(0) === '/'
+          ? 'unix socket'
+          : listenAddr + ':' + (cur.listen_port || '系统分配');
+        var adv = document.createElement('details');
+        adv.className = 'settings-advanced';
+        var advSummary = document.createElement('summary');
+        advSummary.textContent = '高级网络设置 · ' + endpoint;
+        adv.appendChild(advSummary);
+        var advBody = document.createElement('div');
+        advBody.className = 'settings-advanced-body';
+        adv.appendChild(advBody);
+
         listenAddrField = makeTextField({
           label: '监听地址',
           value: cur.listen_addr,
@@ -560,7 +575,7 @@
           hintText: '留空表示所有网卡（0.0.0.0）。填 / 开头的绝对路径则改为监听 ' +
             'unix socket（如 /run/gofs.sock）。'
         });
-        el.appendChild(listenAddrField.field);
+        advBody.appendChild(listenAddrField.field);
 
         listenPortField = makeTextField({
           label: '监听端口',
@@ -570,11 +585,12 @@
           hintText: '保存后**立即**切到新端口：已有传输不断，新连接走新端口。' +
             '0 表示由系统分配；监听 unix socket 时本项无效。'
         });
-        el.appendChild(listenPortField.field);
+        advBody.appendChild(listenPortField.field);
         if (cur.listen_locked) {
           addHint(listenPortField.field,
             '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');
         }
+        el.appendChild(adv);
       } else {
         // 不显示那两个输入框，但把原因说清楚 —— 直接消失会让人以为功能没了。
         addHint(el, '本实例不支持在页面上改监听地址：它没有自己的监听' +
