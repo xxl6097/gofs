@@ -61,21 +61,83 @@ fi
 ok=0
 bad=0
 
+# 反代终止 TLS 时，服务端可能不知道外部用的是 HTTPS，把地址写成了 http://。
+# 先用一个**不带密钥**的 HEAD 探一下：明文地址若被跳到 https，就把 BASE
+# 一次换掉 —— 既避免把密钥和文件先发到明文连接上，也避免每个文件白传一遍。
+if [ "${BASE#http://}" != "$BASE" ]; then
+  probe=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+    --connect-timeout 5 --max-time 10 -I "$BASE" 2>/dev/null) || probe=""
+  probe_code=${probe%% *}
+  probe_loc=${probe#* }
+  if [ "${probe_code#3}" != "$probe_code" ] && [ "${probe_loc#https://}" != "$probe_loc" ]; then
+    BASE="https://${BASE#http://}"
+  fi
+fi
+
+# post_once <地址> <本地文件> <目标子目录>
+# 输出 "<HTTP 状态码> <重定向地址>"；只有 curl 本身失败时才返回非 0。
+# 不用 -f：它把 3xx 也当成成功，而反代的「HTTP → HTTPS」跳转正是 3xx ——
+# 上传内容根本没发出去，脚本却会报成功。
+post_once() {
+  local url="$1" file="$2" target="$3"
+  if [ -n "$target" ]; then
+    curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+      -H "X-Gofs-Upload-Key: $KEY" \
+      -F "path=$target" -F "file=@$file" "$url"
+  else
+    curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+      -H "X-Gofs-Upload-Key: $KEY" \
+      -F "file=@$file" "$url"
+  fi
+}
+
 # post <本地文件> <想放的相对路径>
 post() {
-  local rel="$2" dir target
+  local rel="$2" dir target url resp code
   dir=$(dirname "$rel")
   [ "$dir" = "." ] && dir=""
   target="${DEST:+$DEST/}$dir"
   target="${target%/}"
-  if curl -sS -f -H "X-Gofs-Upload-Key: $KEY" \
-       ${target:+-F "path=$target"} -F "file=@$1" "$BASE" >/dev/null; then
-    echo "  ✓ ${target:+$target/}$(basename "$rel")"
-    ok=$((ok + 1))
-  else
-    echo "  ✗ $rel" >&2
+
+  url="$BASE"
+  if ! resp=$(post_once "$url" "$1" "$target"); then
+    echo "  ✗ $rel（连接失败）" >&2
     bad=$((bad + 1))
+    return
   fi
+  code=${resp%% *}
+
+  # 上面的探针没测出跳转时的兜底（比如 HEAD 被反代拦了）。
+  # 反代只做 HTTP→HTTPS 跳转时，真正接收上传的是 https 那一侧。
+  # 在**同一路径**上换协议重发：不跟着 Location 走，因为有的反代
+  # 跳转时会丢掉路径和查询串，跟着走会把文件传到根目录或别的范围里。
+  # 301/302 也在这里手动重发 POST —— 交给 curl 跟会变成 GET。
+  if [ "${code#3}" != "$code" ] && [ "${url#http://}" != "$url" ]; then
+    url="https://${url#http://}"
+    if ! resp=$(post_once "$url" "$1" "$target"); then
+      echo "  ✗ $rel（改用 https 重试失败）" >&2
+      bad=$((bad + 1))
+      return
+    fi
+    code=${resp%% *}
+  fi
+
+  case "$code" in
+    2??)
+      echo "  ✓ ${target:+$target/}$(basename "$rel")"
+      ok=$((ok + 1))
+      ;;
+    3??)
+      # 跳过去了却没找到可用的 https 地址：多半是反代没把
+      # X-Forwarded-Proto 传给服务端，或服务端没配 --trusted-proxies。
+      echo "  ✗ $rel（HTTP $code 跳转未完成，检查反代的 X-Forwarded-Proto 与 --trusted-proxies）" >&2
+      bad=$((bad + 1))
+      ;;
+    *)
+      echo "  ✗ $rel（HTTP $code）" >&2
+      bad=$((bad + 1))
+      ;;
+  esac
 }
 
 for a in "${args[@]}"; do
