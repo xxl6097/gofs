@@ -1,10 +1,9 @@
 /* gofs 在线文本编辑器。
  *
  * 支持 txt / markdown / html / json / xml / yaml 以及各类源码文件的读取与保存，
- * 并提供 markdown（自研渲染）、html（沙箱 iframe）、json（格式化 + 校验）、
- * xml（格式校验）四种预览。
- *
- * 复用 app.js 暴露的 window.GOFS，不引入任何第三方库。 */
+ * 并提供 markdown（自研渲染）、html（沙箱 iframe）、json / xml 预览。
+ * JSON / XML / YAML / TOML / INI / conf / .config / .env 还能直接格式化源码；
+ * 全部用浏览器内建能力或手写的小解析器实现，不引入任何第三方库。 */
 (function () {
   'use strict';
 
@@ -291,6 +290,320 @@
     return box;
   }
 
+  // ---------------------------------------------------------------- 格式化
+
+  // 这些格式化器不引入任何第三方库：JSON/XML 用浏览器内建能力，
+  // YAML/TOML/INI/dotenv 是保守的行级整理；复杂结构宁可报错也不改坏内容。
+
+  function formatJSONText(src) {
+    try {
+      return JSON.stringify(JSON.parse(src), null, 2);
+    } catch (e) {
+      throw new Error('JSON 不合法：' + e.message);
+    }
+  }
+
+  function xmlEscapeText(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function xmlEscapeAttr(s) {
+    return xmlEscapeText(s).replace(/"/g, '&quot;');
+  }
+
+  function xmlSerializeNode(node, depth) {
+    var pad = new Array(depth + 1).join('  ');
+    var type = node.nodeType;
+    if (type === 1) {
+      // xml:space="preserve" 的子树不能靠加空白来排版。
+      if (node.getAttribute && node.getAttribute('xml:space') === 'preserve') {
+        return pad + new XMLSerializer().serializeToString(node);
+      }
+      var attrs = '';
+      for (var i = 0; i < node.attributes.length; i++) {
+        var a = node.attributes[i];
+        attrs += ' ' + a.name + '="' + xmlEscapeAttr(a.value) + '"';
+      }
+      var kids = [];
+      for (var k = 0; k < node.childNodes.length; k++) {
+        var ch = node.childNodes[k];
+        if (ch.nodeType === 3 && !ch.nodeValue.trim()) continue;
+        kids.push(ch);
+      }
+      if (!kids.length) return pad + '<' + node.nodeName + attrs + '/>';
+      var hasText = false;
+      for (var t = 0; t < kids.length; t++) {
+        if (kids[t].nodeType === 3 || kids[t].nodeType === 4) { hasText = true; break; }
+      }
+      // 混合内容（文本 + 子元素）保留原始内部形态，避免额外空白改变语义。
+      if (hasText) return pad + new XMLSerializer().serializeToString(node);
+      var lines = [pad + '<' + node.nodeName + attrs + '>'];
+      kids.forEach(function (child) { lines.push(xmlSerializeNode(child, depth + 1)); });
+      lines.push(pad + '</' + node.nodeName + '>');
+      return lines.join('\n');
+    }
+    if (type === 3) return pad + xmlEscapeText(node.nodeValue);
+    if (type === 4) return pad + '<![CDATA[' + node.nodeValue + ']]>';
+    if (type === 7) return pad + '<?' + node.target + (node.data ? ' ' + node.data : '') + '?>';
+    if (type === 8) return pad + '<!--' + node.nodeValue + '-->';
+    return pad + new XMLSerializer().serializeToString(node);
+  }
+
+  function formatXMLText(src) {
+    if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
+      throw new Error('浏览器不支持 XML 格式化');
+    }
+    var doc = new DOMParser().parseFromString(src, 'application/xml');
+    var err = doc.getElementsByTagName('parsererror')[0];
+    if (err) {
+      var msg = String(err.textContent || '').replace(/\s+/g, ' ').trim();
+      throw new Error('XML 不合法' + (msg ? '：' + msg.slice(0, 120) : ''));
+    }
+    var lines = [];
+    // 原文没有 XML 声明就不要凭空加一条，只格式化已有声明。
+    if (/^\s*<\?xml\b/.test(src)) {
+      var decl = '<?xml version="' + (doc.xmlVersion || '1.0') + '"';
+      if (doc.xmlEncoding) decl += ' encoding="' + doc.xmlEncoding + '"';
+      if (doc.xmlStandalone) decl += ' standalone="yes"';
+      lines.push(decl + '?>');
+    }
+    if (doc.doctype) {
+      try { lines.push(new XMLSerializer().serializeToString(doc.doctype)); } catch (e) { /* 忽略 */ }
+    }
+    for (var i = 0; i < doc.childNodes.length; i++) {
+      var ch = doc.childNodes[i];
+      if (ch.nodeType === 1 || ch.nodeType === 8 ||
+          (ch.nodeType === 7 && ch.target !== 'xml')) {
+        lines.push(xmlSerializeNode(ch, 0));
+      }
+    }
+    return finishFormatted(lines, src);
+  }
+
+  // findUnquoted 找分隔符，跳过单/双引号里的内容（TOML/INI 的 key 里可能有 =）。
+  function findUnquoted(s, needle) {
+    var quote = null;
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (quote) {
+        if (quote === '"' && ch === '\\') { i++; continue; }
+        if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === needle) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function countOccurrences(s, sub) {
+    var n = 0, at = 0;
+    while ((at = s.indexOf(sub, at)) !== -1) { n++; at += sub.length; }
+    return n;
+  }
+
+  function finishFormatted(lines, src) {
+    while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
+    var text = lines.join('\n');
+    if (/\n$/.test(src) && text) text += '\n';
+    return text;
+  }
+
+  // YAML：只整理「结构清晰」的块式配置。块标量、跨行引号、多行标量
+  // 或 Tab 缩进一律拒绝，避免把内容改坏。
+  function yamlBlockHeader(line) {
+    var t = line.replace(/\s+$/, '').trim();
+    if (!t || t.charAt(0) === '#') return false;
+    // key: |  /  - >-  /  key: |2+  /  key: | # 注释
+    return /[:\-]\s*[|>][0-9+\-]*\s*(#.*)?$/.test(t);
+  }
+
+  function yamlQuotesBalanced(lines, inBlock) {
+    var quote = null;
+    for (var i = 0; i < lines.length; i++) {
+      if (inBlock[i]) continue;
+      var line = lines[i];
+      for (var j = 0; j < line.length; j++) {
+        var ch = line.charAt(j);
+        if (quote) {
+          if (quote === '"' && ch === '\\') { j++; continue; }
+          if (ch === quote) quote = null;
+        } else {
+          if (ch === '#') break;
+          if (ch === '"' || ch === "'") quote = ch;
+        }
+      }
+      if (quote) return false;
+    }
+    return true;
+  }
+
+  function formatYAMLText(src) {
+    if (!src.trim()) return '';
+    var lines = src.replace(/\r\n?/g, '\n').split('\n');
+    var inBlock = new Array(lines.length);
+    var blockHeaderIndent = -1;
+
+    // 先标出块标量的内容区：块标量里的行不参与结构校验、缩进重排，
+    // 后面只整体平移，保持 | / > 里的空白语义。
+    for (var i = 0; i < lines.length; i++) {
+      var raw0 = lines[i];
+      var t0 = raw0.replace(/\s+$/, '').trim();
+      var indent0 = raw0.length - raw0.replace(/^ +/, '').length;
+      if (blockHeaderIndent >= 0) {
+        if (!t0 || indent0 > blockHeaderIndent) {
+          inBlock[i] = true;
+          continue;
+        }
+        blockHeaderIndent = -1;
+      }
+      if (yamlBlockHeader(raw0)) blockHeaderIndent = indent0;
+    }
+
+    for (i = 0; i < lines.length; i++) {
+      if (inBlock[i]) continue;
+      var line = lines[i];
+      if (/^[ ]*\t/.test(line)) {
+        throw new Error('YAML 使用 Tab 缩进，未自动格式化');
+      }
+      var t = line.replace(/\s+$/, '').trim();
+      if (!t) continue;
+      if (t.charAt(0) !== '#' && t !== '---' && t !== '...' &&
+          !/^-(\s|$)/.test(t) && t.indexOf(':') === -1 &&
+          ']}[{'.indexOf(t.charAt(0)) === -1) {
+        throw new Error('YAML 含多行标量或复杂结构，未自动格式化');
+      }
+    }
+    if (!yamlQuotesBalanced(lines, inBlock)) {
+      throw new Error('YAML 含跨行引号，未自动格式化');
+    }
+
+    var stack = [0];
+    var prevIndent = 0;
+    var out = [];
+    var block = null;
+    for (i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      if (inBlock[i]) {
+        if (!raw) { out.push(''); continue; }
+        var blockIndent = raw.length - raw.replace(/^ +/, '').length;
+        if (block && blockIndent > block.headerIndent) {
+          // 相对块头的缩进保持不变；块内行尾空格也原样保留。
+          var lead = block.newIndent + (blockIndent - block.headerIndent);
+          out.push(new Array(lead + 1).join(' ') + raw.slice(blockIndent));
+        } else {
+          out.push('');
+        }
+        continue;
+      }
+      block = null;
+      var content = raw.replace(/^ +/, '');
+      if (!content) { out.push(''); continue; }
+      var indent = raw.length - content.length;
+      if (indent > prevIndent) {
+        stack.push(indent);
+      } else if (indent < prevIndent) {
+        while (stack.length > 1 && stack[stack.length - 1] > indent) stack.pop();
+        if (indent > stack[stack.length - 1]) stack.push(indent);
+      }
+      var newIndent = (stack.length - 1) * 2;
+      var isHeader = yamlBlockHeader(raw);
+      // 块头行尾的空格/注释没有语义，其余行原样保留内容。
+      var text = isHeader ? content.replace(/\s+$/, '') : content;
+      out.push(new Array(newIndent + 1).join(' ') + text);
+      if (isHeader) {
+        block = { headerIndent: indent, newIndent: newIndent };
+      }
+      prevIndent = indent;
+    }
+    // 不用 finishFormatted：它会吃掉尾部空行，而 |+ / >+ 里这些空行是内容。
+    return out.join('\n');
+  }
+
+  function formatTOMLText(src) {
+    var lines = src.replace(/\r\n?/g, '\n').split('\n');
+    var out = [];
+    var multi = null;
+    for (var i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      if (multi) {
+        out.push(raw);
+        if (raw.indexOf(multi) !== -1) multi = null;
+        continue;
+      }
+      var delim = raw.indexOf('"""') !== -1 ? '"""'
+        : (raw.indexOf("'''") !== -1 ? "'''" : null);
+      if (delim) {
+        out.push(raw);
+        if (countOccurrences(raw, delim) % 2 === 1) multi = delim;
+        continue;
+      }
+      var line = raw.replace(/\s+$/, '');
+      var t = line.trim();
+      if (!t) { out.push(''); continue; }
+      if (t.charAt(0) === '#' || /^\[\[?.*\]\]?$/.test(t)) {
+        out.push(t);
+        continue;
+      }
+      var eq = findUnquoted(line, '=');
+      if (eq < 0) {
+        out.push(line);
+        continue;
+      }
+      out.push(line.slice(0, eq).trim() + ' = ' + line.slice(eq + 1).trim());
+    }
+    return finishFormatted(out, src);
+  }
+
+  function formatIniText(src) {
+    var lines = src.replace(/\r\n?/g, '\n').split('\n');
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/\s+$/, '');
+      var t = line.trim();
+      if (!t) { out.push(''); continue; }
+      if (/^[;#]/.test(t) || /^\[.*\]$/.test(t)) {
+        out.push(t);
+        continue;
+      }
+      // 缩进行视为续行，保留原样，避免改坏多行值。
+      if (/^\s/.test(line)) { out.push(line); continue; }
+      var eq = findUnquoted(line, '=');
+      if (eq < 0) { out.push(line); continue; }
+      out.push(line.slice(0, eq).trim() + ' = ' + line.slice(eq + 1).trim());
+    }
+    return finishFormatted(out, src);
+  }
+
+  function formatDotenvText(src) {
+    var lines = src.replace(/\r\n?/g, '\n').split('\n');
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/\s+$/, '');
+      var t = line.trim();
+      if (!t) { out.push(''); continue; }
+      if (t.charAt(0) === '#') { out.push(t); continue; }
+      var prefix = '';
+      if (/^export\s+/.test(t)) {
+        prefix = 'export ';
+        t = t.replace(/^export\s+/, '');
+      }
+      var eq = findUnquoted(t, '=');
+      if (eq < 0) { out.push(line); continue; }
+      out.push(prefix + t.slice(0, eq).trim() + '=' + t.slice(eq + 1).trim());
+    }
+    return finishFormatted(out, src);
+  }
+
+  var FORMATTERS = {
+    json: { name: 'JSON', run: formatJSONText },
+    xml: { name: 'XML', run: formatXMLText },
+    yaml: { name: 'YAML', run: formatYAMLText },
+    toml: { name: 'TOML', run: formatTOMLText },
+    ini: { name: 'INI / conf', run: formatIniText },
+    dotenv: { name: '环境变量', run: formatDotenvText }
+  };
+
   // ---------------------------------------------------------------- 编辑器
 
   // PREVIEWABLE 决定哪些语言给出预览入口。
@@ -550,12 +863,32 @@
 
     previewMode = PREVIEWABLE[doc.language] ? doc.language : null;
     if (previewMode) {
-      pvLabel = { markdown: '预览', html: '预览', json: '格式化', xml: '校验' }[previewMode];
+      pvLabel = { markdown: '预览', html: '预览', json: '预览', xml: '校验' }[previewMode];
       pvBtn = makeTool(pvLabel, PREVIEWABLE[previewMode] + '（只读，不影响原文）', function () {
         setPreview(!previewOn);
       });
       pvBtn.setAttribute('aria-pressed', 'false');
       tools.appendChild(pvBtn);
+    }
+
+    // 格式化会直接改写 textarea 内容；只读文件不显示入口。
+    var fmt = FORMATTERS[doc.language];
+    if (fmt && !readOnly) {
+      tools.appendChild(makeTool('格式化', '格式化 ' + fmt.name + '（会修改原文）', function () {
+        try {
+          var out = fmt.run(ta.value);
+          if (out === ta.value) {
+            G.toast('info', '格式没有变化');
+            return;
+          }
+          ta.value = out;
+          onEdit();
+          ta.focus();
+          G.toast('ok', '已格式化 ' + fmt.name);
+        } catch (e) {
+          G.toast('err', '格式化失败：' + e.message);
+        }
+      }));
     }
 
     if (doc.language === 'json') {

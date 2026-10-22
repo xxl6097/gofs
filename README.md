@@ -78,7 +78,9 @@
 - 支持 txt / markdown / html / json / xml / yaml / toml / ini / csv 以及各语言源码
 - 单击文件名直接进编辑器；行号、Tab 缩进、回车自动续缩进、`Ctrl/⌘ + S` 保存
 - **Markdown 渲染预览**（自研渲染器，支持标题/列表/表格/代码块/引用/任务列表）
-- **HTML 沙箱预览**、**JSON 格式化与着色**、**XML 结构校验**
+- **HTML 沙箱预览**、**JSON 着色预览**、**XML 结构校验**
+- **源码格式化**：JSON / XML / YAML / TOML / INI / conf / .config / .env
+  都有「格式化」按钮（详见下文“格式化”）
 - 保存时用**内容摘要做乐观锁**，文件被别人改过会提示而不是静默覆盖
 - 保留原文件的 **CRLF/LF 换行风格**与 **UTF-8 BOM**，不会把整份文件的换行都改掉
 - 二进制文件、超大文件、UTF-16 编码一律拒绝，避免改坏文件
@@ -460,7 +462,7 @@ HTML 单击文件名会按页面打开，编辑入口在「更多 → 编辑」�
 
 按扩展名与文件名识别（`internal/textfile`），覆盖 txt / log / md / markdown / rst /
 html / vue / svelte / css / scss / less / js / ts / jsx / tsx / json / jsonc / yaml /
-xml / svg / toml / ini / conf / properties / env / csv / tsv / sql / sh / bash /
+xml / svg / toml / ini / conf / config / properties / env / csv / tsv / sql / sh / bash /
 py / go / java / kt / c / cpp / h / cs / rs / rb / php / lua / r / swift / dart /
 tf / hcl / proto / graphql … 以及 `Makefile` `Dockerfile` `.gitignore` `.env` 等无扩展名文件。
 
@@ -475,6 +477,9 @@ tf / hcl / proto / graphql … 以及 `Makefile` `Dockerfile` `.gitignore` `.env
 - 行号、`Tab` 缩进（多行选区整体缩进 / 反缩进）、回车自动延续上一行缩进
 - `Ctrl/⌘ + S` 保存，`Esc` 关闭（有未保存改动会二次确认）
 - 状态栏显示行数、字符数、换行风格、BOM、文件大小与修改状态
+- JSON / XML / YAML / TOML / INI / conf / config / .env 提供源码格式化；
+  YAML 的 `|` / `>` 块标量会保留内容与空白，跨行引号 / 非块式多行标量
+  仍会拒绝格式化，而不是冒险改坏内容
 - 超过 5000 行自动关闭行号渲染，避免大文件把 DOM 撑爆
 
 ### 预览
@@ -487,6 +492,21 @@ tf / hcl / proto / graphql … 以及 `Makefile` `Dockerfile` `.gitignore` `.env
 | XML | `DOMParser` 结构校验，非法时指出出错位置 |
 
 Markdown 渲染前先对所有文本做 HTML 转义，链接还会过滤 `javascript:` / `data:` 协议。
+
+### 格式化
+
+编辑器工具栏里的「格式化」**直接改写正文**（会进入未保存状态，仍可用撤销/保存）：
+
+| 格式 | 行为 |
+| --- | --- |
+| JSON | `JSON.parse` + 2 空格缩进；非法 JSON 只报错不改内容 |
+| XML | `DOMParser` 校验后按层级缩进；混合内容保留原内部形态 |
+| YAML | 保守整理块式配置的缩进（统一 2 空格）；`|` / `>` 块标量的内容与行尾空白原样保留、只随块头整体平移；跨行引号、Tab 缩进或非块式多行标量时拒绝格式化 |
+| TOML | 统一 section 头与 `key = value` 空白；多行 `"""` / `'''` 内容原样保留 |
+| INI / conf / config | 统一 section 头与 `key = value`；缩进续行原样保留 |
+| .env | 统一成 `KEY=value`，保留 `export` 前缀、引号与行内注释 |
+
+格式化不改变换行风格与 BOM：保存时仍按原文件的 CRLF/LF 和 BOM 写回。
 
 ### 安全与一致性
 

@@ -99,7 +99,7 @@ var extLanguages = map[string]string{
 	"json":   "json", "jsonc": "json", "json5": "json", "ndjson": "json", "jsonl": "json",
 	"geojson": "json", "webmanifest": "json", "har": "json",
 	"yaml": "yaml", "yml": "yaml",
-	"toml": "toml", "ini": "ini", "cfg": "ini", "conf": "ini",
+	"toml": "toml", "ini": "ini", "cfg": "ini", "conf": "ini", "config": "ini",
 	"properties": "properties", "env": "dotenv", "htaccess": "apache",
 	"sh": "shell", "bash": "shell", "zsh": "shell", "fish": "shell",
 	"ksh": "shell", "csh": "shell", "bat": "bat", "cmd": "bat", "ps1": "powershell",
