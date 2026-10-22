@@ -374,7 +374,9 @@
 .login-eye:focus-visible,
 .drop-zone:focus-visible,
 .listing th.sortable:focus-visible,
-.check-hit:focus-within {
+.check-hit:has(input:focus-visible),
+.rn-check:has(input:focus-visible),
+.user-logout:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -422,6 +424,41 @@ svg {
   z-index: 30;
 }
 
+/* 目录导航进行中：顶栏下沿一条扫光。
+   只在 navigate() 的请求期间出现，不占布局，也不遮列表。
+   移动端顶栏会换行，这里贴的是整条顶栏的底边，位置自动正确。 */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent) 45%, transparent 90%);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-position: -45% 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s;
+}
+.topbar.navigating::after {
+  opacity: 1;
+  animation: nav-sweep .9s linear infinite;
+}
+@keyframes nav-sweep {
+  from { background-position: -45% 0; }
+  to   { background-position: 145% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 减少动态效果时保留一条静态进度线：仍有「正在加载」的提示。 */
+  .topbar.navigating::after {
+    animation: none;
+    background: var(--accent);
+    background-size: 100% 100%;
+  }
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -437,6 +474,13 @@ svg {
 }
 
 .brand svg { width: 20px; height: 20px; color: var(--accent); }
+/* 站点标题来自设置页，长度不可控；不截断的话长标题会把整个顶栏挤爆。 */
+.brand span {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* 后退 / 前进 / 上一级。
    flex: none —— 固定成内容宽度，把可伸缩的余地全留给右侧的 breadcrumb
@@ -447,8 +491,14 @@ svg {
 .nav-btns {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0;
   flex: none;
+  /* 三颗独立按钮视觉上并成一个分段控件：比三个各自带边框的方块安静，
+     也给面包屑腾出约 150px（文字标签在下面统一收掉）。 */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
 }
 
 .breadcrumb {
@@ -462,6 +512,23 @@ svg {
   white-space: nowrap;
 }
 .breadcrumb::-webkit-scrollbar { display: none; }
+/* 路径超长时会有半截字被硬切在边缘（例如「录 / 空目录」）。
+   用两侧渐隐提示「这里还能横向滚动」，比硬裁干净得多。
+   类名由 renderBreadcrumb() 根据实际滚动位置切换。 */
+.breadcrumb.fade-left {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px);
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px);
+}
+.breadcrumb.fade-right {
+  -webkit-mask-image: linear-gradient(270deg, transparent 0, #000 16px);
+  mask-image: linear-gradient(270deg, transparent 0, #000 16px);
+}
+.breadcrumb.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px,
+    #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px,
+    #000 calc(100% - 16px), transparent 100%);
+}
 
 .breadcrumb a, .breadcrumb span.crumb {
   color: var(--text-dim);
@@ -582,12 +649,29 @@ svg {
 /* 菜单里的当前项：给个勾选的观感（复用 accent 色，不新增图标）。 */
 .search-mode .menu-item[aria-checked="true"],
 #theme-menu .menu-item[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.search-mode .menu-item[aria-checked="true"]::after,
 #theme-menu .menu-item[aria-checked="true"]::after {
   content: '✓';
   margin-left: auto;
   font-size: var(--fs-xs);
 }
-.search-mode .menu-pop { min-width: 168px; }
+/* 搜索方式的第二行说明。放在菜单里而不是只写 title：
+   手机端没有 hover，用户需要看见「模糊 / 精确 / 通配 / 正则」各自怎么匹配。 */
+.menu-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.menu-item-text small {
+  color: var(--text-mute);
+  font-size: var(--fs-2xs);
+  font-weight: 400;
+  line-height: 1.45;
+}
+.search-mode .menu-item { padding-top: 7px; padding-bottom: 7px; }
+.search-mode .menu-pop { min-width: 228px; }
 
 /* ---------------------------------------------------------------- 按钮 */
 
@@ -618,7 +702,19 @@ svg {
   color: var(--accent-text);
   font-weight: 550;
 }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+/* ⚠️ 必须显式重申背景色：`.btn:hover:not(:disabled)` 的特异度
+   (0,3,0) 高于 `.btn.primary` (0,2,0)，会把主按钮 hover 时的底色
+   改回 --bg-hover，而文字仍是白色 —— 按钮看起来直接消失了。 */
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  filter: brightness(1.08);
+}
+.btn.primary:active:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  filter: brightness(.96);
+}
 
 .btn.danger { color: var(--danger); }
 .btn.danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
@@ -629,7 +725,16 @@ svg {
   border-color: var(--danger);
   color: var(--danger-text);
 }
-.btn.danger-solid:hover:not(:disabled) { filter: brightness(1.08); }
+.btn.danger-solid:hover:not(:disabled) {
+  background: var(--danger);
+  border-color: var(--danger);
+  filter: brightness(1.08);
+}
+.btn.danger-solid:active:not(:disabled) {
+  background: var(--danger);
+  border-color: var(--danger);
+  filter: brightness(.96);
+}
 /* 语义色按钮：解压类动作用橙色，与列表里的「解压」按钮保持一致。 */
 .btn.zip { color: var(--op-unzip); }
 .btn.zip:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--op-unzip); }
@@ -639,6 +744,19 @@ svg {
 
 .btn.icon { padding: 7px; }
 .btn.icon svg { width: 16px; height: 16px; }
+
+/* 导航分段控件内部：去掉各自的外框，只留中间分隔线。
+   ⚠️ 父级 overflow:hidden 会裁掉外侧的焦点环，所以焦点框向内收。
+   ⚠️ 不要在这里写 min-height —— 触摸端靠 .btn 的 40px 规则放大。 */
+.nav-btns .btn {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.nav-btns .btn + .btn { border-left: 1px solid var(--border); }
+.nav-btns .btn span { display: none; }
+.nav-btns .btn:focus-visible { outline-offset: -2px; }
 
 .user {
   display: flex;
@@ -1647,12 +1765,24 @@ table.listing {
 .toasts {
   position: fixed;
   right: 20px;
-  bottom: 20px;
+  /* 避开 iPhone 底部横条：原来的 20px 在安全区机型上会贴到手势条。 */
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   z-index: 200;
   max-width: min(400px, calc(100vw - 40px));
+}
+/* 手机上改到顶栏下方：底部是拇指区和文件列表，提示会盖住正在看的行。
+   高度由 JS 写入的 --topbar-h 决定（顶栏会换行，不能写死）。 */
+@media (max-width: 560px) {
+  .toasts {
+    top: calc(var(--topbar-h, 96px) + 8px);
+    bottom: auto;
+    left: 12px;
+    right: 12px;
+    max-width: none;
+  }
 }
 
 .toast {
@@ -1675,6 +1805,29 @@ table.listing {
 .toast.warn svg { color: var(--warn); }
 .toast.info svg { color: var(--accent); }
 .toast .msg { flex: 1; white-space: pre-wrap; }
+
+/* 手动关闭。提示可能是「保存失败」这类需要读几秒的内容，
+   也可能只是挡住了下面那一行文件 —— 两种情况下等它自己消失都不合理。 */
+.toast-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin: -2px -4px -2px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-mute);
+  cursor: pointer;
+}
+.toast-close:hover { background: var(--bg-hover); color: var(--text); }
+/* 这里要压过上面按类型染色的 `.toast.ok svg` 等规则：
+   关闭按钮是中性控件，不该跟着成功/失败变色。 */
+.toast .toast-close svg { width: 14px; height: 14px; margin: 0; color: var(--text-mute); }
+.toast .toast-close:hover svg { color: var(--text); }
 
 .toast-action {
   flex: none;
@@ -1904,6 +2057,10 @@ html.booting body::after {
   opacity: .8;
 }
 .user-logout:hover { opacity: 1; background: var(--bg-active); }
+
+/* 「退出登录」的移动端入口默认藏起来；桌面端仍用芯片里的「退出」。
+   在 820px 断点里再打开，并隐藏芯片里的那颗按钮。 */
+#btn-logout-more { display: none; }
 
 /* ================================================================ 全屏弹窗 */
 
@@ -2183,6 +2340,19 @@ html.booting body::after {
   flex-wrap: wrap;
 }
 .ed-meta { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+/* 预览开着时按钮本身要有状态，而不是只能从右边多出来的半屏内容去猜。 */
+.ed-tools .btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* 标题旁的未保存圆点。 */
+.ed-dirty-dot {
+  color: var(--warn);
+  font-size: 10px;
+  margin-left: 6px;
+  vertical-align: 2px;
+}
 .ed-lang {
   font-size: var(--fs-xs);
   padding: 2px 8px;
@@ -2577,8 +2747,22 @@ html.booting body::after {
   .login-remember input { width: 20px; height: 20px; }
   /* 「全选」也算一个可点目标，撑到 40px 高。 */
   .checkbox { min-height: 40px; }
+  /* 记住我是整行可点的 label，别让可点高度只有文字那一行。 */
+  .login-remember { min-height: 40px; }
   /* 勾选框本身只有 20px，把整格做成可点区域（label 撑满单元格）。 */
   .check-hit { min-height: 42px; }
+  /* 列表勾选框原先仍是 15px：上面的规则只放大了 .checkbox，漏了这里。
+     42px 的可点区域够大，但 15px 的方框看起来太轻，和整行不匹配。 */
+  .check-hit input,
+  .rn-check input { width: 18px; height: 18px; }
+  /* 账号芯片里的「退出」也是按钮：原先是 12px 文字 + 1px 内边距，
+     实际可点高度约 20px，旁边就是用户名，误触成本还不低。 */
+  .user { min-height: 40px; padding: 2px 10px; }
+  /* 平板等 >820px 的触摸设备仍显示芯片里的「退出」，尺寸要补够。
+     ≤820px 时这颗按钮已被 display:none，这里的规则不会影响手机端。 */
+  .user-logout { min-height: 36px; padding: 6px 10px; }
+  /* Toast 的关闭按钮同样按触摸目标放大。 */
+  .toast-close { width: 40px; height: 40px; margin-top: -8px; margin-bottom: -8px; }
   /* 批量重命名的预览行同理：方框外面那层 label 撑到 40px，
      而且**必须放在这里**（触摸）而不是窄屏那一档 —— 平板也是触摸设备。 */
   .rn-check { width: 40px; min-height: 40px; }
@@ -2688,7 +2872,14 @@ html.booting body::after {
   /* 导航按钮紧跟在品牌图标之后、面包屑之前 —— 与桌面端同一顺序，
      读起来就是「[图标] ← → ↑ 路径 …… [账号]」。 */
   .nav-btns { order: 2; }
-  .breadcrumb { order: 3; width: auto; flex: 1 1 auto; }
+  /* flex-basis 必须是 0，不能用 auto：路径一变长，面包屑的内容宽度
+     会把账号芯片挤到下一行，顶栏从两行变成三行。
+     设成 0 后它只吃剩余空间，超出的路径自己横向滚动。 */
+  .breadcrumb { order: 3; width: auto; flex: 1 1 0; }
+  /* 手机端账号芯片只留用户名：退出入口已移到「更多」里，
+     省下的宽度正好给面包屑。 */
+  .user-logout { display: none; }
+  #btn-logout-more { display: flex; }
   #user-chip { order: 4; }
   .topbar-actions {
     order: 5;
@@ -2810,20 +3001,18 @@ html.booting body::after {
   .toolbar-right { margin-left: auto; }
   .stat { font-size: var(--fs-xs); }
 
-  /* 搜索框里已经有「模糊搜索…」的占位符，旁边再摆一个「模糊」按钮
-     既重复又挤占宽度。手机端只留下拉箭头，模式名由占位符承担；
-     aria-label 由 syncSearchModeUI 同步，读屏仍知道当前模式。 */
+  /* 手机上把模式名藏掉，只留漏斗图标；具体是哪一档由结果统计里的
+     「模糊 · 命中 N 项」承担，读屏仍通过 aria-label 知道当前模式。 */
   .search-mode-btn { padding: 7px 7px; gap: 0; }
   #search-mode-label { display: none; }
   .search-mode-btn .mode-ico { display: inline-block; }
   /* 漏斗本身已经是「筛选/模式」的入口，省掉箭头，把宽度还给搜索框。 */
   .search-mode-btn .caret { display: none; }
 
-  /* 投放区常驻在列表上方（桌面端也一样，见 index.html），这里只收紧间距：
-     手机上它的价值是「说清点一下就能传、传到哪、上限多少」。 */
-  #drop-zone { margin-bottom: 10px; }
-  .drop-zone { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
-  .drop-zone > svg { width: 18px; height: 18px; }
+  /* 手机上不再常驻投放区：顶栏的「上传」就在同一屏，
+     再摆一张占地 70px 的虚线卡片只是重复。拖拽上传本身也不是
+     触摸设备的交互，真正的拖拽提示由 .drop-hint 在全屏浮层里承担。 */
+  #drop-zone { display: none !important; }
 
   /* 页脚收紧：手机只留「谁 + 能做什么」这一句动态信息，
      版本号（静态装饰）让位，并给 iPhone 底部横条留出安全区。 */
@@ -2841,9 +3030,6 @@ html.booting body::after {
   .modal-foot { flex-wrap: wrap; }
   .modal-foot .btn { flex: 1; justify-content: center; min-height: 44px; }
 
-  /* 手机上投放区整块可点，右侧按钮就多余了（还占掉本就不多的宽度）。 */
-  .drop-zone { padding: var(--space-2) var(--space-3); gap: var(--space-2); }
-  .drop-zone-text strong { font-size: var(--fs-sm); }
 }
 
 /* 触摸设备上图标按钮会被放大到 40px（见上面的 @media (hover: none)）。

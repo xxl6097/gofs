@@ -419,6 +419,22 @@
       }
     });
 
+    // 标题旁的未保存圆点：保存按钮在右上角，视线离开编辑区后
+    // 也能一眼看出这份文件还没落盘。
+    var dirtyDot = null;
+    if (!readOnly) {
+      var headTitle = m.el.querySelector('.modal-head > div');
+      if (headTitle) {
+        dirtyDot = document.createElement('span');
+        dirtyDot.className = 'ed-dirty-dot';
+        dirtyDot.textContent = '●';
+        dirtyDot.title = '有未保存的修改';
+        dirtyDot.setAttribute('aria-label', '有未保存的修改');
+        dirtyDot.hidden = true;
+        headTitle.appendChild(dirtyDot);
+      }
+    }
+
     // ---- 统计与行号 ----
 
     function updateStats() {
@@ -430,7 +446,7 @@
       foot.textContent = '换行 ' + (newline === '\r\n' ? 'CRLF' : 'LF') +
         '　·　' + (doc.bom ? '带 BOM' : '无 BOM') +
         '　·　' + G.fmtSize(new Blob([text]).size) +
-        (dirty ? '　·　● 有未保存的修改' : '　·　已同步') +
+        ((dirty || doc.created) ? '　·　● 有未保存的修改' : '　·　已同步') +
         (readOnly ? '　·　只读' : '');
     }
 
@@ -480,6 +496,16 @@
       previewOn = on;
       previewPane.hidden = !on;
       stage.classList.toggle('split', on);
+      if (pvBtn) {
+        // 按钮本身要能看出「预览开着」。否则用户只能从多出来的半边
+        // 内容推断状态，再点一次也不知道会发生什么。
+        pvBtn.classList.toggle('active', on);
+        pvBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        pvBtn.textContent = on ? '关闭预览' : pvLabel;
+        pvBtn.title = on
+          ? '关闭预览（不影响原文）'
+          : PREVIEWABLE[previewMode] + '（只读，不影响原文）';
+      }
       if (on) refreshPreview();
     }
 
@@ -493,18 +519,42 @@
     }
 
     var saveBtn = makeTool('保存', '保存到服务器（Ctrl/⌘ + S）', function () { save(); }, 'primary');
+    var pvBtn = null;
+    var pvLabel = '';
     if (readOnly) {
       saveBtn.disabled = true;
       saveBtn.title = '没有写入权限';
     }
     tools.appendChild(saveBtn);
 
+    // syncSaveState 让「保存」成为真正的状态按钮：
+    // clean 时禁用并显示「已保存」，有改动时才恢复主色与可点状态。
+    // 之前它永远是蓝色可点的，点下去只弹一句「没有需要保存的修改」。
+    function syncSaveState() {
+      if (readOnly) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = '保存';
+        saveBtn.title = '没有写入权限';
+        if (dirtyDot) dirtyDot.hidden = true;
+        return;
+      }
+      if (saving) return;          // 保存中由 save() 自己改文案
+      var clean = !dirty && !doc.created;
+      saveBtn.disabled = clean;
+      saveBtn.classList.toggle('primary', !clean);
+      saveBtn.textContent = clean ? '已保存' : '保存';
+      saveBtn.title = clean ? '没有未保存的修改'
+        : '保存到服务器（Ctrl/⌘ + S）';
+      if (dirtyDot) dirtyDot.hidden = clean;
+    }
+
     previewMode = PREVIEWABLE[doc.language] ? doc.language : null;
     if (previewMode) {
-      var pvLabel = { markdown: '预览', html: '预览', json: '格式化', xml: '校验' }[previewMode];
-      var pvBtn = makeTool(pvLabel, PREVIEWABLE[previewMode] + '（只读，不影响原文）', function () {
+      pvLabel = { markdown: '预览', html: '预览', json: '格式化', xml: '校验' }[previewMode];
+      pvBtn = makeTool(pvLabel, PREVIEWABLE[previewMode] + '（只读，不影响原文）', function () {
         setPreview(!previewOn);
       });
+      pvBtn.setAttribute('aria-pressed', 'false');
       tools.appendChild(pvBtn);
     }
 
@@ -525,10 +575,12 @@
     // ---- 编辑行为 ----
 
     function onEdit() {
-      dirty = true;
+      // 改回原文时 dirty 应当消失，而不是一旦动过就永远亮着。
+      dirty = ta.value !== original || !!doc.created;
       renderGutter();
       updateStats();
       refreshPreview();
+      syncSaveState();
     }
 
     ta.addEventListener('input', onEdit);
@@ -606,9 +658,12 @@
       saveBtn.disabled = true;
       saveBtn.textContent = '保存中…';
 
+      // 先拍下要保存的内容：保存过程中用户仍可能继续编辑，
+      // 成功后不能拿「那时的最新内容」当已保存基准，否则这段新改动会被误判为已同步。
+      var savedContent = ta.value;
       var payload = {
         path: doc.path,
-        content: ta.value,
+        content: savedContent,
         base_hash: baseHash,
         newline: newline
       };
@@ -650,16 +705,20 @@
 
         var out = await res.json();
         baseHash = out.hash || baseHash;
-        dirty = false;
+        // 以「实际发出去的内容」为新基准。保存期间如果又敲了字，
+        // dirty 仍然是 true，不能被这次成功回包抹掉。
+        original = savedContent;
+        doc.created = false;
+        dirty = ta.value !== original;
         updateStats();
+        syncSaveState();
         G.toast('ok', '已保存 ' + doc.name);
         G.refresh();
       } catch (e) {
         G.toast('err', '保存失败：' + e.message);
       } finally {
         saving = false;
-        saveBtn.disabled = false;
-        saveBtn.textContent = '保存';
+        syncSaveState();
       }
     }
 
@@ -667,6 +726,7 @@
     renderGutter();
     updateStats();
     setPreview(false);
+    syncSaveState();
     ta.focus();
     ta.setSelectionRange(0, 0);
   }

@@ -592,7 +592,8 @@
         mask.remove();
         setLoginGate(false);
       }
-      toast('ok', '欢迎回来，' + (DATA.user || u));
+      // 登录成功后界面本身已经完成了切换，不再叠一条「欢迎回来」——
+      // 它正好落在列表底部，第一眼就把文件盖住了。
     }
 
     loginResolve = submit;
@@ -653,30 +654,69 @@
     return true;
   }
 
+  // requestLogout 同时服务桌面端芯片里的「退出」和手机端「更多」菜单里的
+  // 「退出登录」。两处走同一条确认逻辑，避免一边有确认、一边点一下就退出。
+  function requestLogout() {
+    confirmDialog({
+      title: '退出登录',
+      message: '确定要退出 ' + (DATA.user || '当前账号') + ' 吗？',
+      detail: '退出后需要重新输入账号密码才能访问。',
+      okLabel: '退出登录'
+    }).then(function (yes) {
+      if (!yes) return;
+      clearCreds();
+      DATA.user = '';
+      DATA.auth_required = true;
+      // 等会话真的在服务端被撤销再刷新 —— 否则刷新时那张 cookie 还在，
+      // 页面会直接以已登录状态回来，「退出」看着像没生效。
+      dropServerSession().then(function () { location.reload(); });
+    });
+  }
+
   function updateAuthChip() {
     var chip = $('user-chip');
-    if (!DATA.auth_on) { chip.hidden = true; return; }
+    var moreOut = $('btn-logout-more');
+    if (!DATA.auth_on) {
+      chip.hidden = true;
+      if (moreOut) moreOut.hidden = true;
+      return;
+    }
     chip.hidden = false;
     chip.textContent = '';
+    // 权限清单从页脚移到这里：页脚只留身份与一行状态，
+    // 需要细节时悬停账号芯片即可看到完整能力集合。
+    var summary = '已登录 ' + (DATA.user || '匿名') +
+      (can('write') ? ' · 可读写' : ' · 只读');
+    var caps = [];
+    if (can('write')) caps.push('可上传');
+    if (can('delete')) caps.push('可删除');
+    if (can('edit')) caps.push('可在线编辑');
+    if (can('extract')) caps.push('可在线解压');
+    if (can('archive')) caps.push('可打包下载');
+    if (caps.length) summary += ' · ' + caps.join(' · ');
+    chip.title = summary;
+    chip.setAttribute('aria-label', summary);
     var span = document.createElement('span');
     span.textContent = DATA.user || '匿名';
     chip.appendChild(span);
     if (DATA.user) {
+      // 桌面端：账号芯片里直接露出「退出」。
       var out = document.createElement('button');
       out.type = 'button';
       out.className = 'user-logout';
       out.title = '退出登录';
       out.textContent = '退出';
-      out.onclick = function () {
-        clearCreds();
-        DATA.user = '';
-        DATA.auth_required = true;
-        toast('info', '已退出登录');
-        // 等会话真的在服务端被撤销再刷新 —— 否则刷新时那张 cookie 还在，
-        // 页面会直接以已登录状态回来，「退出」看着像没生效。
-        dropServerSession().then(function () { location.reload(); });
-      };
+      out.onclick = requestLogout;
       chip.appendChild(out);
+    }
+    // 手机端：芯片只保留用户名，退出收进「更多」，给面包屑腾出宽度。
+    // 这里的 hidden 只管「有没有登录」，显隐断点交给 CSS。
+    if (moreOut) {
+      moreOut.hidden = !DATA.user;
+      moreOut.onclick = function () {
+        if (G.closeMore) G.closeMore();
+        requestLogout();
+      };
     }
   }
 
@@ -941,7 +981,7 @@
 
   function progressToast(title, onCancel) {
     var el = document.createElement('div');
-    el.className = 'toast info';
+    el.className = 'toast info toast-progress';
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.innerHTML = '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/>';
@@ -966,6 +1006,7 @@
       el.appendChild(cancelBtn);
     }
     $('toasts').appendChild(el);
+    if (typeof syncToolbarOffset === 'function') syncToolbarOffset();
     var killed = false;
     var sp = makeSpeedometer();
     // 结束（成功 / 失败 / 取消）后取消按钮就没意义了，收掉。
@@ -1260,6 +1301,7 @@
     m.textContent = msg;
     el.appendChild(m);
     var dismiss = function () {
+      if (!el.isConnected) return;
       el.style.transition = 'opacity .2s, transform .2s';
       el.style.opacity = '0';
       el.style.transform = 'translateX(12px)';
@@ -1273,7 +1315,34 @@
       btnEl.onclick = function () { dismiss(); action.onClick(); };
       el.appendChild(btnEl);
     }
-    $('toasts').appendChild(el);
+    // 自动消失的提示也必须能手动关掉：它可能正盖着一行文件，
+    // 而用户不想等 3 秒。
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', '关闭提示');
+    close.title = '关闭';
+    close.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+    close.onclick = dismiss;
+    el.appendChild(close);
+
+    var stack = $('toasts');
+    stack.appendChild(el);
+    // 手机顶部只留最新几条。进度条（toast-progress）不参与淘汰：
+    // 它承载的是正在进行的上传/解压，被一条普通提示挤掉就成了假死界面。
+    while (stack.children.length > 3) {
+      var victim = null;
+      for (var i = 0; i < stack.children.length; i++) {
+        if (!stack.children[i].classList.contains('toast-progress')) {
+          victim = stack.children[i];
+          break;
+        }
+      }
+      if (!victim) break;
+      victim.remove();
+    }
+    // 手机上 toast 挂在顶栏下方，需要实时的 --topbar-h。
+    if (typeof syncToolbarOffset === 'function') syncToolbarOffset();
     setTimeout(dismiss, ms || (kind === 'err' ? 7000 : (action ? 9000 : 3200)));
   }
 
@@ -1531,6 +1600,19 @@
       bc.appendChild(el);
     });
     bc.scrollLeft = bc.scrollWidth;
+    bc.onscroll = syncBreadcrumbFade;
+    syncBreadcrumbFade();
+  }
+
+  // syncBreadcrumbFade 按实际滚动位置给路径两侧加渐隐。
+  // 必须在滚动之后调用：scrollWidth/clientWidth 要等布局完成才准确。
+  function syncBreadcrumbFade() {
+    var bc = $('breadcrumb');
+    if (!bc) return;
+    var overflow = bc.scrollWidth > bc.clientWidth + 1;
+    bc.classList.toggle('fade-left', overflow && bc.scrollLeft > 1);
+    bc.classList.toggle('fade-right',
+      overflow && bc.scrollLeft + bc.clientWidth < bc.scrollWidth - 1);
   }
 
   // syncNavButtons 按当前历史下标刷新「后退 / 前进 / 上一级」的可用状态。
@@ -1711,9 +1793,12 @@
     }
 
     if (state.query) {
+      // 手机端「搜索方式」按钮只剩一个漏斗图标，输入文字后更是看不出
+      // 当前是模糊还是精确。把模式写进结果统计，搜索一返回就可见。
+      var modeLabel = searchModeLabel(state.searchMode);
       out += narrow
-        ? '命中 ' + listed + ' 项'
-        : '搜索命中 ' + listed + ' 项（' + dirs + ' 个目录 · ' + files + ' 个文件）';
+        ? modeLabel + ' · 命中 ' + listed + ' 项'
+        : modeLabel + '搜索 · 命中 ' + listed + ' 项（' + dirs + ' 个目录 · ' + files + ' 个文件）';
     } else {
       out += narrow
         ? dirs + ' 目录 · ' + files + ' 文件'
@@ -1742,6 +1827,10 @@
     // 此时保持空白：一个还在加载的目录不该被说成是空的。
     el.hidden = list.length > 0 || !state.listing;
     el.textContent = '';
+    // 空目录 / 空搜索结果时整张表（含表头、全选框）一起收掉：
+    // 留着一个没有行的表头，看起来像列表加载坏了。
+    var table = $('table');
+    if (table) table.hidden = !!state.listing && list.length === 0;
     if (el.hidden) return;
 
     var title = document.createElement('div');
@@ -1752,11 +1841,19 @@
       title.textContent = '没有匹配「' + state.query + '」的文件（' +
         searchModeLabel(state.searchMode) + '搜索）';
       el.appendChild(title);
-      var clear = btn('清除搜索', '', function () {
+      var actions = document.createElement('div');
+      actions.className = 'empty-actions';
+      actions.appendChild(btn('清除搜索', '', function () {
         $('search-input').value = '';
         doSearch('', true);
-      });
-      el.appendChild(clear);
+      }));
+      // 模糊/精确的命中口径不同，空结果时直接给一次换挡入口，
+      // 用户不必先知道「搜索方式」按钮藏在哪儿。
+      var altKey = state.searchMode === 'fuzzy' ? 'exact' : 'fuzzy';
+      actions.appendChild(btn('改用' + searchModeLabel(altKey) + '搜索', '', function () {
+        if (G.setSearchMode) G.setSearchMode(altKey);
+      }));
+      el.appendChild(actions);
       return;
     }
 
@@ -2143,12 +2240,19 @@
 
   function closeRowActions() {
     if (!rowMenu) return;
+    // 焦点在菜单里时（键盘打开 / 用方向键移动过），关闭后要回到触发按钮，
+    // 否则焦点会掉到 body 上，下一次 Tab 从页面开头重新走。
+    var focusInside = rowMenu.el.contains(document.activeElement);
     rowMenu.el.remove();
     document.removeEventListener('keydown', rowMenu.onKey);
     document.removeEventListener('pointerdown', rowMenu.onDown, true);
     window.removeEventListener('scroll', rowMenu.onScroll, true);
     window.removeEventListener('resize', rowMenu.onScroll);
+    var anchor = rowMenu.anchor;
     rowMenu = null;
+    if (focusInside && anchor && anchor.isConnected) {
+      try { anchor.focus({ preventScroll: true }); } catch (e) { anchor.focus(); }
+    }
   }
 
   // placeRowMenu 把菜单摆到按钮附近：默认向下、右对齐，放不下就翻到上方，
@@ -2222,6 +2326,23 @@
     placeRowMenu(menu, anchor);
     if (anchor.setAttribute) anchor.setAttribute('aria-expanded', 'true');
 
+    // 键盘可达性：菜单挂在 body 末尾，不主动移焦的话 Tab 会走到下一行，
+    // role="menu" 也只是个空承诺。打开即聚焦第一项，方向键在项间移动。
+    var menuItems = menu.querySelectorAll('.action-item:not([disabled])');
+    function focusItem(i) {
+      if (!menuItems.length) return;
+      var n = (i + menuItems.length) % menuItems.length;
+      menuItems[n].focus();
+    }
+    if (menuItems.length) focusItem(0);
+    menu.addEventListener('keydown', function (e) {
+      var idx = Array.prototype.indexOf.call(menuItems, document.activeElement);
+      if (e.key === 'ArrowDown') { e.preventDefault(); focusItem(idx + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); focusItem(idx - 1); }
+      else if (e.key === 'Home') { e.preventDefault(); focusItem(0); }
+      else if (e.key === 'End') { e.preventDefault(); focusItem(-1); }
+    });
+
     // 三条关闭路径：点菜单外、按 Esc、页面滚动或窗口变化（那时菜单会与按钮
     // 脱位，收起来比追着重新定位简单可靠）。
     var onKey = function (e) { if (e.key === 'Escape') closeRowActions(); };
@@ -2293,7 +2414,10 @@
 
     // 进入批量选择后，投放区不再相关；清空选择后自动回来。
     var zone = $('drop-zone');
-    if (zone) zone.hidden = !can('write') || n > 0 || !!state.query;
+    if (zone) {
+      zone.hidden = !can('write') || n > 0 || !!state.query ||
+        (!!state.listing && listed === 0);
+    }
 
     // 选择态把未选中行的操作弱化，让视线回到批量工具条和勾选框。
     var wrap = document.querySelector('.table-wrap');
@@ -2345,7 +2469,9 @@
 
     // 打包按钮跟着选中数变脸：0 项时是「打包下载」（整个目录），
     // 有选中时是「打包所选 (n)」，点击前就能看出会打包什么。
+    // 搜索态与空目录不显示：前者会让人误以为打包搜索结果，后者只会得到空 zip。
     var btnZip = $('btn-zip');
+    btnZip.hidden = !can('archive') || !!state.query || listed === 0;
     var zipLabel = btnZip.querySelector('span');
     if (n > 0) {
       zipLabel.textContent = narrow ? '打包' : '打包所选 (' + n + ')';
@@ -2363,7 +2489,9 @@
     // 菜单项跟着它一起显隐 —— 不必再单独隐藏每一项。
     $('btn-upload').hidden = !can('write');
     $('btn-mkdir').hidden = !can('write');
-    $('btn-zip').hidden = !can('archive');
+    // 搜索态、空目录下这个按钮没有意义：前者会让用户误以为打包的是
+    // 搜索结果（实际打的是 state.path），后者只会产出一个空 zip。
+    $('btn-zip').hidden = !can('archive') || !!state.query || state.entries.length === 0;
     $('btn-settings').hidden = !allowAnySettings();
     if (can('write')) {
       $('btn-upload').title = '上传：文件，或整个文件夹　·　' + uploadLimitHint();
@@ -2416,8 +2544,10 @@
     var zone = $('drop-zone');
     if (!zone) return;
     var allowed = can('write');
-    // 搜索态和批量选择时，投放区与当前任务无关，收起来把空间让给结果。
-    zone.hidden = !allowed || !!state.query || state.selected.size > 0;
+    // 搜索态、批量选择、空目录时，投放区与当前任务无关，收起来把空间让给结果。
+    // 空目录尤其明显：空状态里已经有「上传文件 / 新建文件夹」两个入口了。
+    zone.hidden = !allowed || !!state.query || state.selected.size > 0 ||
+      (!!state.listing && state.entries.length === 0);
     if (!allowed) return;
 
     var narrow = isNarrow();
@@ -2460,21 +2590,14 @@
       who = '未登录 · 只读';
     }
 
-    var caps = [];
-    if (can('write')) caps.push(narrow ? '上传' : '可上传');
-    if (can('delete')) caps.push(narrow ? '删除' : '可删除');
-    if (can('edit')) caps.push(narrow ? '编辑' : '可在线编辑');
-    if (can('extract')) caps.push(narrow ? '解压' : '可在线解压');
-    // 归档只在根目录生效，页脚也要跟着当前目录变 —— 站在子目录里还写
-    // 「上传归档到 2026/09/28/」就是假的。
+    // 页脚只保留「谁 + 归档落点」。上传/删除/编辑/解压这些能力已经在
+    // 顶栏按钮、行内操作与账号芯片里表达过，再抄一遍只是噪音。
+    // 归档仍然留着：它随时会变，而且不在界面上其他地方常驻。
+    var extra = '';
     if (can('write') && archiveAt(state.path)) {
-      caps.push(narrow ? '归档 ' + uploadDateDir() + '/' : '上传归档到 ' + uploadDateDir() + '/');
+      extra = '　·　上传归档到 ' + uploadDateDir() + '/';
     }
-
-    // 窄屏用「·」连成一串能力词，宽屏保持原来的「可××」长写法。
-    $('footer-right').textContent = caps.length
-      ? who + '　·　' + caps.join(narrow ? '·' : ' · ')
-      : who;
+    $('footer-right').textContent = who + extra;
   }
 
   // siteTitle 返回站点标题：服务端下发的可配置标题，缺省时回落到 'gofs'。
@@ -2493,7 +2616,11 @@
   function applySiteTitle() {
     var t = siteTitle();
     var brand = document.querySelector('.brand span');
-    if (brand) brand.textContent = t;
+    if (brand) {
+      brand.textContent = t;
+      // 顶栏只显示截断后的一段，悬停时仍能看到完整标题。
+      brand.title = t;
+    }
     document.title = (state.path === '/' ? '' : state.name + ' — ') + t;
   }
 
@@ -2514,6 +2641,21 @@
     if (res.status === 401) throw new Error('需要登录（401）');
     if (!res.ok) throw new Error(await res.text());
     return res.json();
+  }
+
+  // setNavigating 切换目录导航的视觉反馈。
+  //
+  // state.busy 原本只是一个内部标志：请求慢的时候，界面完全没有任何变化，
+  // 用户点完目录只能靠猜。沿用顶栏下沿一条 2px 的扫光作为轻量提示 ——
+  // 不占布局、不遮内容，也不会像全屏 loading 那样打断连续浏览。
+  function setNavigating(on) {
+    var tb = document.querySelector('.topbar');
+    if (tb) tb.classList.toggle('navigating', !!on);
+    var content = document.querySelector('.content');
+    if (content) {
+      if (on) content.setAttribute('aria-busy', 'true');
+      else content.removeAttribute('aria-busy');
+    }
   }
 
   async function navigate(path, push) {
@@ -2540,6 +2682,7 @@
         new Error().stack.split('\n')[2]);
     }
     state.busy = true;
+    setNavigating(true);
     try {
       var data = await fetchListing(path);
       state.path = data.path || path;
@@ -2581,7 +2724,10 @@
       if (next) {
         // 补跑排队中的那次；结果回传给它的调用方（async 函数体在第一个
         // await 之前是同步执行的，所以这里忙碌标志已经被重新置上）。
+        // 不先收掉进度条：紧接着的导航会重新置亮，中间不该闪一帧空白。
         navigate(next.path, next.push).then(next.resolve, function () { next.resolve(false); });
+      } else {
+        setNavigating(false);
       }
     }
     return true;
@@ -5647,12 +5793,19 @@
     if (btn) {
       btn.title = '主题：' + themeLabel(cur);
       btn.setAttribute('aria-label', '主题：' + themeLabel(cur));
-      // 深色时把太阳换成月亮，按钮本身就带状态。
+      // 三种状态用三个图标：自动 = 显示器，浅色 = 太阳，深色 = 月亮。
+      // 之前 auto 也画太阳，系统深色时图标和实际观感对不上。
       var icon = btn.querySelector('svg');
       if (icon) {
-        icon.innerHTML = cur === 'dark'
-          ? '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.6 6.6 0 0 0 21 12.8z"/>'
-          : '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/>';
+        if (cur === 'auto') {
+          icon.innerHTML = '<rect x="3" y="4" width="18" height="12" rx="2"/>' +
+            '<path d="M8 20h8"/><path d="M12 16v4"/>';
+        } else if (cur === 'dark') {
+          icon.innerHTML = '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.6 6.6 0 0 0 21 12.8z"/>';
+        } else {
+          icon.innerHTML = '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/>' +
+            '<circle cx="12" cy="12" r="4"/>';
+        }
       }
     }
     var menu = $('theme-menu');
@@ -5773,10 +5926,12 @@
       // 操作列的收起与否取决于实际宽度，所以每次改宽都要重算 ——
       // 不能只在跨过断点时算（拖动窗口时列宽一直在变）。
       collapseWrappedOps();
-      // 顶栏换行会改变高度，吸顶偏移跟着更新；这条必须在下面的断点
-      // 提前 return 之前，否则「没跨断点但顶栏变高了」时偏移就卡在旧值。
-      // 没吸顶时不用量，省掉拖动窗口时的无谓 DOM 读取。
-      if ($('toolbar').classList.contains('stuck')) syncToolbarOffset();
+      // 顶栏换行会改变高度，吸顶偏移与移动端 toast 的定位都跟着它走。
+      // 这条必须在下面的断点提前 return 之前，否则「没跨断点但顶栏变高了」
+      // 时偏移就卡在旧值。
+      syncToolbarOffset();
+      // 面包屑宽度变了，两侧渐隐也要重算。
+      syncBreadcrumbFade();
       var now = isNarrow();
       if (now === wasNarrow) return;
       wasNarrow = now;
@@ -5852,7 +6007,18 @@
         item.setAttribute('role', 'menuitem');
         item.dataset.mode = m.key;
         item.title = m.hint;
-        item.textContent = m.label;
+        item.setAttribute('aria-label', m.label + '：' + m.hint);
+        // 模式说明做成第二行。原先只放在 title 里，手机端没有 hover，
+        // 用户看不到「模糊 / 精确 / 通配 / 正则」到底差在哪。
+        var text = document.createElement('span');
+        text.className = 'menu-item-text';
+        var name = document.createElement('span');
+        name.textContent = m.label;
+        var hint = document.createElement('small');
+        hint.textContent = m.hint;
+        text.appendChild(name);
+        text.appendChild(hint);
+        item.appendChild(text);
         item.onclick = function () {
           setSearchMode(m.key);
           closeMenu();
@@ -5880,7 +6046,9 @@
       $('btn-search-mode').title = '搜索方式：' + searchModeLabel(cur);
       // 手机上标签会被 CSS 隐藏，读屏仍需要知道当前模式。
       $('btn-search-mode').setAttribute('aria-label', '搜索方式：' + searchModeLabel(cur));
-      $('search-input').placeholder = searchModeLabel(cur) + '搜索…';
+      // 占位符不再重复模式名：桌面端旁边就是模式按钮，手机端结果统计里
+      // 会写「模糊 · 命中 N 项」。同一个信息不必在一个控件附近出现两次。
+      $('search-input').placeholder = '搜索…';
       Array.prototype.forEach.call(
         $('search-mode-menu').querySelectorAll('.menu-item'),
         function (it) {
@@ -5890,6 +6058,8 @@
     }
     // 启动/登录/前进后退恢复搜索时，需要在 bindEvents 之外重刷这颗按钮。
     G.syncSearchModeUI = syncSearchModeUI;
+    // 空结果页的「改用精确/模糊搜索」也走同一个入口，避免两套切模式逻辑。
+    G.setSearchMode = setSearchMode;
     $('btn-upload-file').onclick = function () { closeMenu(); $('file-input').click(); };
     $('btn-upload-dir').onclick = function () { closeMenu(); $('dir-input').click(); };
 
@@ -6044,7 +6214,22 @@
       scheduleSearch();
     });
     $('search-input').onkeydown = function (e) {
-      if (e.key === 'Escape') { e.target.value = ''; doSearch(''); }
+      if (e.key === 'Escape') { e.target.value = ''; doSearch(''); return; }
+      if (e.key === 'Enter') {
+        // 输入法选词时的回车是「确认候选」，不是「提交搜索」。
+        // 不挡这一下，中文/日文/韩文用户会在拼音还没上屏时就被搜一次，
+        // 触摸端还会顺带把输入框失焦。
+        if (e.isComposing) return;
+        // 输入框是 type=search，但 Enter 没有任何默认行为。用户敲完回车
+        // 发现没反应（或者还在等 260ms 的防抖），会以为搜索坏了。
+        e.preventDefault();
+        clearTimeout(timer);
+        doSearch(e.target.value.trim(), false);
+        // 触摸设备上顺便收起软键盘；桌面上保留焦点，便于继续改词。
+        if (window.matchMedia && window.matchMedia('(hover: none)').matches) {
+          e.target.blur();
+        }
+      }
     };
 
     // 拖拽上传。两层提示：
