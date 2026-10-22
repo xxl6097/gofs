@@ -209,6 +209,9 @@
     selected: new Set(),
     sortKey: 'name',
     sortDir: 1,
+    // 搜索结果有自己的一套排序状态：进搜索默认按相关度，目录排序不受影响。
+    searchSortKey: 'relevance',
+    searchSortDir: 1,
     busy: false,
     // searchMode 为当前搜索方式，取值见 SEARCH_MODES。下面初始化时会用
     // 持久化的值覆盖它 —— 这里先给默认值，保证读 localStorage 失败时也有值。
@@ -238,6 +241,21 @@
       if (SEARCH_MODES[i].key === key) return SEARCH_MODES[i].label;
     }
     return SEARCH_MODES[0].label;
+  }
+
+  // searchStateFromURL 从地址栏恢复搜索现场。
+  // 用于刷新页面和浏览器前进/后退：q 为空就是普通目录浏览。
+  function searchStateFromURL() {
+    var q = '', mode = 'fuzzy';
+    try {
+      var sp = new URLSearchParams(location.search);
+      q = sp.get('q') || '';
+      var m = sp.get('mode') || 'fuzzy';
+      for (var i = 0; i < SEARCH_MODES.length; i++) {
+        if (SEARCH_MODES[i].key === m) { mode = m; break; }
+      }
+    } catch (e) { /* 老浏览器没有 URLSearchParams：按无搜索处理 */ }
+    return { q: q, mode: mode };
   }
 
   // pendingNav 保存「在导航途中又被请求的那一次导航」（只留最后一次）。
@@ -463,6 +481,29 @@
     var userInput = field('用户名', 'text', 'username', 'username');
     var passInput = field('密码', 'password', 'password', 'current-password');
 
+    // 密码可见性切换：移动端上输错密码的成本比桌面更高，给一个眼睛按钮。
+    var eye = document.createElement('button');
+    eye.type = 'button';
+    eye.className = 'login-eye';
+    eye.setAttribute('aria-label', '显示密码');
+    eye.title = '显示密码';
+    var eyeOpen = '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/>';
+    var eyeOff = '<path d="M3 3l18 18"/><path d="M10.6 6.2A10.4 10.4 0 0 1 12 6c6.4 0 10 6 10 6a17 17 0 0 1-3.2 3.8"/><path d="M6.2 6.6C3.6 8.3 2 12 2 12s3.6 6 10 6c1.5 0 2.8-.3 4-.9"/>';
+    eye.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + eyeOpen + '</svg>';
+    eye.onclick = function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var show = passInput.type === 'password';
+      passInput.type = show ? 'text' : 'password';
+      eye.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+        (show ? eyeOff : eyeOpen) + '</svg>';
+      eye.setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
+      eye.title = show ? '隐藏密码' : '显示密码';
+      passInput.focus();
+    };
+    passInput.classList.add('with-eye');
+    passInput.parentNode.appendChild(eye);
+
     var rememberWrap = document.createElement('label');
     rememberWrap.className = 'login-remember';
     var remember = document.createElement('input');
@@ -570,7 +611,10 @@
     renderPerms();
     // ⚠️ 不能直接用 state.path：一个只被授予 /docs 的账号登录前停在 / 上，
     // 照原样去拉列表只会被拒（见 landingPath）。
-    return navigate(landingPath(), false);
+    var ok = await navigate(landingPath(), false);
+    // 登录前地址栏可能带着 ?q=…；登录成功后再把搜索现场恢复出来。
+    if (ok) await restoreSearchFromURL();
+    return ok;
   }
 
   // resumeSession 用本地保存的凭据换取真实的身份与权限。
@@ -1028,6 +1072,16 @@
   function dirURL(p) {
     var u = fileURL(p);
     return u.charAt(u.length - 1) === '/' ? u : u + '/';
+  }
+
+  // searchURL 构造带搜索条件的页面地址。只在 q 非空时带参数；
+  // 模糊是默认模式，不写进 URL，地址栏更干净。
+  function searchURL(p, q, mode) {
+    var u = dirURL(p);
+    if (!q) return u;
+    var out = 'q=' + encodeURIComponent(q);
+    if (mode && mode !== 'fuzzy') out += '&mode=' + encodeURIComponent(mode);
+    return u + '?' + out;
   }
 
   function joinPath(dir, name) {
@@ -1515,9 +1569,68 @@
     return a.toLowerCase().localeCompare(b.toLowerCase(), 'zh-Hans-CN', { numeric: true });
   }
 
+  // searchNeedle 从当前搜索条件里提炼一个用于打分的「字面量」。
+  // 模糊 / 精确直接用原词；通配与正则去掉元字符后取最长的片段。
+  function searchNeedle() {
+    var q = (state.query || '').trim().toLowerCase();
+    if (!q) return '';
+    if (state.searchMode === 'fuzzy' || state.searchMode === 'exact') return q;
+    var text = state.searchMode === 'wildcard'
+      ? q.replace(/[*?]/g, ' ')
+      : q.replace(/[\\^$.|?*+()[\]{}]/g, ' ');
+    var parts = text.split(/\s+/).filter(Boolean);
+    parts.sort(function (a, b) { return b.length - a.length; });
+    return parts[0] || '';
+  }
+
+  // searchRelevance 给搜索结果打一个粗略但可解释的相关度：
+  // 名称完全相同 > 名称前缀匹配 > 名称包含 > 路径包含；
+  // 同级再偏好更短的名字和更浅的路径。服务端不返回匹配分数，
+  // 所以这里只在「排序」层面做启发式，不改变命中集合。
+  function searchRelevance(e) {
+    var q = (state.query || '').trim().toLowerCase();
+    if (!q) return 0;
+    var needle = searchNeedle();
+    var name = (e.name || '').toLowerCase();
+    var path = (e.path || '').toLowerCase();
+    var s = 0;
+    if (needle) {
+      if (name === needle) s += 1000;
+      else if (name.indexOf(needle) === 0) s += 700;
+      else if (name.indexOf(needle) >= 0) s += 500;
+      else if (path.indexOf(needle) >= 0) s += 250;
+    }
+    if (state.searchMode === 'exact') {
+      if (name === q) s += 400;
+      else if (path === q) s += 200;
+    }
+    // 让短名字、浅路径在得分相同时更靠前。
+    s -= Math.min(name.length, 80) * 2;
+    var depth = path ? path.split('/').filter(Boolean).length : 0;
+    s -= depth * 2;
+    return s;
+  }
+
   function sortedEntries() {
-    var k = state.sortKey, dir = state.sortDir;
+    // 搜索结果用独立的一套排序状态：默认相关度，切到名称/大小/时间后
+    // 也会记住选择；退出搜索不影响普通目录的排序。
+    var k = state.query ? state.searchSortKey : state.sortKey;
+    var dir = state.query ? state.searchSortDir : state.sortDir;
+    var scores = null;
+    if (k === 'relevance') {
+      scores = Object.create(null);
+      state.entries.forEach(function (e) { scores[e.path] = searchRelevance(e); });
+    }
     return state.entries.slice().sort(function (a, b) {
+      if (k === 'relevance') {
+        var sa = scores[a.path] || 0;
+        var sb = scores[b.path] || 0;
+        if (sa !== sb) return sb - sa;
+        var rn = compareName(a.name, b.name);
+        if (rn) return rn;
+        var ap = a.path || '', bp = b.path || '';
+        return ap < bp ? -1 : (ap > bp ? 1 : 0);
+      }
       // 目录恒在前：升序降序都不打破「目录段 / 文件段」的分组，
       // 与资源管理器、Finder、主流网盘一致（只在各段内部翻转方向）。
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
@@ -1530,6 +1643,12 @@
       // 名称在忽略大小写后仍相等（如 "A.txt" 与 "a.txt"）时，
       // 用原始字符序定序，避免不同浏览器给出不同结果。
       if (r === 0) r = a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+      // 搜索结果里同名文件可能来自不同目录；最后按完整路径定序，
+      // 让同目录的结果自然聚在一起，而不是随服务端遍历顺序抖动。
+      if (r === 0 && state.query) {
+        var ap2 = a.path || '', bp2 = b.path || '';
+        r = ap2 < bp2 ? -1 : (ap2 > bp2 ? 1 : 0);
+      }
       return r * dir;
     });
   }
@@ -1612,27 +1731,88 @@
     return out;
   }
 
+  // renderEmptyState 渲染空目录 / 空搜索结果。
+  //
+  // 空状态是「下一步做什么」最该被说清楚的地方：目录为空时直接给上传和
+  // 新建入口，搜索无结果时给清除搜索；不要只留一句灰字。
+  function renderEmptyState(list) {
+    var el = $('empty');
+    // 「这个目录是空的」同样是个结论 —— 没取到列表之前不能下。
+    // state.listing 为 null 表示「还没读过这个目录」（未登录外壳就是这样），
+    // 此时保持空白：一个还在加载的目录不该被说成是空的。
+    el.hidden = list.length > 0 || !state.listing;
+    el.textContent = '';
+    if (el.hidden) return;
+
+    var title = document.createElement('div');
+    title.className = 'empty-title';
+    if (state.query) {
+      // 带上当前搜索方式：换个方式常有不同结果，空结果时提示一句，
+      // 用户就知道不是「文件真的不存在」，而是匹配口径的问题。
+      title.textContent = '没有匹配「' + state.query + '」的文件（' +
+        searchModeLabel(state.searchMode) + '搜索）';
+      el.appendChild(title);
+      var clear = btn('清除搜索', '', function () {
+        $('search-input').value = '';
+        doSearch('', true);
+      });
+      el.appendChild(clear);
+      return;
+    }
+
+    title.textContent = '这个目录是空的';
+    el.appendChild(title);
+    if (!can('write')) return;
+
+    var actions = document.createElement('div');
+    actions.className = 'empty-actions';
+    actions.appendChild(btn('上传文件', 'primary', function () {
+      $('file-input').click();
+    }));
+    actions.appendChild(btn('新建文件夹', '', function () {
+      openCreateDialog('dir');
+    }));
+    el.appendChild(actions);
+  }
+
+  // focusTableRow 在列表行之间移动键盘焦点。
+  // 用「只有当前行 tabIndex=0」的 roving tabindex，Tab 进表格只停一次，
+  // 之后用方向键浏览，不会被成百上千个行拖住。
+  function focusTableRow(row, where) {
+    var rows = Array.prototype.slice.call($('tbody').children);
+    if (!rows.length) return;
+    var idx;
+    if (where === 'first') idx = 0;
+    else if (where === 'last') idx = rows.length - 1;
+    else idx = rows.indexOf(row) + where;
+    idx = Math.max(0, Math.min(rows.length - 1, idx));
+    rows.forEach(function (r, i) { r.tabIndex = i === idx ? 0 : -1; });
+    var next = rows[idx];
+    next.focus();
+    if (next.scrollIntoView) next.scrollIntoView({ block: 'nearest' });
+  }
+
   function renderTable() {
     var tbody = $('tbody');
     tbody.textContent = '';
     var list = sortedEntries();
 
-    // 「这个目录是空的」同样是个结论 —— 没取到列表之前不能下。
-    // state.listing 为 null 表示「还没读过这个目录」（未登录外壳就是这样），
-    // 此时保持空白：一个还在加载的目录不该被说成是空的。
-    $('empty').hidden = list.length > 0 || !state.listing;
-    if (list.length === 0 && state.listing) {
-      $('empty').textContent = state.query
-        // 带上当前搜索方式：换个方式常有不同结果，空结果时提示一句，
-        // 用户就知道不是「文件真的不存在」，而是匹配口径的问题。
-        ? '没有匹配「' + state.query + '」的文件（' + searchModeLabel(state.searchMode) + '搜索）'
-        : '这个目录是空的';
+    renderEmptyState(list);
+
+    // 搜索时露出排序方式；目录浏览仍用表头排序。
+    var sortBox = $('search-sort');
+    if (sortBox) {
+      sortBox.hidden = !state.query;
+      if (state.query) $('search-sort-select').value = state.searchSortKey;
     }
 
-    list.forEach(function (e) {
+    list.forEach(function (e, rowIndex) {
       var tr = document.createElement('tr');
       tr.dataset.path = e.path;
+      // roving tabindex：Tab 进表格只停在第一行，之后用方向键移动。
+      tr.tabIndex = rowIndex === 0 ? 0 : -1;
       if (state.selected.has(e.path)) tr.classList.add('selected');
+      tr.setAttribute('aria-selected', state.selected.has(e.path) ? 'true' : 'false');
 
       // 选择框（包一层 label，让可点面积覆盖整个格子）
       var tdCheck = document.createElement('td');
@@ -1648,6 +1828,7 @@
         if (cb.checked) state.selected.add(e.path);
         else state.selected.delete(e.path);
         tr.classList.toggle('selected', cb.checked);
+        tr.setAttribute('aria-selected', cb.checked ? 'true' : 'false');
         syncSelection();
       };
       hit.appendChild(cb);
@@ -1821,6 +2002,35 @@
 
       tdOps.appendChild(ops);
       tr.appendChild(tdOps);
+
+      // 行本身的键盘操作。只在事件目标就是这一行时处理；行内复选框/按钮
+      // 自己的 Space / Enter 不能被抢走。
+      tr.onkeydown = function (ev) {
+        if (ev.target !== tr) return;
+        if (ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          focusTableRow(tr, 1);
+        } else if (ev.key === 'ArrowUp') {
+          ev.preventDefault();
+          focusTableRow(tr, -1);
+        } else if (ev.key === 'Home') {
+          ev.preventDefault();
+          focusTableRow(tr, 'first');
+        } else if (ev.key === 'End') {
+          ev.preventDefault();
+          focusTableRow(tr, 'last');
+        } else if (ev.key === 'Enter') {
+          ev.preventDefault();
+          label.click();
+        } else if (ev.key === ' ' || ev.key === 'Spacebar') {
+          ev.preventDefault();
+          cb.click();
+          // click() 在部分浏览器里会把焦点移到复选框；把焦点收回行上，
+          // 否则下一次方向键会落在 input 上、被上面的目标判断忽略。
+          tr.focus();
+        }
+      };
+
       tbody.appendChild(tr);
     });
 
@@ -2040,17 +2250,20 @@
   }
 
   function renderSortHeader() {
+    // 搜索结果与普通目录各有一套排序状态；表头箭头跟着当前那一套走。
+    var sortKey = state.query ? state.searchSortKey : state.sortKey;
+    var sortDir = state.query ? state.searchSortDir : state.sortDir;
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
-      var active = th.dataset.sort === state.sortKey;
+      var active = th.dataset.sort === sortKey;
       th.classList.toggle('active', active);
       th.setAttribute('aria-sort',
-        active ? (state.sortDir > 0 ? 'ascending' : 'descending') : 'none');
+        active ? (sortDir > 0 ? 'ascending' : 'descending') : 'none');
       var arrow = th.querySelector('.arrow');
       if (arrow) arrow.remove();
       if (active) {
         var s = document.createElement('span');
         s.className = 'arrow';
-        s.textContent = state.sortDir > 0 ? '▲' : '▼';
+        s.textContent = sortDir > 0 ? '▲' : '▼';
         th.appendChild(s);
       }
     });
@@ -2081,6 +2294,10 @@
     // 进入批量选择后，投放区不再相关；清空选择后自动回来。
     var zone = $('drop-zone');
     if (zone) zone.hidden = !can('write') || n > 0 || !!state.query;
+
+    // 选择态把未选中行的操作弱化，让视线回到批量工具条和勾选框。
+    var wrap = document.querySelector('.table-wrap');
+    if (wrap) wrap.classList.toggle('selecting', n > 0);
 
     var stat = $('stat');
     stat.textContent = statText();
@@ -2403,7 +2620,10 @@
   // 搜索（切换匹配方式时重跑等）才需要写回。用户正在编辑时写回是有害的 ——
   // 输入法确认中文之后、响应回来之前，用户可能已经又改了内容，
   // 这时按旧关键字回写就会把他刚输入的东西顶掉。
-  async function doSearch(q, syncInput) {
+  //
+  // historyMode：'push' 新开一条历史、'replace' 原地更新、'none' 不改地址栏。
+  // 不传时按「地址栏里是否已有 q」决定：第一次搜索 push，继续输入 replace。
+  async function doSearch(q, syncInput, historyMode) {
     if (!q) {
       // 清空搜索：作废在飞的那次，回目录列表。
       searchSeq++;
@@ -2412,17 +2632,42 @@
       return;
     }
     var seq = ++searchSeq;
+    var searchPath = state.path;
+    var hadQueryInURL = !!searchStateFromURL().q;
     setSearchBusy(true);
     try {
-      var res = await apiFetch(raw(encPath(state.path)) + '?q=' + encodeURIComponent(q) +
+      var res = await apiFetch(raw(encPath(searchPath)) + '?q=' + encodeURIComponent(q) +
         '&mode=' + encodeURIComponent(state.searchMode || 'fuzzy') + '&json');
       if (!res.ok) throw new Error(await res.text());
       var data = await res.json();
       if (seq !== searchSeq) return; // 已经有更新的搜索了，这次的结果作废
+      // 搜索期间用户可能已经切到别的目录；旧目录的结果不能落到新页面上。
+      if (state.path !== searchPath) return;
       state.query = q;
       state.entries = data.entries || [];
       state.listing = data;
       state.selected.clear();
+
+      if (historyMode !== 'none') {
+        var how = historyMode || (hadQueryInURL ? 'replace' : 'push');
+        try {
+          var href = searchURL(searchPath, q, state.searchMode);
+          var nextState = {
+            path: searchPath, name: state.name,
+            q: q, mode: state.searchMode || 'fuzzy', idx: navIndex()
+          };
+          if (how === 'push') {
+            nextState.idx = navIndex() + 1;
+            navMax = nextState.idx;
+            history.pushState(nextState, '', href);
+          } else {
+            history.replaceState(nextState, '', href);
+          }
+        } catch (e) {
+          if (window.console && console.warn) console.warn('更新搜索地址失败：', e);
+        }
+      }
+
       render();
       if (syncInput) $('search-input').value = q;
     } catch (err) {
@@ -2431,6 +2676,32 @@
     } finally {
       if (seq === searchSeq) setSearchBusy(false);
     }
+  }
+
+  // restoreSearchFromURL 在启动 / 登录完成 / 浏览器前进后退时恢复搜索现场。
+  // 这里用 historyMode='none'：地址栏本来就有 q，不需要再写一条历史。
+  async function restoreSearchFromURL() {
+    var s = searchStateFromURL();
+    if (!s.q) return false;
+    if (!can('search')) {
+      // 没有搜索权限就退回普通目录，别让地址栏停在一个跑不出结果的 q 上。
+      $('search-input').value = '';
+      try {
+        history.replaceState({ path: state.path, idx: navIndex() }, '', dirURL(state.path));
+      } catch (e) { /* 忽略 */ }
+      return false;
+    }
+    state.searchMode = s.mode;
+    if (G.syncSearchModeUI) G.syncSearchModeUI();
+    $('search-input').value = s.q;
+    await doSearch(s.q, true, 'none');
+    return true;
+  }
+
+  // refreshCurrent 在搜索结果里刷新的是搜索结果，而不是退回目录。
+  function refreshCurrent() {
+    if (state.query) return doSearch(state.query, true, 'none');
+    return navigate(state.path, false);
   }
 
   // ---------------------------------------------------------------- 上传
@@ -4513,7 +4784,15 @@
   // 于是可以直接把地址交给标签：视频音频走 Range 流式播放，能拖进度条，
   // 内存占用与文件大小无关。
   function openPreview(entry) {
-    var kind = kindOf(entry);
+    // 在当前列表里找出所有可预览的条目，让预览弹窗里能前后切换。
+    // 用 sortedEntries() 而不是 state.entries：所见即所得，顺序与列表一致。
+    var list = sortedEntries().filter(canPreview);
+    var pos = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].path === entry.path) { pos = i; break; }
+    }
+    if (pos < 0) { list = [entry]; pos = 0; }
+    var current = entry;
 
     var body = document.createElement('div');
     body.className = 'preview-body';
@@ -4522,37 +4801,227 @@
     tip.textContent = '正在载入…';
     body.appendChild(tip);
 
+    // 把预览区和前后切换按钮放在同一个容器里：body 每次切换都会被清空，
+    // 导航按钮必须留在它外面。
+    var area = document.createElement('div');
+    area.className = 'preview-area';
+    area.appendChild(body);
+
+    var nav = null, prevBtn = null, nextBtn = null, counter = null;
+    if (list.length > 1) {
+      nav = document.createElement('div');
+      nav.className = 'preview-nav';
+      prevBtn = previewNavButton('prev', '上一个', 'M15 18l-6-6 6-6');
+      nextBtn = previewNavButton('next', '下一个', 'm9 18 6-6-6-6');
+      counter = document.createElement('div');
+      counter.className = 'preview-count';
+      nav.appendChild(prevBtn);
+      nav.appendChild(nextBtn);
+      area.appendChild(nav);
+    }
+
     var m = openModal({
       title: entry.name,
-      body: body,
+      body: area,
       full: true,
       footer: modalFoot([
         { label: '关闭', onClick: function () { m.close(); } },
-        { label: '复制链接', onClick: function () { copyEntryLink(entry); } },
+        { label: '复制链接', onClick: function () { copyEntryLink(current); } },
         {
           label: '下载',
           cls: 'primary',
-          onClick: function () { downloadEntry(entry); }
+          onClick: function () { downloadEntry(current); }
         }
       ]),
       onClose: function () {
-        // 把媒体停掉：一个还在播的 <video> 会在弹窗没了之后继续拉数据
-        // （尤其是流式播放，它不会自己停）。
-        var media = body.querySelector('video, audio');
-        if (media) {
-          try { media.pause(); media.removeAttribute('src'); media.load(); } catch (e) {}
-        }
+        stopMedia();
+        document.removeEventListener('keydown', onNavKey);
       }
     });
-
-    body.textContent = '';
-    // Office 文档要先向服务端取结构化内容再渲染，走不了「给个地址就完事」那条路。
-    if (kind === 'office') {
-      renderOfficePreview(body, entry);
-      return;
+    var titleEl = m.el.querySelector('.modal-head > div');
+    // 计数放进弹窗标题栏：图片上方是空的可以悬浮，但 PDF 阅读器的工具栏
+    // 恰好也在顶部，悬浮计数会压住它的控件。
+    if (counter) {
+      var head = m.el.querySelector('.modal-head');
+      if (head) head.insertBefore(counter, head.lastElementChild);
     }
 
-    body.appendChild(previewNode(kind, fileURL(entry.path), entry));
+    // 切换前先把还在播的媒体停掉，否则旧视频会在后台继续拉流。
+    function stopMedia() {
+      var media = body.querySelector('video, audio');
+      if (media) {
+        try { media.pause(); media.removeAttribute('src'); media.load(); } catch (e) {}
+      }
+    }
+
+    function syncNav() {
+      if (!nav) return;
+      if (titleEl) titleEl.textContent = current.name;
+      counter.textContent = (pos + 1) + ' / ' + list.length;
+      prevBtn.disabled = false;
+      nextBtn.disabled = false;
+    }
+
+    function render() {
+      stopMedia();
+      body.textContent = '';
+      body.className = 'preview-body';
+      // 给异步的 Office 渲染留一个「现在还该不该写」的标记。
+      body.dataset.previewPath = current.path;
+      var kind = kindOf(current);
+      // Office 文档要先向服务端取结构化内容再渲染，走不了「给个地址就完事」那条路。
+      if (kind === 'office') {
+        renderOfficePreview(body, current);
+      } else {
+        var node = previewNode(kind, fileURL(current.path), current);
+        body.appendChild(node);
+        if (kind === 'image') attachImageTools(body, node, current);
+      }
+      syncNav();
+    }
+
+    function go(delta) {
+      if (list.length < 2) return;
+      pos = (pos + delta + list.length) % list.length;
+      current = list[pos];
+      render();
+    }
+
+    // 左右方向键切换上一张 / 下一张；焦点在播放器或输入框里时让路，
+    // 免得和视频快进/后退抢按键。
+    function onNavKey(e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      var t = e.target;
+      if (t && t.closest && t.closest('video, audio, input, textarea, select, iframe')) return;
+      e.preventDefault();
+      go(e.key === 'ArrowLeft' ? -1 : 1);
+    }
+    document.addEventListener('keydown', onNavKey);
+
+    if (prevBtn) {
+      prevBtn.onclick = function () { go(-1); };
+      nextBtn.onclick = function () { go(1); };
+    }
+
+    render();
+    return m;
+  }
+
+  // previewNavButton 造左右切换按钮。
+  function previewNavButton(dir, label, path) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'preview-nav-btn preview-nav-' + dir;
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="' + path + '"/></svg>';
+    return b;
+  }
+
+  // attachImageTools 给图片预览加「适应窗口 / 实际大小」与倍率缩放。
+  //
+  // 小图在 92vh 的弹窗里被放大后发糊、大图又永远看不全，是图片预览最常见的
+  // 两种抱怨。默认适应窗口；切到实际大小后可以继续用 − / + 调整倍率，
+  // 点百分比回到 100%，双击图片也能在两种模式间切换。
+  function attachImageTools(body, stage, entry) {
+    var img = stage.querySelector('img.preview-media');
+    if (!img) return;
+
+    var tools = document.createElement('div');
+    tools.className = 'preview-tools';
+
+    var meta = document.createElement('span');
+    meta.className = 'preview-meta';
+    meta.textContent = fmtSize(entry.size);
+
+    var zoomGroup = document.createElement('div');
+    zoomGroup.className = 'preview-zoom';
+    zoomGroup.hidden = true;
+    var zoomOut = document.createElement('button');
+    zoomOut.type = 'button';
+    zoomOut.className = 'preview-zoom-btn';
+    zoomOut.setAttribute('aria-label', '缩小');
+    zoomOut.title = '缩小';
+    zoomOut.textContent = '−';
+    var zoomPct = document.createElement('button');
+    zoomPct.type = 'button';
+    zoomPct.className = 'preview-zoom-btn preview-zoom-pct';
+    zoomPct.title = '重置为 100%';
+    zoomPct.textContent = '100%';
+    var zoomIn = document.createElement('button');
+    zoomIn.type = 'button';
+    zoomIn.className = 'preview-zoom-btn';
+    zoomIn.setAttribute('aria-label', '放大');
+    zoomIn.title = '放大';
+    zoomIn.textContent = '+';
+    zoomGroup.appendChild(zoomOut);
+    zoomGroup.appendChild(zoomPct);
+    zoomGroup.appendChild(zoomIn);
+
+    var toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'btn btn-sm';
+    toggle.textContent = '实际大小';
+    toggle.title = '适应窗口 / 实际大小（也可双击图片切换）';
+
+    var zoom = 1;
+
+    function setActual(on) {
+      if (on) {
+        if (!img.naturalWidth) return;
+        stage.classList.add('actual');
+        zoomGroup.hidden = false;
+        applyZoom();
+        toggle.textContent = '适应窗口';
+      } else {
+        stage.classList.remove('actual');
+        img.style.width = '';
+        img.style.height = '';
+        zoomGroup.hidden = true;
+        toggle.textContent = '实际大小';
+      }
+    }
+
+    function applyZoom() {
+      if (!img.naturalWidth) return;
+      img.style.width = Math.round(img.naturalWidth * zoom) + 'px';
+      img.style.height = 'auto';
+      zoomPct.textContent = Math.round(zoom * 100) + '%';
+    }
+
+    function toggleView() {
+      setActual(!stage.classList.contains('actual'));
+    }
+    toggle.onclick = toggleView;
+    img.addEventListener('dblclick', toggleView);
+    zoomOut.onclick = function () {
+      zoom = Math.max(0.2, zoom / 1.25);
+      applyZoom();
+    };
+    zoomIn.onclick = function () {
+      zoom = Math.min(8, zoom * 1.25);
+      applyZoom();
+    };
+    zoomPct.onclick = function () {
+      zoom = 1;
+      applyZoom();
+    };
+
+    function showSize() {
+      if (!img.naturalWidth) return;
+      meta.textContent = img.naturalWidth + ' × ' + img.naturalHeight +
+        '　·　' + fmtSize(entry.size);
+      if (stage.classList.contains('actual')) applyZoom();
+    }
+    if (img.complete) showSize();
+    else img.addEventListener('load', showSize);
+    // 图片损坏时预览区会被错误提示替换，工具条也要一起收掉。
+    img.addEventListener('error', function () { tools.remove(); });
+
+    tools.appendChild(meta);
+    tools.appendChild(zoomGroup);
+    tools.appendChild(toggle);
+    body.appendChild(tools);
   }
 
   // 凭证管理端点（上传密钥与分享链接共用）。
@@ -4567,6 +5036,9 @@
   // 服务端返回的是中性模型（块 / 表格 / 文本片段），文档里的内容再刁钻
   // 也只会变成文本节点 —— 数据与标记在架构上就是分开的，不依赖转义是否周全。
   async function renderOfficePreview(body, entry) {
+    // 预览弹窗支持前后切换：文档请求回来时，用户可能已经翻到下一份了。
+    // 用 body 上的路径标记判断这次结果是否还属于当前这一页。
+    var want = body.dataset.previewPath;
     var tip = document.createElement('div');
     tip.className = 'office-tip';
     tip.textContent = '正在解析文档…';
@@ -4581,10 +5053,12 @@
       }
       doc = await res.json();
     } catch (err) {
+      if (want && body.dataset.previewPath !== want) return;
       tip.textContent = '无法预览：' + err.message;
       tip.classList.add('office-tip-error');
       return;
     }
+    if (want && body.dataset.previewPath !== want) return;
 
     body.textContent = '';
     var root = document.createElement('div');
@@ -4736,6 +5210,10 @@
   // SVG 走 <img>：图片上下文里脚本不会执行，是安全的。
   function previewNode(kind, src, entry) {
     if (kind === 'image') {
+      // 外面包一层舞台：适应窗口时居中，实际大小时由舞台滚动，
+      // 工具条留在舞台之外，不会跟着图片滚走。
+      var stage = document.createElement('div');
+      stage.className = 'preview-stage';
       var img = document.createElement('img');
       img.className = 'preview-media';
       img.alt = entry.name;
@@ -4744,7 +5222,8 @@
         showPreviewFailure(img, entry, '这张图片无法解码，可能文件已损坏。');
       };
       img.src = src;
-      return img;
+      stage.appendChild(img);
+      return stage;
     }
     if (kind === 'video') {
       var v = document.createElement('video');
@@ -5304,6 +5783,9 @@
       syncSelection();
       renderFooter();
       renderDropZone();
+      // 搜索结果的第二行在手机上会补大小；跨过断点时要重画一次，
+      // 否则横竖屏切换后这一行会停在旧的宽/窄口径。
+      if (state.query) renderTable();
     });
 
     // ---- 顶栏下拉：上传（文件 / 文件夹）与新建（文件 / 文件夹） ----
@@ -5406,6 +5888,8 @@
         }
       );
     }
+    // 启动/登录/前进后退恢复搜索时，需要在 bindEvents 之外重刷这颗按钮。
+    G.syncSearchModeUI = syncSearchModeUI;
     $('btn-upload-file').onclick = function () { closeMenu(); $('file-input').click(); };
     $('btn-upload-dir').onclick = function () { closeMenu(); $('dir-input').click(); };
 
@@ -5424,7 +5908,7 @@
       openCreateDialog('dir');
     };
 
-    $('btn-refresh').onclick = function () { navigate(state.path, false); };
+    $('btn-refresh').onclick = function () { refreshCurrent(); };
 
     // 后退 / 前进直接借浏览器的历史栈，不另起一套 —— 地址栏、浏览器返回键
     // 与这两颗按钮因此永远同步（popstate 已经接在下面同一段里）。
@@ -5502,12 +5986,22 @@
       if (e.target.checked) state.entries.forEach(function (x) { state.selected.add(x.path); });
       renderTable();
     };
+    $('search-sort-select').onchange = function (e) {
+      state.searchSortKey = e.target.value || 'relevance';
+      state.searchSortDir = 1;
+      renderTable();
+    };
     document.querySelectorAll('.listing th.sortable').forEach(function (th) {
       th.tabIndex = 0;
       th.onclick = function () {
         var k = th.dataset.sort;
-        if (state.sortKey === k) state.sortDir = -state.sortDir;
-        else { state.sortKey = k; state.sortDir = 1; }
+        if (state.query) {
+          if (state.searchSortKey === k) state.searchSortDir = -state.searchSortDir;
+          else { state.searchSortKey = k; state.searchSortDir = 1; }
+        } else {
+          if (state.sortKey === k) state.sortDir = -state.sortDir;
+          else { state.sortKey = k; state.sortDir = 1; }
+        }
         renderTable();
       };
       th.onkeydown = function (e) {
@@ -5624,9 +6118,20 @@
       }
     };
 
-    // 浏览器前进/后退
+    // 浏览器前进/后退。搜索条目也要能原样恢复，而不是一律退回目录。
     window.addEventListener('popstate', function (e) {
-      var p = (e.state && e.state.path) || pathFromLocation();
+      var st = e.state || {};
+      var p = st.path || pathFromLocation();
+      var s = searchStateFromURL();
+      if (s.q && can('search')) {
+        state.path = p;
+        if (st.name) state.name = st.name;
+        state.searchMode = s.mode;
+        if (G.syncSearchModeUI) G.syncSearchModeUI();
+        $('search-input').value = s.q;
+        doSearch(s.q, true, 'none');
+        return;
+      }
       navigate(p, false);
     });
 
@@ -5643,7 +6148,7 @@
       var modalOpen = !!document.querySelector('.modal-mask');
 
       if (!modalOpen) {
-        if (e.key === 'r' && !e.metaKey && !e.ctrlKey) navigate(state.path, false);
+        if (e.key === 'r' && !e.metaKey && !e.ctrlKey) refreshCurrent();
         if (e.key === '/') { e.preventDefault(); $('search-input').focus(); return; }
       }
 
@@ -5708,6 +6213,17 @@
   initTheme();
   bindEvents();
 
+  // 地址栏里带 ?q= 时先把搜索框和模式恢复出来。若服务端已经把搜索结果
+  // 直接渲染进 DATA（无需鉴权的情况），这里只需要补 UI，不再重复请求。
+  var initialSearch = searchStateFromURL();
+  if (initialSearch.q) {
+    state.searchMode = initialSearch.mode;
+    if (G.syncSearchModeUI) G.syncSearchModeUI();
+    $('search-input').value = initialSearch.q;
+  } else if (state.query) {
+    $('search-input').value = state.query;
+  }
+
   if (DATA.auth_required) {
     // 服务端只返回了空壳：先渲染骨架，再决定是恢复会话还是弹登录框。
     //
@@ -5734,7 +6250,12 @@
         //
         // 路径要过一遍 landingPath：刷新时地址栏未必停在自己读得到的目录上
         // （分享页展开的 / 就是这样），照原样拉只会被拒。
-        navigate(landingPath(), false).then(endBoot, endBoot);
+        navigate(landingPath(), false).then(function (ok) {
+          if (!ok) { endBoot(); return; }
+          // 地址栏带 ?q= 的刷新/书签：列表到位后再把搜索现场恢复出来，
+          // 恢复期间仍由启动遮挡挡着，不会先闪一下目录。
+          restoreSearchFromURL().then(endBoot, endBoot);
+        }, endBoot);
       }, function () {
         // resumeSession 自己吞掉了网络错误，这里只兜住意料之外的异常，
         // 免得遮挡卡死在那儿等 4 秒兜底。
@@ -5744,9 +6265,14 @@
       showLogin('');
     }
   } else {
-    // 无需鉴权：没什么要等的，画完直接放行。
+    // 无需鉴权：正常目录画完就放行；如果 URL 带着搜索但服务端没有
+    // 直接给出搜索结果，就把搜索跑完再撤遮挡。
     render();
-    endBoot();
+    if (initialSearch.q && !state.query) {
+      restoreSearchFromURL().then(endBoot, endBoot);
+    } else {
+      endBoot();
+    }
   }
 
   // 页脚与权限相关的显隐由 render() -> renderPerms() -> renderFooter() 负责，
@@ -5773,7 +6299,7 @@
   G.baseName = baseName;
   G.joinPath = joinPath;
   G.navigate = navigate;
-  G.refresh = function () { return navigate(state.path, false); };
+  G.refresh = function () { return refreshCurrent(); };
   G.downloadFile = downloadFile;
   G.downloadEntry = downloadEntry;
   G.state = state;

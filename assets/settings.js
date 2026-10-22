@@ -112,22 +112,23 @@
 
     function refresh() {
       hint.textContent = '';
+      // 只有当前值和启动默认值不同（或输入了非法值）时才展示默认值与
+      // 「恢复」入口。两者都相等时再写一遍「默认值：10 GiB」只是噪音。
+      var changed = !isFinite(read()) || read() !== opts.def;
       hint.appendChild(document.createTextNode(
         (allowUnlimited && cb.checked) ? opts.unlimitedHint : opts.limitedHint));
       hint.appendChild(document.createTextNode('　当前生效：'));
       var b = document.createElement('b');
       b.textContent = fmt(opts.current());
       hint.appendChild(b);
-      hint.appendChild(document.createTextNode(
-        '　·　启动参数默认值：' + fmt(opts.def)));
+      if (changed) {
+        hint.appendChild(document.createTextNode(
+          '　·　启动参数默认值：' + fmt(opts.def)));
+      }
       if (opts.persistHint) {
         hint.appendChild(document.createTextNode('　·　' + opts.persistHint));
       }
 
-      // 只有当前值和启动默认值不同（或输入了非法值）时才给「恢复」入口。
-      // 之前每个字段下面都挂一个同等醒目的按钮，大部分时候点了什么也不会变，
-      // 还把设置页撑得很长。
-      var changed = !isFinite(read()) || read() !== opts.def;
       if (changed) {
         var quick = document.createElement('button');
         quick.type = 'button';
@@ -199,10 +200,10 @@
       var b = document.createElement('b');
       b.textContent = opts.current() || '（默认）';
       hint.appendChild(b);
-      hint.appendChild(document.createTextNode('　·　启动参数默认值：' + (opts.def || '（空）')));
 
-      // 同 makeSizeField：默认值没被动过时不再显示「恢复」按钮。
+      // 同 makeSizeField：默认值没被动过时，不显示默认值也不显示恢复入口。
       if (String(input.value).trim() !== String(opts.def || '').trim()) {
+        hint.appendChild(document.createTextNode('　·　启动参数默认值：' + (opts.def || '（空）')));
         var quick = document.createElement('button');
         quick.type = 'button';
         quick.className = 'btn btn-sm ghost reset-control';
@@ -241,6 +242,16 @@
     // 统一走 setRichText：说明文字里的 `**强调**` 要渲染成加粗，
     // 而不是把两颗星号原样摆给用户看（见 app.js 的说明）。
     G.setRichText(d, text);
+    wrap.appendChild(d);
+    return d;
+  }
+
+  // addSection 在长表单里插入分组标题。设置项本身不变，只是让用户
+  // 能先看到「这一段在管什么」，而不是一路往下读说明。
+  function addSection(wrap, text) {
+    var d = document.createElement('div');
+    d.className = 'settings-section-title';
+    d.textContent = text;
     wrap.appendChild(d);
     return d;
   }
@@ -480,6 +491,7 @@
       // ---- 访问路径前缀 ----
       //
       // 放在标题后面：它管的也是「这个站点长什么样」，只是管的是地址那一半。
+      addSection(el, '访问地址');
       //
       // 这是本页唯一一个**改错了会把自己锁在门外**的设置 —— 前缀必须与反向
       // 代理（nginx）的 location 一致，改完不同步改代理的话，新旧两个前缀下的
@@ -546,6 +558,7 @@
       //
       // 这一栏的文字与禁用状态随「有没有附加站点」变（有站点时不能换主根），
       // 所以抽成 syncRootField，增删站点后重画一次。
+      addSection(el, '服务目录');
       var rootField = makeField('主服务目录');
       var rootRow = document.createElement('div');
       rootRow.className = 'row';
@@ -579,7 +592,7 @@
       el.appendChild(sites.field);
 
       // ---- 单文件上传上限 ----
-      // ---- 单文件上传上限 ----
+      addSection(el, '上传与编辑');
       uploadField = makeSizeField({
         label: '单文件上传上限',
         value: cur.upload_max_size,
