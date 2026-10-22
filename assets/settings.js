@@ -112,30 +112,19 @@
 
     function refresh() {
       hint.textContent = '';
+      // 当前服务端值放到字段标题旁；提示区只留“这个设置怎么工作”。
+      setCurrentChip(field, fmt(opts.current()));
       // 只有当前值和启动默认值不同（或输入了非法值）时才展示默认值与
       // 「恢复」入口。两者都相等时再写一遍「默认值：10 GiB」只是噪音。
       var changed = !isFinite(read()) || read() !== opts.def;
       hint.appendChild(document.createTextNode(
         (allowUnlimited && cb.checked) ? opts.unlimitedHint : opts.limitedHint));
-      hint.appendChild(document.createTextNode('　当前生效：'));
-      var b = document.createElement('b');
-      b.textContent = fmt(opts.current());
-      hint.appendChild(b);
-      if (changed) {
-        hint.appendChild(document.createTextNode(
-          '　·　启动参数默认值：' + fmt(opts.def)));
-      }
       if (opts.persistHint) {
         hint.appendChild(document.createTextNode('　·　' + opts.persistHint));
       }
 
       if (changed) {
-        var quick = document.createElement('button');
-        quick.type = 'button';
-        quick.className = 'btn btn-sm ghost reset-control';
-        quick.style.marginTop = '6px';
-        quick.textContent = '恢复启动时的默认值';
-        quick.onclick = function () {
+        addDefaultMeta(hint, fmt(opts.def), function () {
           var d = splitSize(opts.def);
           if (allowUnlimited) cb.checked = opts.def === 0;
           input.value = d.value;
@@ -144,9 +133,7 @@
           }
           syncInputs();
           refresh();
-        };
-        hint.appendChild(document.createElement('br'));
-        hint.appendChild(quick);
+        });
       }
     }
 
@@ -196,25 +183,15 @@
       // 走 setRichText：这些说明里带着 `**立即**` 这类强调标记，
       // 用 createTextNode 贴上去用户看到的是两颗星号（见 app.js 的说明）。
       G.setRichText(hint, opts.hintText);
-      hint.appendChild(document.createTextNode('　当前生效：'));
-      var b = document.createElement('b');
-      b.textContent = opts.current() || '（默认）';
-      hint.appendChild(b);
+      // 当前值放标题旁，说明里不再重复一遍。
+      setCurrentChip(field, opts.current());
 
       // 同 makeSizeField：默认值没被动过时，不显示默认值也不显示恢复入口。
       if (String(input.value).trim() !== String(opts.def || '').trim()) {
-        hint.appendChild(document.createTextNode('　·　启动参数默认值：' + (opts.def || '（空）')));
-        var quick = document.createElement('button');
-        quick.type = 'button';
-        quick.className = 'btn btn-sm ghost reset-control';
-        quick.style.marginTop = '6px';
-        quick.textContent = '恢复启动时的默认值';
-        quick.onclick = function () {
+        addDefaultMeta(hint, opts.def || '（空）', function () {
           input.value = opts.def || '';
           refresh();
-        };
-        hint.appendChild(document.createElement('br'));
-        hint.appendChild(quick);
+        });
       }
     }
 
@@ -230,10 +207,31 @@
   function makeField(labelText) {
     var wrap = document.createElement('div');
     wrap.className = 'field';
+    // 标题行右侧留给「当前生效」chip。以前这句话跟在说明末尾，
+    // 每个字段都要读一整段才能在最后找到当前值。
+    var head = document.createElement('div');
+    head.className = 'field-head';
     var lb = document.createElement('label');
     lb.textContent = labelText;
-    wrap.appendChild(lb);
+    var meta = document.createElement('span');
+    meta.className = 'field-current';
+    meta.hidden = true;
+    head.appendChild(lb);
+    head.appendChild(meta);
+    wrap.appendChild(head);
+    wrap._fieldMeta = meta;
     return wrap;
+  }
+
+  // setCurrentChip 把服务端当前生效值写成字段标题旁的胶囊。
+  function setCurrentChip(field, value) {
+    var chip = field && field._fieldMeta;
+    if (!chip) return;
+    var isDefault = (value === '' || value === null || value === undefined);
+    var text = isDefault ? '（默认）' : String(value);
+    chip.textContent = isDefault ? '当前（默认）' : '当前 ' + text;
+    chip.title = '当前生效：' + text;
+    chip.hidden = false;
   }
 
   function addHint(wrap, text) {
@@ -244,6 +242,24 @@
     G.setRichText(d, text);
     wrap.appendChild(d);
     return d;
+  }
+
+  // addDefaultMeta 生成「启动默认值 + 恢复默认」这一行。
+  // 以前它是一段文字加一个带 <br> 的按钮，读起来像说明的一部分；
+  // 收成独立的一行后，说明归说明，恢复操作归操作。
+  function addDefaultMeta(hint, defaultValue, onReset) {
+    var row = document.createElement('div');
+    row.className = 'field-meta';
+    var label = document.createElement('span');
+    label.textContent = '启动默认值：' + defaultValue;
+    var quick = document.createElement('button');
+    quick.type = 'button';
+    quick.className = 'btn btn-sm ghost reset-control';
+    quick.textContent = '恢复默认';
+    quick.onclick = onReset;
+    row.appendChild(label);
+    row.appendChild(quick);
+    hint.appendChild(row);
   }
 
   // addSection 在长表单里插入分组标题。设置项本身不变，只是让用户
@@ -483,8 +499,8 @@
         def: cur.title_default,
         current: function () { return cur.title; },
         maxLength: 60,
-        hintText: '显示在浏览器标签页与顶栏品牌名上。保存后本页立即生效；' +
-          '其它已打开的页面要刷新才看得到。'
+        hintText: '显示在浏览器标签页与顶栏品牌名上；保存后本页生效，' +
+          '其它已打开的页面需刷新。'
       });
       el.appendChild(titleField.field);
 
@@ -509,8 +525,7 @@
       el.appendChild(prefixField.field);
       if (cur.path_prefix_locked) {
         addHint(prefixField.field,
-          '启动参数已指定前缀，重启后以它为准；这里的改动本次生效，重启会回到参数值。' +
-          '这个「参数优先」正是前缀改坏之后的退路。');
+          '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');
       }
 
       // ---- 监听地址 / 端口 ----
@@ -535,15 +550,13 @@
           value: String(cur.listen_port),
           def: String(cur.listen_port_default),
           current: function () { return cur.listen_port; },
-          hintText: '保存后**立即**切到新端口：已在进行的传输不受影响（连接不会断），' +
-            '但新连接都会走新端口。0 表示由系统分配。' +
-            '监听 unix socket 时本项无效。'
+          hintText: '保存后**立即**切到新端口：已有传输不断，新连接走新端口。' +
+            '0 表示由系统分配；监听 unix socket 时本项无效。'
         });
         el.appendChild(listenPortField.field);
         if (cur.listen_locked) {
           addHint(listenPortField.field,
-            '启动参数已指定监听地址或端口，重启后以它为准；这里的改动本次生效，' +
-            '重启会回到参数值。这个「参数优先」正是改坏之后的退路。');
+            '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');
         }
       } else {
         // 不显示那两个输入框，但把原因说清楚 —— 直接消失会让人以为功能没了。

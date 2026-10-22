@@ -1254,7 +1254,9 @@
     up: '<path d="M12 19V6"/><path d="m6 11 6-6 6 6"/>',
     unzip: '<path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="m9 13 3 3 3-3"/>',
     list: '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/>',
-    rename: '<path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/>',
+    // 重命名用「文字 A」，不要和编辑的铅笔共用一个图形 ——
+    // 文本文件的行菜单里会同时出现「编辑」和「重命名」。
+    rename: '<path d="M5 19 12 5l7 14"/><path d="M8 14h8"/>',
     trash: '<path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 12h10l1-12"/>',
     open: '<path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5 17.5 10.5"/>',
@@ -1978,8 +1980,24 @@
       }
       cell.appendChild(main);
       if (e.archive) {
-        var tag = document.createElement('span');
-        tag.className = 'tag zip';
+        // 徽标从「纯状态」变成「可查看内容」：有解压权限时点它直接打开
+        // 压缩包清单，和行菜单里的「内容」是同一个动作。没有权限就退回
+        // 普通标签，不做成一个点了报错的按钮。
+        var tag;
+        if (can('extract')) {
+          tag = document.createElement('button');
+          tag.type = 'button';
+          tag.className = 'tag zip tag-action';
+          tag.title = '查看压缩包内容';
+          tag.setAttribute('aria-label', '查看 ' + e.name + ' 的压缩包内容');
+          tag.onclick = function (ev) {
+            ev.stopPropagation();
+            openArchivePreview(e);
+          };
+        } else {
+          tag = document.createElement('span');
+          tag.className = 'tag zip';
+        }
         tag.textContent = '可解压';
         cell.appendChild(tag);
       } else if (e.site) {

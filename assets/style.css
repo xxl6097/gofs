@@ -20,16 +20,19 @@
   --ok-soft: rgba(22, 163, 74, 0.16);
   --warn: #d97706;
   --zip: #b45309;
-  /* 操作按钮的语义色：一眼分辨「这排按钮各自干什么」。
-     常态就带色，而不是只有 hover 才出现 —— 「哪个是删除」应该一眼可见。 */
-  --op-open: #2563eb;
-  --op-preview: #4f46e5;
-  --op-download: #0e7490;
-  --op-edit: #7c3aed;
-  --op-unzip: #b45309;
-  --op-list: #475569;
-  --op-rename: #0f766e;
-  --op-danger: #dc2626;
+  /* 操作按钮的语义色收敛成三组：
+     强调色 = 查看/打开/预览/下载/编辑，中性色 = 链接/移动/重命名等内容操作，
+     危险色 = 删除；解压保留归档橙。
+     以前每种操作一个色相（蓝/靛/青/紫/青绿…），菜单像调试标签。
+     现在仍能一眼分辨危险操作，但不再让文件列表旁边出现一条彩虹。 */
+  --op-open: var(--accent);
+  --op-preview: var(--accent);
+  --op-download: var(--accent);
+  --op-edit: var(--accent);
+  --op-unzip: var(--zip);
+  --op-list: var(--text-dim);
+  --op-rename: var(--text-dim);
+  --op-danger: var(--danger);
   /* 实心危险按钮上的文字色（深色主题下浅红底要配深字才有对比度）。 */
   --danger-text: #ffffff;
   --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
@@ -83,14 +86,14 @@
     --ok-soft: rgba(74, 222, 128, 0.18);
     --warn: #fbbf24;
     --zip: #fbbf24;
-  --op-open: #60a5fa;
-  --op-preview: #a5b4fc;
-  --op-download: #22d3ee;
-  --op-edit: #a78bfa;
-  --op-unzip: #fbbf24;
-  --op-list: #94a3b8;
-  --op-rename: #2dd4bf;
-  --op-danger: #f87171;
+  --op-open: var(--accent);
+  --op-preview: var(--accent);
+  --op-download: var(--accent);
+  --op-edit: var(--accent);
+  --op-unzip: var(--zip);
+  --op-list: var(--text-dim);
+  --op-rename: var(--text-dim);
+  --op-danger: var(--danger);
   --danger-text: #2a0b0b;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
     --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -118,14 +121,14 @@
   --warn: #fbbf24;
   --zip: #fbbf24;
   --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  --op-open: #60a5fa;
-  --op-preview: #a5b4fc;
-  --op-download: #22d3ee;
-  --op-edit: #a78bfa;
-  --op-unzip: #fbbf24;
-  --op-list: #94a3b8;
-  --op-rename: #2dd4bf;
-  --op-danger: #f87171;
+  --op-open: var(--accent);
+  --op-preview: var(--accent);
+  --op-download: var(--accent);
+  --op-edit: var(--accent);
+  --op-unzip: var(--zip);
+  --op-list: var(--text-dim);
+  --op-rename: var(--text-dim);
+  --op-danger: var(--danger);
   --danger-text: #2a0b0b;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
@@ -376,7 +379,8 @@
 .listing th.sortable:focus-visible,
 .check-hit:has(input:focus-visible),
 .rn-check:has(input:focus-visible),
-.user-logout:focus-visible {
+.user-logout:focus-visible,
+.tag-action:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1029,6 +1033,24 @@ table.listing {
   flex: none;
 }
 .name-cell .tag.zip { background: rgba(180, 83, 9, .14); color: var(--zip); }
+/* 「可解压」现在是一个按钮：点开压缩包内容。
+   视觉上仍是标签，但用透明扩展区把可点高度撑到约 36px。 */
+.name-cell .tag-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+.name-cell .tag-action::after {
+  content: '';
+  position: absolute;
+  inset: -6px -4px;
+}
+.name-cell .tag-action:hover { filter: brightness(.96); }
 .name-cell .tag.site {
   background: var(--accent-soft);
   color: var(--accent);
@@ -1099,7 +1121,7 @@ table.listing {
 .op-btn[data-kind="preview"] { color: var(--op-preview); }
 .op-btn[data-kind="move"] { color: var(--op-rename); }
 .op-btn[data-kind="link"] { color: var(--op-list); }
-.op-btn[data-kind="share"] { color: var(--op-open); }
+.op-btn[data-kind="share"] { color: var(--op-list); }
 .op-btn[data-kind="download"] { color: var(--op-download); }
 .op-btn[data-kind="edit"] { color: var(--op-edit); }
 .op-btn[data-kind="unzip"] { color: var(--op-unzip); }
@@ -1162,7 +1184,7 @@ table.listing {
 .action-item[data-kind="rename"] svg { color: var(--op-rename); }
 .action-item[data-kind="move"] svg { color: var(--op-rename); }
 .action-item[data-kind="link"] svg { color: var(--op-list); }
-.action-item[data-kind="share"] svg { color: var(--op-open); }
+.action-item[data-kind="share"] svg { color: var(--op-list); }
 /* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
 .action-item[data-kind="trash"] { color: var(--op-danger); }
 .action-item[data-kind="trash"] svg { color: var(--op-danger); }
@@ -1465,6 +1487,48 @@ table.listing {
   font-size: var(--fs-sm);
   color: var(--text-dim);
   margin-bottom: 6px;
+}
+/* 设置字段的标题行：左边标签，右边「当前生效」胶囊。
+   当前值原先埋在说明段落的最后一句，字段一多就得逐段找。 */
+.field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+}
+.field-head label { margin-bottom: 0; }
+.field-current {
+  flex: none;
+  max-width: 55%;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-mute);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 「启动默认值 + 恢复默认」独立成行，不再混在说明文字里。 */
+.field-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: 7px;
+  font-size: var(--fs-xs);
+  color: var(--text-mute);
+}
+.field-meta .reset-control {
+  padding: 0 2px;
+  min-height: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-xs);
 }
 .field input[type=text] {
   width: 100%;
@@ -2755,6 +2819,16 @@ html.booting body::after {
      42px 的可点区域够大，但 15px 的方框看起来太轻，和整行不匹配。 */
   .check-hit input,
   .rn-check input { width: 18px; height: 18px; }
+  /* 可点的「可解压」标签也按触摸目标放大。 */
+  .name-cell .tag-action { min-height: 30px; }
+  /* 设置页的标签页与「恢复默认」也是可点控件，别让它们停在 30px 上下。 */
+  .tab, .office-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+  }
+  .field-meta .reset-control { min-height: 40px; padding: 0 6px; }
   /* 账号芯片里的「退出」也是按钮：原先是 12px 文字 + 1px 内边距，
      实际可点高度约 20px，旁边就是用户名，误触成本还不低。 */
   .user { min-height: 40px; padding: 2px 10px; }
@@ -3118,4 +3192,19 @@ html.booting body::after {
   .rn-field > label { width: auto; }
   .rn-field input[type=text], .rn-field select { flex: 1 1 100%; }
   .rn-opts { padding-left: 0; }
+}
+
+/* 减少动态效果：除了上面分别处理过的启动转圈与搜索转圈，
+   把弹窗、Toast、进度条和控件过渡也一起降级。
+   用 !important 是因为 Toast 的淡出过渡由 JS 写成行内 style。 */
+@media (prefers-reduced-motion: reduce) {
+  .modal,
+  .modal-mask,
+  .toast { animation: none; }
+  .toast { transition: none !important; }
+  .btn,
+  .search input,
+  .drop-zone,
+  .progress-bar i { transition: none; }
+  .progress-bar.indet i { animation: none; }
 }
