@@ -52,7 +52,8 @@ func (s *Server) walkTree(abs string, fn func(p, rel string) string) (string, bo
 // 「目录可写、子项只读」的规则不能被一次 recursive 删除绕过。
 func (s *Server) requireDeleteTree(r *http.Request, abs string) (string, bool) {
 	return s.walkTree(abs, func(_, rel string) string {
-		if s.checkPerm(r, rel) != auth.PermReadWrite {
+		// WalkDir 返回的是磁盘真实名字，无需再逐段做大小写规范化。
+		if s.checkPermExact(r, rel) != auth.PermReadWrite {
 			return rel
 		}
 		return ""
@@ -68,7 +69,7 @@ func (s *Server) requireMoveTree(r *http.Request, srcAbs, srcURL, dstURL string)
 			return oldURL
 		}
 		newURL := path.Join(dstURL, filepath.ToSlash(relPart))
-		oldPerm := s.checkPerm(r, oldURL)
+		oldPerm := s.checkPermExact(r, oldURL)
 		if oldPerm == auth.PermNone {
 			return oldURL
 		}

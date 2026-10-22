@@ -647,8 +647,15 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
 	// 与 authorize 使用同一套规范化：否则页面数据里的 perms 会与实际
 	// 文件操作看到的路径不一致。
-	urlPath = s.canonicalPath(r, urlPath)
+	return s.permOfExact(r, s.canonicalPath(r, urlPath))
+}
 
+// permOfExact 与 permOf 相同，但假定调用方给出的已经是磁盘上的真实名字。
+//
+// 供遍历目录树的场景使用：WalkDir 返回的条目名本来就是磁盘真实名字，
+// 再对每个后代做一次「逐段 ReadDir 找真实大小写」会把递归删除/移动
+// 放大成 O(n²)。
+func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
 	// 分享令牌：换来的只是「不用登录」，权限级别由令牌自己定（只读 / 可读写），
 	// 且严格限制在令牌范围内。
 	//
@@ -680,6 +687,12 @@ func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, 
 // 需要在不产生副作用的前提下预判权限时使用（例如上传路径被重写之后）。
 func (s *Server) checkPerm(r *http.Request, urlPath string) auth.Permission {
 	perm, _, _ := s.permOf(r, urlPath)
+	return perm
+}
+
+// checkPermExact 用于路径已由 WalkDir 等来源保证是磁盘真实名字的场景。
+func (s *Server) checkPermExact(r *http.Request, urlPath string) auth.Permission {
+	perm, _, _ := s.permOfExact(r, urlPath)
 	return perm
 }
 
