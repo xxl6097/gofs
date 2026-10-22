@@ -2463,6 +2463,9 @@ mux.HandleFunc("/api/", myOwnAPI)
   依赖「flag 是否被显式设置」，库里没有这个概念，`Permissions` 字段即最终值。
 - 命令行那套语义（参数 + `GOFS_` 环境变量 + banner）也能整个复用：
   `gofs.RunCLI(ctx, args, os.Stdout, os.Stderr)`，`cmd/gofs/main.go` 就是这么写的。
+- **`Run` 便捷入口不带默认口令**：每次启动随机生成管理员口令并打印一次，
+  且只监听 `127.0.0.1`。需要固定账号或监听地址时用 `New` +
+  `WithAuth` / `WithBind` 自己配。
 
 ## 项目结构
 

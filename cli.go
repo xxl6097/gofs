@@ -2,9 +2,23 @@ package gofs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 )
+
+// randomAdminPassword 为便捷入口生成一个不可预测的管理员口令。
+//
+// 导出的 Run 曾经硬编码 admin/admin123，且启动横幅不打印口令 —— 那是一个
+// 没人知道、但互联网上人人知道的默认后门。现在每次启动随机生成并打印一次。
+func randomAdminPassword() (string, error) {
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("生成管理员口令失败: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
 
 // RunCLI 按命令行语义运行 gofs：解析参数与环境变量、启动服务、
 // 打印启动信息，并阻塞到 ctx 被取消。
@@ -65,9 +79,16 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 }
 
 func Run(ctx context.Context, stdout, stderr io.Writer) error {
+	// 随机口令 + 仅监听回环：这是「起一个服务就完事」的便捷入口，
+	// 不能带一个已知口令，也不该默认暴露到所有网卡。
+	password, err := randomAdminPassword()
+	if err != nil {
+		return err
+	}
 	srv, err := New(WithRoot("."),
+		WithBind("127.0.0.1"),
 		WithPort(5000),
-		WithAuth("admin:admin123@/:rw"),
+		WithAuth("admin:"+password+"@/:rw"),
 		WithAllowAll(),
 		WithTune(func(c *Config) { // 逃生舱：改任意字段
 			c.MaxConcurrent = 128
@@ -83,6 +104,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	srv.Banner(stdout)
+	fmt.Fprintf(stdout, "  管理员    : admin / %s（随机生成，仅本次启动有效）\n", password)
 
 	select {
 	case <-ctx.Done():
