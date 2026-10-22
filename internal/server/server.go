@@ -845,7 +845,15 @@ func isAppShellNavigation(r *http.Request) bool {
 
 // handleRoot 处理除内部 API 之外的所有请求。
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	urlPath := r.URL.Path
+	// ⚠️ 鉴权与落盘解析必须使用**同一个规范路径**。
+	//
+	// ServeMux 只对**转义后**的路径做规范化重定向：`/docs/%2e%2e/secret.txt`
+	// 的转义路径里没有字面量 `..`，不会触发重定向，而 URL.Path 已经解码成
+	// `/docs/../secret.txt`。若鉴权拿这个原始值去匹配 ACL（命中 /docs），
+	// 落盘时 Resolve 又把它折叠成 `/secret.txt`，受限账号就能越出自己的目录。
+	//
+	// CleanURLPath 保留结尾斜杠语义，所以对正常路径没有任何行为变化。
+	urlPath := fsutil.CleanURLPath(r.URL.Path)
 
 	// 上传密钥走独立分支：它只代表「往某个目录传文件」这一件事，
 	// 不参与读、删、改名、解压等任何其它操作。

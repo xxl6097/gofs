@@ -377,6 +377,16 @@ type Config struct {
 	// RootAllow 为允许切换到的额外路径前缀。
 	RootAllow []string
 
+	// AllowAnonymousAdmin 允许在**未启用鉴权**时把 HTTP 管理接口的调用者
+	// 当作管理员。
+	//
+	// 默认关闭。未启用鉴权意味着所有能连上端口的人都能访问，而管理接口
+	// （/fs/settings、/fs/keys、/fs/upgrade、/fs/restart、/fs/uninstall）
+	// 能挂载任意目录、切换服务根、改监听地址 —— 这些已经超出了「被服务的
+	// 那棵目录」，不能因为没配账号就默认交给所有人。需要这种部署时要显式
+	// 打开此开关（--allow-anonymous-admin / GOFS_ALLOW_ANONYMOUS_ADMIN）。
+	AllowAnonymousAdmin bool
+
 	// Version 为本服务对外报告的版本号，用于页面标题、健康检查与升级比较。
 	//
 	// 默认取 DefaultVersion（0.1.0）。上层嵌入时可以设成自己的版本，
@@ -596,6 +606,9 @@ func Defaults() *Config {
 		DisableHTMLSandbox: false,
 		AllowRootSwitch:    true,
 		RootAllow:          nil,
+		// 未启用鉴权时管理接口默认关闭：无鉴权只读/上传仍是常见用法，
+		// 但不该顺带把「挂载任意目录、改监听、换根」交给所有人。
+		AllowAnonymousAdmin: false,
 
 		Version:      DefaultVersion,
 		Title:        DefaultTitle,
@@ -669,6 +682,7 @@ func (c *Config) ApplyEnv() {
 	c.DisableHTMLSandbox = envBool("GOFS_DISABLE_HTML_SANDBOX", c.DisableHTMLSandbox)
 	c.AllowRootSwitch = envBool("GOFS_ALLOW_ROOT_SWITCH", c.AllowRootSwitch)
 	c.RootAllow = envList("GOFS_ROOT_ALLOW", c.RootAllow)
+	c.AllowAnonymousAdmin = envBool("GOFS_ALLOW_ANONYMOUS_ADMIN", c.AllowAnonymousAdmin)
 }
 
 // Parse 解析命令行参数与环境变量，返回最终配置。
@@ -743,6 +757,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		"单次上传的最大字节数，0 表示不限制")
 	fs.BoolVar(&noRootSwitch, "no-root-switch", false,
 		"禁止登录后在页面上切换服务根目录")
+	fs.BoolVar(&cfg.AllowAnonymousAdmin, "allow-anonymous-admin", cfg.AllowAnonymousAdmin,
+		"未启用鉴权时仍允许通过 HTTP 管理接口修改服务设置（默认关闭，风险自负）")
 	fs.Func("root-allow", "允许把服务根目录切换到的路径前缀（可重复指定）", func(v string) error {
 		v = strings.TrimSpace(v)
 		if v == "" {
@@ -1224,6 +1240,10 @@ func usageText() string {
       --root-allow <prefix>  允许把服务根目录切换到的路径前缀，可重复指定
                              （默认可切换范围 = 启动根目录的父目录，
                                比如启动根是 /srv/data 时可切到 /srv/*）
+      --allow-anonymous-admin
+                             未启用鉴权时仍允许通过 HTTP 管理接口修改服务设置。
+                             默认关闭：无鉴权时任何能连上端口的人都不应能
+                             挂载任意目录、切换服务根或修改监听地址
 
 示例:
   gofs                                 以只读模式服务当前目录

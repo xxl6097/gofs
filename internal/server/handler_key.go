@@ -67,6 +67,14 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden: 未开启上传密钥（--allow-keys）", http.StatusForbidden)
 		return
 	}
+	// 未启用鉴权时管理接口默认关闭：否则任何能连上端口的人都能签发
+	// 长期有效的上传/分享凭证（见 requireAdminOr 的同一条策略）。
+	if !s.auth.Enabled() && !s.cfg.AllowAnonymousAdmin {
+		http.Error(w, "403 Forbidden: 未启用鉴权，密钥管理默认关闭"+
+			"（如确需在无鉴权模式下管理，请显式使用 --allow-anonymous-admin）",
+			http.StatusForbidden)
+		return
+	}
 
 	// 密钥管理只接受账号凭据：若允许上传密钥来管理密钥，
 	// 一把只能传文件的凭证就能给自己签发新凭证，等于权限提升。

@@ -168,12 +168,16 @@ func ValidateRules(rules []Rule) ([]Rule, error) {
 	out := make([]Rule, 0, len(rules))
 	seen := map[string]bool{}
 	for _, r := range rules {
+		// 在归一化**之前**检查 `..` 段：normalizePath 会把它静默折叠掉，
+		// 之后再查就查不到了。规则里的 `..` 是歧义输入，直接拒绝比猜测意图好。
+		for _, seg := range strings.Split(strings.ReplaceAll(r.Path, "\\", "/"), "/") {
+			if seg == ".." {
+				return nil, fmt.Errorf("路径 %q 不能包含 ..", r.Path)
+			}
+		}
 		p := normalizePath(r.Path)
 		if p == "" {
 			return nil, fmt.Errorf("路径不能为空")
-		}
-		if strings.Contains(p, "..") {
-			return nil, fmt.Errorf("路径 %q 不能包含 ..", r.Path)
 		}
 		if r.Perm != PermRead && r.Perm != PermReadWrite {
 			return nil, fmt.Errorf("路径 %q 的权限只能是 rw 或 r", p)

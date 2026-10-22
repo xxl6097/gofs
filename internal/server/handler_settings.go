@@ -20,12 +20,13 @@ import (
 
 // settingsReply 是服务设置接口的响应。
 type settingsReply struct {
-	// Root 为当前服务根目录的绝对路径（仅管理员可见）。
-	Root string `json:"root"`
+	// Root 为当前服务根目录的绝对路径（仅管理员可见，非管理员不下发该字段）。
+	Root string `json:"root,omitempty"`
 	// RootSwitchable 表示当前账号是否有权切换根目录。
 	RootSwitchable bool `json:"root_switchable"`
 	// AllowRoots 为允许切换到的路径前缀，供界面提示「能切到哪」。
-	AllowRoots []string `json:"allow_roots"`
+	// 非管理员不下发：它同样是磁盘布局信息。
+	AllowRoots []string `json:"allow_roots,omitempty"`
 	// UploadMaxSize 为当前生效的单文件上传上限，0 表示不限制。
 	UploadMaxSize int64 `json:"upload_max_size"`
 	// UploadMaxSizeDefault 为启动参数里的取值，用于「恢复默认」。
@@ -668,7 +669,12 @@ func (s *Server) switchRoot(newRoot string) error {
 // 按权限决定是否下发。
 func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResult, bool) {
 	if !s.auth.Enabled() {
-		return permResult{Perm: auth.PermReadWrite, Authenticated: true}, true
+		// 未启用鉴权不等于「调用者是管理员」：GET 仍可用，但只有显式放开
+		// 匿名管理时才下发服务根 / 站点列表等敏感信息（见 buildSettings）。
+		if s.cfg.AllowAnonymousAdmin {
+			return permResult{Perm: auth.PermReadWrite, Authenticated: true}, true
+		}
+		return permResult{Perm: auth.PermNone}, true
 	}
 	ip, ok := s.checkAuthLimit(w, r)
 	if !ok {
@@ -703,7 +709,10 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 // 而其它按钮都正常（它们走 XHR，permOf 本来就认 cookie）。
 func (s *Server) isAdminRequest(r *http.Request) bool {
 	if !s.auth.Enabled() {
-		return true
+		// 未启用鉴权时默认不把任何人当作管理员：管理接口关闭，
+		// 页面上也不该出现「服务设置」入口。确实需要无鉴权管理时，
+		// 由 --allow-anonymous-admin 显式放开。
+		return s.cfg.AllowAnonymousAdmin
 	}
 	// ⚠️ 分享令牌一律不是管理员，与它的权限级别无关。
 	//
@@ -733,9 +742,20 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 // requireAdminOr 与 requireAdmin 同一套判定，只是把 403 文案换成具体的操作名，
 // 这样用户看到的提示能直接指出「是哪个动作需要管理员」。
 func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action string) bool {
-	// 未启用鉴权时服务本身就是全开放的，不存在额外的管理员概念。
+	// 未启用鉴权时**不能**把调用者当成管理员。
+	//
+	// 管理接口能挂载服务根之外的目录、切换服务根、改监听地址、替换二进制
+	// 甚至卸载服务 —— 这些已经超出「被服务的那棵目录」。无鉴权部署意味着
+	// 任何能连上端口的人都能访问，默许他们做这些等于把整台机器交出去。
+	// 需要这种部署时用 --allow-anonymous-admin 显式承担风险。
 	if !s.auth.Enabled() {
-		return true
+		if s.cfg.AllowAnonymousAdmin {
+			return true
+		}
+		http.Error(w, "403 Forbidden: 未启用鉴权，服务管理接口默认关闭"+
+			"（如确需在无鉴权模式下管理，请显式使用 --allow-anonymous-admin）",
+			http.StatusForbidden)
+		return false
 	}
 	ip, ok := s.checkAuthLimit(w, r)
 	if !ok {

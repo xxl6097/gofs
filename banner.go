@@ -75,6 +75,15 @@ func (s *Server) Banner(w io.Writer) {
 	default:
 		fmt.Fprintf(w, "  鉴权      : 已启用（账号来自用户表），页面使用 Basic 认证\n")
 	}
+	// 无鉴权时管理接口默认关闭，横幅上要说清楚 —— 否则运维点开「设置」
+	// 看到 403 只能靠猜。
+	if !s.inner.AuthEnabled() {
+		if cfg.AllowAnonymousAdmin {
+			fmt.Fprintf(w, "  管理接口  : 已放开给匿名访问（--allow-anonymous-admin）\n")
+		} else {
+			fmt.Fprintf(w, "  管理接口  : 已关闭（无鉴权；如需在线管理请用 --allow-anonymous-admin）\n")
+		}
+	}
 	if cfg.AllowKeys {
 		keyLoc := cfg.KeyFile
 		if keyLoc == "" {

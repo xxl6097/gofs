@@ -1,0 +1,38 @@
+# CNB云原生流水线配置 - 多服务构建和部署
+# 基于Jenkins流水线迁移，
+
+# 环境配置变量定义
+.env_config: &env_config
+  # 基础镜像配置
+  BASE_IMAGE_REGISTRY: ${BASE_IMAGE_REGISTRY}
+  # 其他配置
+  JAVA_OPTS: ${JAVA_OPTS}
+  DISCONF_OPTS: ${DISCONF_OPTS}
+# 通用类方法：
+# 构建镜像tag方法
+.stage_ensure_cnb_tag: &stage_ensure_cnb_tag
+  name: ensure CNB_TAG
+  script: |
+    #!/bin/sh
+    set -e
+    if [ -z "${CNB_TAG}" ]; then
+      # 提取分支名称中的版本号部分 (V5.11.0)
+      BRANCH_NAME="${CNB_BRANCH}"
+      
+      # 提取版本号：先取最后一部分，然后提取第一个连字符之前的内容
+      VERSION=$(echo "${BRANCH_NAME}" | sed 's#.*/##' | cut -d'-' -f1)
+      
+      # 生成时间戳
+      TIMESTAMP=$(date +%Y%m%d%H%M%S)
+      # 组合成最终的CNB_TAG
+      CNB_TAG="${VERSION}-${TIMESTAMP}"
+      echo "从分支 ${BRANCH_NAME} 生成CNB_TAG: ${CNB_TAG}"
+    else
+      echo "使用现有CNB_TAG: ${CNB_TAG}"
+    fi
+    echo "CNB_TAG=${CNB_TAG}" >> /workspace/cnb_tag.env
+  exports:
+    - CNB_TAG
+# AI 代码审查
+include:
+  - https://cnb.cool/clife-repo/ci/-/blob/main/yml/pr-check.yml

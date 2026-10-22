@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">-->
+
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <localRepository>/root/.m2/repository</localRepository>
+    <servers>
+        <server>
+            <id>clife-maven-snapshots</id>
+            <username>cnb</username>
+            <password>${CNB_TOKEN}</password>
+        </server>
+        <server>
+            <id>clife-maven-releases</id>
+            <username>cnb</username>
+            <password>${CNB_TOKEN}</password>
+        </server>
+    </servers>
+    <!-- <mirrors>
+        <mirror>
+            <id>nexus-aliyun</id>
+            <mirrorOf>central</mirrorOf>
+            <name>Nexus aliyun</name>
+            <url>http://maven.aliyun.com/nexus/content/groups/public</url>
+        </mirror>
+        <mirror>
+            <id>alimaven</id>
+            <mirrorOf>central</mirrorOf>
+            <name>aliyun maven</name>
+            <url>http://maven.aliyun.com/nexus/content/repositories/central/</url>
+        </mirror>
+    </mirrors> -->
+    <profiles>
+        <profile>
+            <id>repository</id>
+            <repositories>
+                <repository>
+                    <id>tencent-maven</id>
+                    <name>TencentCloud Maven</name>
+                    <url>https://mirrors.cloud.tencent.com/nexus/repository/maven-public/</url>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                </repository>
+                <repository>
+                    <id>clife-maven-snapshots</id>
+                    <url>https://maven.cnb.cool/clife/maven-snapshots/-/packages/</url>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                    </snapshots>
+                </repository>
+                <repository>
+                    <id>clife-maven-releases</id>
+                    <url>https://maven.cnb.cool/clife/maven-releases/-/packages/</url>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                    </snapshots>
+                </repository>
+            </repositories>
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>maven2-plugin</id>
+                    <url>https://mirrors.cloud.tencent.com/nexus/repository/maven-public/</url>
+                </pluginRepository>
+            </pluginRepositories>
+        </profile>
+    </profiles>
+    <activeProfiles>
+        <activeProfile>repository</activeProfile>
+    </activeProfiles>
+</settings>

@@ -24,6 +24,7 @@ package auth
 import (
 	"crypto/subtle"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -266,18 +267,19 @@ func (a *Authenticator) mergeStatic(in *account) error {
 }
 
 // normalizePath 归一化规则中的路径。
+//
+// 这里必须折叠 `.`/`..` 与重复斜杠：鉴权与落盘解析（fsutil.CleanURLPath）
+// 必须对同一个请求得出一致的路径。早先只做了去尾斜杠，于是
+// `/docs/../secret` 在 ACL 眼里仍属于 `/docs`，落盘时却被折叠成 `/secret` ——
+// 受限账号因此可以越出自己的目录。规则本身由 ValidateRules 拒绝 `..`，
+// 所以对合法配置这是纯防御。
 func normalizePath(p string) string {
-	p = strings.TrimSpace(p)
+	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
 	if p == "" {
 		return "/"
 	}
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	if len(p) > 1 {
-		p = strings.TrimSuffix(p, "/")
-	}
-	return p
+	// path.Clean 会补上前导 /、折叠 . 与 ..、去掉重复斜杠与尾斜杠。
+	return path.Clean("/" + p)
 }
 
 // Enabled 表示是否存在任何鉴权规则。

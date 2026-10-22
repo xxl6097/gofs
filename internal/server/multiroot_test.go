@@ -18,9 +18,12 @@ import (
 // testConfigRoots 构造一个挂多个服务目录的配置（位置参数全给）。
 func testConfigRoots(t *testing.T, roots []string, extra ...string) *config.Config {
 	t.Helper()
-	// 同 testConfig：三个存储文件都置空，免得写进开发者真实配置。
+	// 同 testConfig：三个存储文件都置空，免得写进开发者真实配置；
+	// 同时沿用「无鉴权 = 管理员」的旧口径测设置接口（安全默认值由
+	// anonymous_admin_test.go 用 testConfigDefaultPolicy 覆盖）。
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
-		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", ""}
+		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		"--allow-anonymous-admin"}
 	args = append(args, extra...)
 	args = append(args, roots...)
 	cfg, err := config.Parse(args, io.Discard)

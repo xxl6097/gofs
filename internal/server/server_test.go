@@ -41,6 +41,25 @@ func testConfig(t *testing.T, root string, extra ...string) *config.Config {
 	// 成了多站点」这种毫无头绪的失败。真实目录是哪由 os.UserConfigDir()
 	// 决定，测试不该碰它。
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
+		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		// 绝大多数用例沿用「无鉴权 = 管理员」的旧行为来测设置接口；
+		// 「未启用鉴权时管理接口默认关闭」由 anonymous_admin_test.go
+		// 用 testConfigDefaultPolicy 专门覆盖。
+		"--allow-anonymous-admin"}
+	args = append(args, extra...)
+	args = append(args, root)
+	cfg, err := config.Parse(args, io.Discard)
+	if err != nil {
+		t.Fatalf("解析配置失败: %v", err)
+	}
+	return cfg
+}
+
+// testConfigDefaultPolicy 与 testConfig 相同，但不打开 --allow-anonymous-admin。
+// 用于验证「未启用鉴权时管理接口默认关闭」这条安全默认值。
+func testConfigDefaultPolicy(t *testing.T, root string, extra ...string) *config.Config {
+	t.Helper()
+	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
 		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", ""}
 	args = append(args, extra...)
 	args = append(args, root)
@@ -56,7 +75,8 @@ func testConfigDated(t *testing.T, root, layout string, extra ...string) *config
 	t.Helper()
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
 		"--upload-date-layout", layout,
-		"--key-file", "", "--user-file", "", "--settings-file", ""}
+		"--key-file", "", "--user-file", "", "--settings-file", "",
+		"--allow-anonymous-admin"}
 	args = append(args, extra...)
 	args = append(args, root)
 	cfg, err := config.Parse(args, io.Discard)
