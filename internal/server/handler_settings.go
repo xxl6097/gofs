@@ -388,6 +388,17 @@ func (s *Server) changeListen(w http.ResponseWriter, r *http.Request, req settin
 		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
 		return "", false
 	}
+	// 在调用 Relistener **之前**挡住「路径上是普通文件/目录/软链」的情况。
+	// 内置实现自己也会拒绝（见 gofs.Server.listen），但自定义 Relistener
+	// 未必知道这条约定 —— 而这里的一句 os.Remove 就足以删掉任意文件。
+	// 允许：路径不存在（新建），或已经是 socket（残留/复用）。
+	if strings.HasPrefix(bind, "/") {
+		if fi, lerr := os.Lstat(bind); lerr == nil && fi.Mode()&os.ModeSocket == 0 {
+			http.Error(w, fmt.Sprintf("400 Bad Request: %s 已存在且不是 socket，拒绝覆盖", bind),
+				http.StatusBadRequest)
+			return "", false
+		}
+	}
 	if bind == s.ListenBind() && port == s.ListenPort() {
 		return "", true // 没变，什么都不做
 	}

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // dateLayoutProbe 是校验日期布局字面量时使用的参照时刻。
@@ -884,9 +885,15 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 // 归一化规则同时用于启动参数与页面上的运行期修改 —— 两处必须一致，
 // 否则「参数里写 /files、页面上写 files」会得到两个不同的前缀。
 //
-// 拒绝的取值：会进入 URL 与 cookie 的 Path，含空白、`?`、`#` 会破坏这两者；
-// `..` 段则可能被用来构造越过前缀的路径。这些与其静默接受再出怪问题，
-// 不如在设置的那一刻就报错。
+// 拒绝的取值：
+//   - 空白、控制字符、`?`、`#`：会破坏 URL 与 cookie 的 Path；
+//   - `"`、`'`、`<`、`>`、`\`：前缀会被拼进页面（href/src），这些字符
+//     既是 HTML 注入面，也会让 URL 语义产生歧义；
+//   - `..` / `.` 段、以及包含 `//` 的写法：前者可构造越界路径，后者在
+//     URL 里是 scheme-relative（`//evil.com` 会被浏览器当成另一个主机）。
+//
+// 这些与其静默接受再出怪问题，不如在设置的那一刻就报错。输出侧仍会做
+// HTML 转义（见 writeHTMLStatus），这里只是把明显不安全的输入挡在门外。
 func NormalizePathPrefix(raw string) (string, error) {
 	p := strings.TrimSpace(raw)
 	if p == "" || p == "/" {
@@ -895,17 +902,26 @@ func NormalizePathPrefix(raw string) (string, error) {
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	p = strings.TrimSuffix(p, "/")
+	// 去掉全部尾斜杠：`//` 归一化为空，`/a//` 归一化为 `/a`。
+	p = strings.TrimRight(p, "/")
 	if p == "" {
 		return "", nil
+	}
+	for _, r := range p {
+		switch {
+		case r < 0x20 || r == 0x7f, unicode.IsSpace(r):
+			return "", fmt.Errorf("路径前缀不能包含空白或控制字符: %q", raw)
+		case r == '?' || r == '#' || r == '"' || r == '\'' || r == '<' || r == '>' || r == '\\':
+			return "", fmt.Errorf("路径前缀不能包含字符 %q: %q", r, raw)
+		}
+	}
+	if strings.Contains(p, "//") {
+		return "", fmt.Errorf("路径前缀不能包含连续斜杠 //（会被浏览器当成协议相对地址）: %q", raw)
 	}
 	for _, seg := range strings.Split(p, "/") {
 		if seg == ".." || seg == "." {
 			return "", fmt.Errorf("路径前缀不能包含 %q 段: %q", seg, raw)
 		}
-	}
-	if i := strings.IndexAny(p, " \t?#"); i >= 0 {
-		return "", fmt.Errorf("路径前缀不能包含空白、? 或 #: %q", raw)
 	}
 	return p, nil
 }
@@ -1120,7 +1136,17 @@ func NormalizeListen(bind string, port int) (string, int, error) {
 	if port < 0 || port > 65535 {
 		return "", 0, fmt.Errorf("非法端口 %d：取值 0-65535（0 表示由系统分配）", port)
 	}
-	if bind == "" || strings.HasPrefix(bind, "/") {
+	if bind == "" {
+		return bind, port, nil
+	}
+	if strings.HasPrefix(bind, "/") {
+		// unix socket 路径会直接交给 net.Listen，控制字符会让错误信息
+		// 与日志都变得不可读；NUL 更是直接非法。
+		for _, r := range bind {
+			if r == 0 || r < 0x20 || r == 0x7f {
+				return "", 0, fmt.Errorf("非法的 unix socket 路径 %q：包含控制字符", bind)
+			}
+		}
 		return bind, port, nil
 	}
 	if strings.Contains(bind, ":") {

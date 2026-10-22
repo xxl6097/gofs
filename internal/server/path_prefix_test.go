@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,11 +158,47 @@ func TestPathPrefixNormalize(t *testing.T) {
 		}
 	}
 
-	// 会破坏 URL / cookie Path 的取值必须当场拒掉，而不是收下再出怪问题。
-	for _, bad := range []string{"/a b", "/a\tb", "/files?x", "/files#y", "/a/../b", "/a/./b"} {
-		if got := put(`{"path_prefix":"` + bad + `"}`); got.code != http.StatusBadRequest {
+	// 会破坏 URL / cookie Path / 页面标记的取值必须当场拒掉，
+	// 而不是收下再出怪问题。
+	for _, bad := range []string{
+		"/a b", "/a\tb", "/files?x", "/files#y", "/a/../b", "/a/./b",
+		// HTML 注入面：这些字符会进入 index.html 的 href/src。
+		`/x"><img/src=x/onerror=alert(1)>`,
+		`/x'onload='alert(1)`,
+		`/a<b`, `/a>b`, `/a\b`,
+		// 浏览器会把 //host 当成协议相对地址（另一个主机）。
+		`//evil.example.com`,
+		// 控制字符。
+		"/a\x01b",
+	} {
+		body, _ := json.Marshal(map[string]string{"path_prefix": bad})
+		got := do(t, s, http.MethodPut, s.PathPrefix()+"/fs/settings", bytes.NewReader(body), hdr)
+		if got.code != http.StatusBadRequest {
 			t.Errorf("非法前缀 %q 返回 %d，期望 400：%s", bad, got.code, got.body)
 		}
+	}
+}
+
+// TestWriteHTMLEscapesPathPrefix 是输出层的最后一道防线。
+//
+// 输入校验已经拒绝引号/尖括号，但旧版本写下的 settings.json、手工改过的
+// 文件、或将来放宽校验，都不该让前缀直接变成标记。这里直接改运行时设置
+// （绕过 API），验证 writeHTML 仍会转义。
+func TestWriteHTMLEscapesPathPrefix(t *testing.T) {
+	s := newTestServer(t, testConfig(t, t.TempDir()))
+	payload := `/x"><img/src=x/onerror=alert(1)>`
+	if err := s.settings.SetPathPrefix(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.writeHTML(w, pageData{})
+	body := w.Body.String()
+	if strings.Contains(body, `<img/src=x`) {
+		t.Fatalf("path_prefix 未经转义进入页面：%.400s", body)
+	}
+	if !strings.Contains(body, `&lt;img/src=x`) {
+		t.Fatalf("path_prefix 没有被 HTML 转义：%.400s", body)
 	}
 }
 
@@ -324,15 +362,25 @@ func TestPathPrefixNormalizeHelper(t *testing.T) {
 	}{
 		{"", "", false},
 		{"/", "", false},
+		{"//", "", false},
 		{"files", "/files", false},
 		{"/files/", "/files", false},
 		{"  /files  ", "/files", false},
 		{"/a/b/", "/a/b", false},
+		{"/a//", "/a", false},
+		{"/a&b", "/a&b", false},
+		{"/文件", "/文件", false},
 		{"/a b", "", true},
 		{"/a?b", "", true},
 		{"/a#b", "", true},
 		{"/a/../b", "", true},
 		{"/a/./b", "", true},
+		{"/a//b", "", true},
+		{"//evil.example.com", "", true},
+		{`/x"><img/src=x/onerror=alert(1)>`, "", true},
+		{`/a'b`, "", true},
+		{`/a\b`, "", true},
+		{"/a\x01b", "", true},
 	} {
 		got, err := config.NormalizePathPrefix(tc.in)
 		if tc.wantErr {

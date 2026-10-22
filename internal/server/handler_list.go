@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"io/fs"
 	"net/http"
@@ -235,7 +236,10 @@ func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status in
 	}
 	out := bytes.Replace(s.ui.index, []byte("__GOFS_DATA__"), raw, 1)
 
-	base := s.PathPrefix()
+	// 前缀会落进 href/src 属性，必须做 HTML 转义。输入侧已经拒绝
+	// 引号/尖括号等字符，但这里是最后一道防线：旧版本写入的 settings.json、
+	// 或将来放宽输入校验，都不该让前缀直接变成标记。
+	base := html.EscapeString(s.PathPrefix())
 	out = bytes.ReplaceAll(out, []byte("__GOFS_ASSETS__"), []byte(base+"/fs/assets/"))
 	out = bytes.ReplaceAll(out, []byte("__GOFS_BASE__"), []byte(base))
 

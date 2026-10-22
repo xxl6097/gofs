@@ -306,3 +306,66 @@ func TestListenNotPersistedWhenUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestChangeListenRefusesNonSocketPath 确认「改监听」不会变成任意文件删除。
+//
+// 修复前：把 listen_addr 设成一个普通文件路径，内置实现会先 os.Remove
+// 再 net.Listen —— 即使监听失败、接口返回 400，文件也已经没了。
+// 现在在调用 Relistener 之前就拒绝，且文件必须原样保留。
+func TestChangeListenRefusesNonSocketPath(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "do-not-delete.txt")
+	if err := os.WriteFile(victim, []byte("important"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rl := &fakeRelistener{can: true}
+	s := listenServer(t, "", rl, "--bind", "127.0.0.1", "--port", "8080")
+
+	got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"listen_addr":`+jsonString(victim)+`}`), adminSettingsHdr())
+	if got.code != http.StatusBadRequest {
+		t.Fatalf("非 socket 路径返回 %d，期望 400：%s", got.code, got.body)
+	}
+	if rl.calls != 0 {
+		t.Errorf("不应调用 Relistener（实际 %d 次）", rl.calls)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("文件被删除了：%v", err)
+	}
+}
+
+// TestLoadSettingsRejectsUnsafeValues 确认 settings.json 里的值不能绕过校验。
+//
+// 文件可能来自旧版本、手工修改，或在修复前被越权接口写入：读取时必须
+// 重新做与 API 相同的校验，非法前缀/会删文件的 listener 路径直接忽略。
+func TestLoadSettingsRejectsUnsafeValues(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "do-not-delete.txt")
+	if err := os.WriteFile(victim, []byte("important"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sf := filepath.Join(dir, "settings.json")
+	raw, err := json.Marshal(map[string]any{
+		"version":     5,
+		"path_prefix": `/x"><img/src=x/onerror=alert(1)>`,
+		"listen_bind": victim,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sf, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := listenServer(t, sf, nil, "--bind", "127.0.0.1", "--port", "8080")
+	if got := s.PathPrefix(); got != "" {
+		t.Errorf("非法 path_prefix 被采纳了：%q", got)
+	}
+	if s.ListenBind() != "127.0.0.1" || s.ListenPort() != 8080 {
+		t.Errorf("非法 listen_bind 被采纳了：%q:%d", s.ListenBind(), s.ListenPort())
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("加载设置时文件被删除：%v", err)
+	}
+}

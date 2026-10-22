@@ -247,11 +247,27 @@ func (s *Server) serve(ln net.Listener) {
 func (s *Server) listen(bind string, port int) (net.Listener, error) {
 	addr := config.ListenAddr(bind, port)
 	if strings.HasPrefix(bind, "/") {
-		// unix socket 需要先清理残留文件。
-		if _, err := os.Stat(addr); err == nil {
+		// unix socket 需要先清理**残留的 socket**，但绝不能因此变成
+		// 「任意文件删除」：如果这个路径上是一个普通文件、目录或软链，
+		// 说明用户填错了（或有人在借监听设置删文件），直接拒绝。
+		//
+		// 早先的实现是无条件 os.Remove(addr) —— 只要把 listen_addr 指到
+		// 任意可写文件，监听失败之前文件就已经没了。
+		if fi, err := os.Lstat(addr); err == nil {
+			if fi.Mode()&os.ModeSocket == 0 {
+				return nil, fmt.Errorf("拒绝覆盖非 socket 路径 %s（%s）", addr, fi.Mode().Type())
+			}
+			// 仍然在服务的 socket 不能抢：先试着连一下，连得上说明
+			// 另一个进程还在用它。只有连不上（崩溃残留）才清理。
+			if c, derr := net.DialTimeout("unix", addr, 200*time.Millisecond); derr == nil {
+				_ = c.Close()
+				return nil, fmt.Errorf("socket %s 正在被其它进程使用", addr)
+			}
 			if rmErr := os.Remove(addr); rmErr != nil {
 				return nil, fmt.Errorf("清理残留 socket %s 失败: %w", addr, rmErr)
 			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("检查 socket 路径 %s 失败: %w", addr, err)
 		}
 		ln, err := net.Listen("unix", addr)
 		if err != nil {
@@ -319,8 +335,13 @@ func (s *Server) Relisten(ctx context.Context, bind string, port int) (string, e
 	// 旧监听是 unix socket 时它的文件已经随 Close 被 unlink 了（见上）；
 	// 这里再删一次是给「Close 没删成」的平台兜底，而且是**另一个**路径
 	//（同路径的分支上面已经短路返回了），不会误删新监听的 socket。
+	//
+	// ⚠️ 兜底删除同样只认 socket：关闭监听与这一行之间，路径可能已被
+	// 本地攻击者换成普通文件/软链，无条件 os.Remove 就成了任意文件删除。
 	if ua, ok := old.Addr().(*net.UnixAddr); ok && ua != nil {
-		_ = os.Remove(ua.Name)
+		if fi, err := os.Lstat(ua.Name); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			_ = os.Remove(ua.Name)
+		}
 	}
 	return newLn.Addr().String(), nil
 }

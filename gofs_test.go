@@ -137,9 +137,20 @@ func shortTempDir(t *testing.T) string {
 // TestUnixSocketReclaimsStaleFile 确认残留 socket 文件会被清掉后重新监听。
 func TestUnixSocketReclaimsStaleFile(t *testing.T) {
 	sock := filepath.Join(shortTempDir(t), "gofs.sock")
-	// 先放一个残留文件，模拟上次没清干净的场景。
-	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+	// 先放一个**真正的残留 socket**，模拟上次崩溃后没清干净的场景。
+	//
+	// 不能再用普通文件来模拟：listen 现在只清理 ModeSocket，碰到
+	// 普通文件/目录/软链一律拒绝（否则就成了任意文件删除）。
+	stale, err := net.Listen("unix", sock)
+	if err != nil {
 		t.Fatalf("准备残留 socket: %v", err)
+	}
+	stale.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatalf("关闭残留 socket: %v", err)
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Skipf("平台已自动清理 socket 文件：%v", err)
 	}
 
 	srv, _ := newServer(t, gofs.WithUnixSocket(sock))

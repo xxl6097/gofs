@@ -238,18 +238,51 @@ func (s *runtimeSettings) loadSettings() {
 	// 下都打不开 —— 而页面正是改回它的唯一入口。这时唯一的自救办法就是
 	// 「用 --path-prefix 重启一次」。若这里让文件压住参数，那条路就断了。
 	// 因此只在参数没给（或给了空值）时才采纳文件里的前缀。
+	//
+	// ⚠️ 文件内容不能直接信任：它可能被旧版本写入、被手工改过，或被
+	// 越权接口改过。读取时重新执行与 API 相同的校验，非法值直接忽略
+	// （回落到启动参数），别把一个注入/坏前缀带进页面。
 	if doc.PathPrefix != nil && s.cfg.PathPrefix == "" {
-		s.pathPrefix = *doc.PathPrefix
+		if prefix, err := config.NormalizePathPrefix(*doc.PathPrefix); err == nil {
+			s.pathPrefix = prefix
+		}
 	}
 	// 监听地址/端口同理，只是判据用「启动参数有没有显式给过」而不是「值是否为空」——
 	// Port 有默认值 5000，光看值分不出「显式写了 5000」与「默认就是 5000」，
 	// 所以由解析阶段记下 BindSet / PortSet（见 config.Config 的同名字段）。
-	if doc.ListenBind != nil && !s.cfg.BindSet {
-		s.listenBind = *doc.ListenBind
+	//
+	// 两项一起校验：只采纳一组**能成立**的 bind:port。特别地，如果
+	// listen_bind 指向一个已存在的普通文件，绝不能把它带进启动流程 ——
+	// 那会让服务在启动时拒绝覆盖（而不是删除），但结果仍是起不来。
+	if (doc.ListenBind != nil && !s.cfg.BindSet) ||
+		(doc.ListenPort != nil && !s.cfg.PortSet) {
+		bind, port := s.listenBind, s.listenPort
+		if doc.ListenBind != nil && !s.cfg.BindSet {
+			bind = strings.TrimSpace(*doc.ListenBind)
+		}
+		if doc.ListenPort != nil && !s.cfg.PortSet {
+			port = *doc.ListenPort
+		}
+		if nb, np, err := config.NormalizeListen(bind, port); err == nil && unixSocketPathUsable(nb) {
+			s.listenBind, s.listenPort = nb, np
+		}
 	}
-	if doc.ListenPort != nil && !s.cfg.PortSet {
-		s.listenPort = *doc.ListenPort
+}
+
+// unixSocketPathUsable 判断持久化的 bind 是否还能用来启动。
+//
+// 非 unix socket 一律可用（真正能否绑定由 net.Listen 决定）；unix socket
+// 路径要求「不存在」或「已经是 socket」。普通文件/目录/软链会让启动失败，
+// 也会让「清理残留 socket」的逻辑被误用，因此在加载阶段就丢弃。
+func unixSocketPathUsable(path string) bool {
+	if !strings.HasPrefix(path, "/") {
+		return true
 	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	return fi.Mode()&os.ModeSocket != 0
 }
 
 // Sites 返回持久化的附加站点。
