@@ -117,6 +117,7 @@
     }
     if (info.user !== undefined) DATA.user = info.user;
     if (typeof info.user_from_startup === 'boolean') DATA.user_from_startup = info.user_from_startup;
+    if (typeof info.password_persistent === 'boolean') DATA.password_persistent = info.password_persistent;
     if (typeof info.auth_on === 'boolean') DATA.auth_on = info.auth_on;
   }
 
@@ -717,18 +718,6 @@
       showLogin('请先登录');
       return;
     }
-    // 启动参数里的账号密码以命令行为准。提前说明原因，别让用户填完
-    // 表单才收到「来自启动参数」的拒绝 —— 那种失败看起来像后端故障。
-    if (DATA.user_from_startup) {
-      G.confirm({
-        title: '无法在页面上修改密码',
-        message: '账号 **' + DATA.user + '** 来自启动参数（-a / GOFS_AUTH）。',
-        detail: '请修改命令行参数后重启服务。运行期的改动会在下次启动时' +
-          '被命令行覆盖，所以这里不提供修改入口。',
-        okLabel: '知道了'
-      });
-      return;
-    }
 
     var body = document.createElement('div');
 
@@ -763,6 +752,21 @@
     var newInput = pwField('新密码', '至少 6 位', 'new-password');
     var confirmInput = pwField('确认新密码', '再输入一次新密码', 'new-password');
 
+    // 服务端没有配置用户表落盘路径时，改密只在本次运行有效。
+    var persistent = DATA.password_persistent !== false;
+
+    // 启动参数账号也能改密：新密码会作为覆盖值写进用户表。提前说明，
+    // 免得用户以为重启之后又会变回命令行里的那个口令。
+    if (DATA.user_from_startup) {
+      var startupHint = document.createElement('div');
+      startupHint.className = 'hint-box';
+      startupHint.textContent = '该账号由启动参数（-a / GOFS_AUTH）定义。' +
+        '权限仍以命令行为准，但密码会保存为覆盖值' +
+        (persistent ? '，重启后仍然有效' : '（当前为内存存储，重启后失效）') +
+        '；如果之后修改了命令行里的密码，则以新命令行密码为准。';
+      body.appendChild(startupHint);
+    }
+
     var errBox = document.createElement('div');
     errBox.className = 'hint-box danger';
     errBox.hidden = true;
@@ -771,7 +775,9 @@
     var hint = document.createElement('div');
     hint.className = 'key-hint';
     hint.textContent = '修改后，该账号的所有登录会话、上传密钥与分享链接都会立即失效，' +
-      '需要用新密码重新登录。';
+      '需要用新密码重新登录。' +
+      (persistent ? '' : '当前服务未启用持久化用户表（--user-file 为空），' +
+        '新密码只在本次运行期间有效。');
     body.appendChild(hint);
 
     var modal = G.openModal({

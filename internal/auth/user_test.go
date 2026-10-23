@@ -150,7 +150,7 @@ func TestUserStoreUpdateAndDelete(t *testing.T) {
 }
 
 // TestChangePassword 覆盖账号自助改密：必须验旧密码、旧密码立刻失效、
-// 会话全部断开、以及启动参数账号不能改。
+// 会话全部断开，以及启动参数账号的密码覆盖值如何持久化与失效。
 func TestChangePassword(t *testing.T) {
 	file := tmpUserFile(t)
 	a := mustOpen(t, []string{"admin:secret@/:rw"}, file)
@@ -194,12 +194,43 @@ func TestChangePassword(t *testing.T) {
 		t.Error("重启后新密码无效 —— 用户表没有落盘")
 	}
 
-	// 启动参数里的账号以命令行为准。
-	if err := a.ChangePassword("admin", "secret", "newpass123"); err == nil {
-		t.Error("启动参数账号不应允许在运行期改密")
+	// 启动参数账号也允许改密。
+	if err := a.ChangePassword("admin", "wrong", "adminnew1"); !errors.Is(err, ErrPasswordMismatch) {
+		t.Fatalf("启动参数账号的旧密码错误时应返回 ErrPasswordMismatch，实际 %v", err)
 	}
-	if !a.Verify("admin", "secret") {
-		t.Error("被拒绝的改密不应影响启动参数账号")
+	if err := a.ChangePassword("admin", "secret", "adminnew1"); err != nil {
+		t.Fatalf("启动参数账号改密失败: %v", err)
+	}
+	if a.Verify("admin", "secret") {
+		t.Error("启动参数账号的旧密码仍然有效")
+	}
+	if !a.Verify("admin", "adminnew1") {
+		t.Error("启动参数账号的新密码无效")
+	}
+
+	// 覆盖值必须落盘：命令行不变时，重启后仍以覆盖值为准。
+	c := mustOpen(t, []string{"admin:secret@/:rw"}, file)
+	if !c.Verify("admin", "adminnew1") {
+		t.Error("重启后启动参数账号的新密码无效 —— 覆盖值没有落盘")
+	}
+	if c.Verify("admin", "secret") {
+		t.Error("重启后命令行里的旧密码仍然有效")
+	}
+
+	// 运维改了命令行密码：覆盖值应自动失效，命令行重新成为权威。
+	d := mustOpen(t, []string{"admin:changed@/:rw"}, file)
+	if !d.Verify("admin", "changed") {
+		t.Error("修改命令行密码后，新命令行密码应当生效")
+	}
+	if d.Verify("admin", "adminnew1") {
+		t.Error("命令行密码已变，旧覆盖值不应继续生效")
+	}
+
+	// 失效的覆盖值必须从文件里清掉；否则把命令行改回旧值后，
+	// 页面设置的那个密码又会复活。
+	e := mustOpen(t, []string{"admin:secret@/:rw"}, file)
+	if e.Verify("admin", "adminnew1") {
+		t.Error("失效的密码覆盖值在命令行改回后复活了")
 	}
 
 	// 不存在的账号。

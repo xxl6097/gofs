@@ -54,6 +54,42 @@ func hashPassword(password string) (*passwordHash, error) {
 	return &passwordHash{Salt: salt, Iter: pwIterations, Key: key}, nil
 }
 
+// parsePasswordHash 从落盘字段还原摘要，并校验参数范围。
+//
+// 读文件时不能直接相信这些值：盐或密钥过短会让定长比较形同虚设，
+// 轮数过大则是一次启动就卡死。
+func parsePasswordHash(saltB64, hashB64 string, iter int) (*passwordHash, error) {
+	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil || len(salt) < 8 {
+		return nil, fmt.Errorf("盐值不合法")
+	}
+	key, err := base64.StdEncoding.DecodeString(hashB64)
+	if err != nil || len(key) < 16 {
+		return nil, fmt.Errorf("密码摘要不合法")
+	}
+	if iter < 1000 || iter > 10_000_000 {
+		return nil, fmt.Errorf("迭代轮数 %d 超出合理范围", iter)
+	}
+	return &passwordHash{Salt: salt, Iter: iter, Key: key}, nil
+}
+
+// encodePasswordHash 把摘要拆成落盘用的三个字段。
+func encodePasswordHash(h *passwordHash) (saltB64, hashB64 string, iter int) {
+	return base64.StdEncoding.EncodeToString(h.Salt),
+		base64.StdEncoding.EncodeToString(h.Key), h.Iter
+}
+
+// passwordOverride 是启动参数账号的密码覆盖值。
+//
+// base 记录「创建覆盖值时命令行里的那个密码」的摘要：启动时用它判断运维
+// 有没有改过 -a。改过就让覆盖值失效、命令行重新成为权威，避免出现
+// 「我改了命令行密码，怎么登录还是旧密码」。
+type passwordOverride struct {
+	hash      *passwordHash
+	base      *passwordHash
+	updatedAt int64
+}
+
 // verify 定长时间比较，避免按耗时逐字节猜摘要。
 func (h *passwordHash) verify(password string) bool {
 	if h == nil || len(h.Key) == 0 {
@@ -240,9 +276,8 @@ func (a *Authenticator) RulePathsUnder(prefix string) []string {
 
 // FromStartup 报告某个账号是否由启动参数（-a / GOFS_AUTH）定义。
 //
-// 这类账号的密码与规则都以命令行为准，页面上不能改（见 ChangePassword /
-// UpdateUser / DeleteUser）。界面用它提前说明「为什么改不了」，而不是
-// 让用户填完表单再收到一条错误。
+// 这类账号的**规则**以命令行为准，用户表里不能改；但密码允许被页面覆盖，
+// 见 ChangePassword。界面用它给出对应说明。
 func (a *Authenticator) FromStartup(name string) bool {
 	if a == nil || name == "" {
 		return false
@@ -250,6 +285,57 @@ func (a *Authenticator) FromStartup(name string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.findStatic(name) != nil
+}
+
+// applyStartupPasswords 把用户表里的密码覆盖值套到启动参数账号上。
+//
+// 覆盖值只在「命令行密码没变过」时生效：base 摘要是创建覆盖值时命令行
+// 密码的摘要，对不上说明运维后来改了 -a —— 此时丢弃覆盖值，让命令行
+// 重新成为权威。这样页面改密与命令行改密都符合直觉，不会出现改了
+// 命令行却登不上的情况。
+//
+// 返回 changed=true 表示文件里有需要清理的覆盖值（命令行密码已变，
+// 或账号已从 -a 中移除）。调用方应随后 commit 一次。
+//
+// 调用方需持有写锁（Open 阶段还没有并发，等效于独占）。
+func (a *Authenticator) applyStartupPasswords(overrides map[string]startupPasswordJSON, path string) (changed bool, err error) {
+	used := make(map[string]bool, len(a.static))
+	for _, acc := range a.static {
+		raw, ok := overrides[acc.Username]
+		if !ok {
+			continue
+		}
+		used[acc.Username] = true
+		hash, perr := parsePasswordHash(raw.Salt, raw.Hash, raw.Iter)
+		if perr != nil {
+			return false, fmt.Errorf("用户表 %s 中账号 %q 的密码覆盖值无效: %w", path, acc.Username, perr)
+		}
+		var base *passwordHash
+		if raw.BaseSalt != "" {
+			base, perr = parsePasswordHash(raw.BaseSalt, raw.BaseHash, raw.BaseIter)
+			if perr != nil {
+				return false, fmt.Errorf("用户表 %s 中账号 %q 的密码基准值无效: %w", path, acc.Username, perr)
+			}
+			if !base.verify(acc.password) {
+				// 命令行密码已经换过：覆盖值作废。
+				changed = true
+				continue
+			}
+		}
+		acc.hash = hash
+		acc.updatedAt = raw.UpdatedAt
+		a.staticPasswords[acc.Username] = &passwordOverride{
+			hash: hash, base: base, updatedAt: raw.UpdatedAt,
+		}
+	}
+	// 账号已从 -a 中移除时，它的覆盖值也该一起清掉。
+	for name := range overrides {
+		if !used[name] {
+			changed = true
+			break
+		}
+	}
+	return changed, nil
 }
 
 // UserFile 返回用户表的落盘路径（空串表示仅内存）。
@@ -441,7 +527,7 @@ func (a *Authenticator) UpdateUser(name, password string, rules []Rule) error {
 // ErrPasswordMismatch 表示账号自助改密时给出的「当前密码」不正确。
 //
 // 单独一个哨兵错误，好让调用方把「旧密码不对」（403，可计入失败限速）
-// 与「新密码太短 / 账号来自启动参数 / 落盘失败」（400）区分开。
+// 与「新密码太短 / 落盘失败」（400）区分开。
 var ErrPasswordMismatch = errors.New("当前密码不正确")
 
 // ChangePassword 供账号**自助**修改自己的密码，必须同时提供当前密码。
@@ -450,8 +536,9 @@ var ErrPasswordMismatch = errors.New("当前密码不正确")
 // 这里是一张已登录的会话（或 Basic 凭据）在改自己的密码，要求再验一次
 // 当前密码，避免会话被窃取后攻击者直接换掉密码把主人锁在门外。
 //
-// 只适用于用户表里的账号：启动参数里的密码以命令行为准，运行期改了
-// 下次重启就会被覆盖 —— 那只会让人误以为改成功了，所以直接拒绝。
+// 启动参数里的账号也能改：新密码以覆盖值写进用户表，重启后仍然有效。
+// 覆盖值同时记录「创建时的命令行密码」摘要；如果运维后来改了 -a，
+// 启动时会让覆盖值失效（见 applyStartupPasswords）。
 func (a *Authenticator) ChangePassword(name, currentPassword, newPassword string) error {
 	if a == nil {
 		return fmt.Errorf("当前没有启用鉴权")
@@ -465,11 +552,11 @@ func (a *Authenticator) ChangePassword(name, currentPassword, newPassword string
 	}
 
 	a.mu.RLock()
-	if a.findStatic(name) != nil {
-		a.mu.RUnlock()
-		return fmt.Errorf("用户 %q 的密码来自启动参数，请在命令行修改后重启", name)
+	acc := a.findStatic(name)
+	isStatic := acc != nil
+	if acc == nil {
+		acc = a.findUser(name)
 	}
-	acc := a.findUser(name)
 	if acc == nil {
 		a.mu.RUnlock()
 		return fmt.Errorf("用户 %q 不存在", name)
@@ -477,6 +564,12 @@ func (a *Authenticator) ChangePassword(name, currentPassword, newPassword string
 	// 旧密码校验可能要跑一次 PBKDF2（约 100ms）。放在读锁里完成，
 	// 不占写锁 —— 否则一个改密请求就能把所有人的权限查询挡在后面。
 	currentHash := acc.hash
+	// 启动参数账号的 acc.password 是命令行里的明文。覆盖生效时它仍然保留，
+	// 用来给下一次启动判断「命令行有没有被改过」。
+	cliPassword := ""
+	if isStatic {
+		cliPassword = acc.password
+	}
 	matched := a.passwordMatches(acc, currentPassword)
 	a.mu.RUnlock()
 	if !matched {
@@ -487,26 +580,59 @@ func (a *Authenticator) ChangePassword(name, currentPassword, newPassword string
 	if err != nil {
 		return err
 	}
+	// 记录命令行密码的摘要（只用于判断它是否变过，不用于登录校验）。
+	// 每次改密都重新生成随机盐，与真正的密码摘要一样安全。
+	var base *passwordHash
+	if isStatic {
+		if base, err = hashPassword(cliPassword); err != nil {
+			return err
+		}
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// 校验与落盘之间账号可能被删除，或被管理员重置了密码。
-	// 后者必须重新来一遍：否则会拿旧密码的校验结果覆盖掉新密码。
-	acc = a.findUser(name)
-	if acc == nil {
-		return fmt.Errorf("用户 %q 不存在", name)
-	}
-	if acc.hash != currentHash {
-		return fmt.Errorf("用户 %q 的密码刚刚被其他人修改，请重新登录后再试", name)
-	}
-	// 先在副本上改，落盘成功后再换上去 —— 失败时内存状态原样保留。
-	oldHash, oldUpdated := acc.hash, acc.updatedAt
-	acc.hash = hash
-	acc.updatedAt = time.Now().Unix()
-	if err := a.commit(); err != nil {
-		acc.hash, acc.updatedAt = oldHash, oldUpdated
-		return err
+	now := time.Now().Unix()
+	if isStatic {
+		// 校验与落盘之间账号可能被并发改密：哈希指针变了就说明有人抢先了。
+		acc = a.findStatic(name)
+		if acc == nil {
+			return fmt.Errorf("用户 %q 不存在", name)
+		}
+		if acc.hash != currentHash {
+			return fmt.Errorf("用户 %q 的密码刚刚被其他人修改，请重新登录后再试", name)
+		}
+		oldHash, oldUpdated := acc.hash, acc.updatedAt
+		oldOverride, hadOverride := a.staticPasswords[name]
+		acc.hash, acc.updatedAt = hash, now
+		a.staticPasswords[name] = &passwordOverride{hash: hash, base: base, updatedAt: now}
+		if err := a.commit(); err != nil {
+			acc.hash, acc.updatedAt = oldHash, oldUpdated
+			if hadOverride {
+				a.staticPasswords[name] = oldOverride
+			} else {
+				delete(a.staticPasswords, name)
+			}
+			return err
+		}
+	} else {
+		// 校验与落盘之间账号可能被删除，或被管理员重置了密码。
+		// 后者必须重新来一遍：否则会拿旧密码的校验结果覆盖掉新密码。
+		acc = a.findUser(name)
+		if acc == nil {
+			return fmt.Errorf("用户 %q 不存在", name)
+		}
+		if acc.hash != currentHash {
+			return fmt.Errorf("用户 %q 的密码刚刚被其他人修改，请重新登录后再试", name)
+		}
+		// 先在副本上改，落盘成功后再换上去 —— 失败时内存状态原样保留。
+		oldHash, oldUpdated := acc.hash, acc.updatedAt
+		acc.hash = hash
+		acc.updatedAt = now
+		if err := a.commit(); err != nil {
+			acc.hash, acc.updatedAt = oldHash, oldUpdated
+			return err
+		}
 	}
 	a.pwCache.clear()
 	// 与管理员重置密码同一条规则：旧密码、旧会话都当场失效。
@@ -600,6 +726,9 @@ const userFileVersion = 1
 type userFileDoc struct {
 	Version int        `json:"version"`
 	Users   []userJSON `json:"users"`
+	// StartupPasswords 保存启动参数账号的密码覆盖值（用户名 -> 摘要）。
+	// 老版本文件没有这一段，读出来是空 map，不影响兼容。
+	StartupPasswords map[string]startupPasswordJSON `json:"startup_passwords,omitempty"`
 }
 
 type userJSON struct {
@@ -610,6 +739,20 @@ type userJSON struct {
 	Rules     []ruleJSON `json:"rules"`
 	CreatedAt int64      `json:"created_at,omitempty"`
 	UpdatedAt int64      `json:"updated_at,omitempty"`
+}
+
+// startupPasswordJSON 是启动参数账号的密码覆盖值。
+//
+// Base* 是创建覆盖值时命令行密码的摘要：启动时用它判断 -a 是否被改过，
+// 改过就让覆盖值失效。旧文件没有这三个字段，此时直接采用覆盖值。
+type startupPasswordJSON struct {
+	Salt      string `json:"salt"` // base64
+	Hash      string `json:"hash"` // base64
+	Iter      int    `json:"iter"`
+	BaseSalt  string `json:"base_salt,omitempty"`
+	BaseHash  string `json:"base_hash,omitempty"`
+	BaseIter  int    `json:"base_iter,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
 }
 
 type ruleJSON struct {
@@ -627,11 +770,12 @@ func (a *Authenticator) commit() error {
 	}
 	doc := userFileDoc{Version: userFileVersion}
 	for _, acc := range a.users {
+		salt, hash, iter := encodePasswordHash(acc.hash)
 		u := userJSON{
 			Name:      acc.Username,
-			Salt:      base64.StdEncoding.EncodeToString(acc.hash.Salt),
-			Hash:      base64.StdEncoding.EncodeToString(acc.hash.Key),
-			Iter:      acc.hash.Iter,
+			Salt:      salt,
+			Hash:      hash,
+			Iter:      iter,
 			CreatedAt: acc.createdAt,
 			UpdatedAt: acc.updatedAt,
 		}
@@ -639,6 +783,25 @@ func (a *Authenticator) commit() error {
 			u.Rules = append(u.Rules, ruleJSON{Path: r.Path, Perm: r.Perm.String()})
 		}
 		doc.Users = append(doc.Users, u)
+	}
+	// 只写当前仍然存在的启动参数账号：某个 -a 账号被摘掉后，
+	// 它的覆盖值不该永远留在文件里。
+	for _, acc := range a.static {
+		ov := a.staticPasswords[acc.Username]
+		if ov == nil || ov.hash == nil {
+			continue
+		}
+		salt, hash, iter := encodePasswordHash(ov.hash)
+		item := startupPasswordJSON{
+			Salt: salt, Hash: hash, Iter: iter, UpdatedAt: ov.updatedAt,
+		}
+		if ov.base != nil {
+			item.BaseSalt, item.BaseHash, item.BaseIter = encodePasswordHash(ov.base)
+		}
+		if doc.StartupPasswords == nil {
+			doc.StartupPasswords = make(map[string]startupPasswordJSON)
+		}
+		doc.StartupPasswords[acc.Username] = item
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -690,27 +853,27 @@ func (a *Authenticator) commit() error {
 	return nil
 }
 
-// loadUsers 读取用户表。文件不存在时返回空表（首次运行是正常情况）。
-func loadUsers(path string) ([]userJSON, error) {
+// loadUserDoc 读取用户表。文件不存在时返回空表（首次运行是正常情况）。
+func loadUserDoc(path string) (userFileDoc, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return userFileDoc{}, nil
 		}
-		return nil, fmt.Errorf("读取用户表 %s 失败: %w", path, err)
+		return userFileDoc{}, fmt.Errorf("读取用户表 %s 失败: %w", path, err)
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return nil, nil
+		return userFileDoc{}, nil
 	}
 	var doc userFileDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("解析用户表 %s 失败: %w", path, err)
+		return userFileDoc{}, fmt.Errorf("解析用户表 %s 失败: %w", path, err)
 	}
 	if doc.Version > userFileVersion {
-		return nil, fmt.Errorf("用户表 %s 的格式版本 %d 高于本程序支持的 %d，请升级 gofs",
+		return userFileDoc{}, fmt.Errorf("用户表 %s 的格式版本 %d 高于本程序支持的 %d，请升级 gofs",
 			path, doc.Version, userFileVersion)
 	}
-	return doc.Users, nil
+	return doc, nil
 }
 
 // toAccount 把落盘的记录还原成账号。
@@ -719,16 +882,9 @@ func (u userJSON) toAccount() (*account, error) {
 	if err != nil {
 		return nil, err
 	}
-	salt, err := base64.StdEncoding.DecodeString(u.Salt)
-	if err != nil || len(salt) < 8 {
-		return nil, fmt.Errorf("盐值不合法")
-	}
-	key, err := base64.StdEncoding.DecodeString(u.Hash)
-	if err != nil || len(key) < 16 {
-		return nil, fmt.Errorf("密码摘要不合法")
-	}
-	if u.Iter < 1000 || u.Iter > 10_000_000 {
-		return nil, fmt.Errorf("迭代轮数 %d 超出合理范围", u.Iter)
+	hash, err := parsePasswordHash(u.Salt, u.Hash, u.Iter)
+	if err != nil {
+		return nil, err
 	}
 	var rules []Rule
 	for _, r := range u.Rules {
@@ -746,7 +902,7 @@ func (u userJSON) toAccount() (*account, error) {
 	}
 	return &account{
 		Username:  name,
-		hash:      &passwordHash{Salt: salt, Iter: u.Iter, Key: key},
+		hash:      hash,
 		Rules:     mergeRules(nil, toPathRules(rules)),
 		createdAt: u.CreatedAt,
 		updatedAt: u.UpdatedAt,

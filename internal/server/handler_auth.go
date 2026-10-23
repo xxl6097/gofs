@@ -153,17 +153,19 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"auth_on":       true,
 		"authenticated": true,
 		"user":          user,
-		// 来自启动参数的账号密码以命令行为准，页面上改不了。
-		// 提前告诉前端，才能在点进「修改密码」时直接说明原因。
+		// 来自启动参数的账号密码以命令行为准，但可以保存为覆盖值。
+		// 前端据此在改密弹窗里说明覆盖值的行为。
 		"user_from_startup": s.auth.FromStartup(user),
-		"anonymous":         false,
-		"perms":             s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
-		"upload_dated":      s.cfg.UploadDated(),
-		"allow_keys":        s.cfg.AllowKeys && perm == auth.PermReadWrite,
-		"edit_max_size":     s.settings.EditMaxSize(),
-		"upload_max_size":   s.settings.UploadMaxSize(),
-		"allow_settings":    admin,
-		"allow_users":       s.cfg.AllowUserManage && admin,
+		// 用户表为空表示仅内存存储：改密在重启后会失效。
+		"password_persistent": s.auth.UserFile() != "",
+		"anonymous":           false,
+		"perms":               s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
+		"upload_dated":        s.cfg.UploadDated(),
+		"allow_keys":          s.cfg.AllowKeys && perm == auth.PermReadWrite,
+		"edit_max_size":       s.settings.EditMaxSize(),
+		"upload_max_size":     s.settings.UploadMaxSize(),
+		"allow_settings":      admin,
+		"allow_users":         s.cfg.AllowUserManage && admin,
 		// 与 edit_max_size 同理：登录响应里必须补齐。页面外壳走的是
 		// renderAuthGate（数据全空），登录后再由 applySession 合并 ——
 		// 漏了这一行，「升级与重启」就只有直接带会话访问时才出现，

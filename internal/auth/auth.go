@@ -88,11 +88,19 @@ type Authenticator struct {
 	mu      sync.RWMutex
 	users   []*account // 来自用户表的账号（可改）
 	anonAcc *account   // 匿名规则（只有启动参数能定义）
-	static  []*account // 来自启动参数的账号（只读）
+	static  []*account // 来自启动参数的账号（规则只读，密码可被页面覆盖）
 	enabled bool
 
 	userFile string   // 用户表落盘路径，空串表示仅内存
 	pwCache  *pwCache // 「账号+密码」校验结果的缓存，见 pwCache 的注释
+
+	// staticPasswords 保存启动参数账号的密码覆盖值（用户名 -> 摘要）。
+	//
+	// 启动参数的规则仍然只读，但密码允许账号在页面上自助修改：否则用 -a
+	// 配了唯一管理员之后，这个口令就再也改不了。覆盖值写进用户表的
+	// startup_passwords 段；若运维后来改了命令行里的密码，覆盖值会自动失效
+	// （见 applyStartupPasswords），让命令行重新成为权威。
+	staticPasswords map[string]*passwordOverride
 
 	// verifySem 限制同时进行的 PBKDF2 计算数。
 	//
@@ -117,10 +125,11 @@ func Parse(rules []string) (*Authenticator, error) {
 // 与上传密钥的 --key-file 语义保持一致。
 func Open(rules []string, userFile string) (*Authenticator, error) {
 	a := &Authenticator{
-		userFile:  userFile,
-		pwCache:   newPWCache(),
-		sessions:  make(map[string]*Session),
-		verifySem: make(chan struct{}, verifyConcurrency()),
+		userFile:        userFile,
+		pwCache:         newPWCache(),
+		sessions:        make(map[string]*Session),
+		verifySem:       make(chan struct{}, verifyConcurrency()),
+		staticPasswords: make(map[string]*passwordOverride),
 	}
 	for _, raw := range rules {
 		raw = strings.TrimSpace(raw)
@@ -146,11 +155,11 @@ func Open(rules []string, userFile string) (*Authenticator, error) {
 	}
 
 	if userFile != "" {
-		users, err := loadUsers(userFile)
+		doc, err := loadUserDoc(userFile)
 		if err != nil {
 			return nil, err
 		}
-		for _, u := range users {
+		for _, u := range doc.Users {
 			acc, err := u.toAccount()
 			if err != nil {
 				return nil, fmt.Errorf("用户表 %s 中的账号 %q 无效: %w", userFile, u.Name, err)
@@ -162,6 +171,16 @@ func Open(rules []string, userFile string) (*Authenticator, error) {
 				continue
 			}
 			a.users = append(a.users, acc)
+		}
+		changed, err := a.applyStartupPasswords(doc.StartupPasswords, userFile)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			// 清理失效的覆盖值（改过命令行密码 / 账号已移除）。
+			// 写盘失败不影响本次启动：内存里已经按命令行密码处理了，
+			// 下一次启动会再尝试清理。
+			_ = a.commit()
 		}
 	}
 

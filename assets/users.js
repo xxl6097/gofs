@@ -343,7 +343,8 @@
           var tag = document.createElement('span');
           tag.className = 'user-tag';
           tag.textContent = '来自启动参数';
-          tag.title = '在 -a / GOFS_AUTH 里定义，只能在命令行修改，页面不提供编辑';
+          tag.title = '权限在 -a / GOFS_AUTH 里定义，只能在命令行修改；' +
+            '密码可在顶栏「改密」中修改（保存为覆盖值）';
           head.appendChild(tag);
         }
         main.appendChild(head);
@@ -361,7 +362,8 @@
         var meta = document.createElement('div');
         meta.className = 'key-detail';
         meta.textContent = u.from_startup
-          ? '权限来自启动参数'
+          ? '权限来自启动参数' +
+            (u.updated_at ? '　·　密码更新于 ' + G.fmtTime(u.updated_at) : '')
           : '创建于 ' + G.fmtTime(u.created_at) +
             (u.updated_at ? '　·　更新于 ' + G.fmtTime(u.updated_at) : '');
         main.appendChild(meta);

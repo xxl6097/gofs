@@ -64,9 +64,11 @@ type pageData struct {
 	User       string          `json:"user"`
 	Anonymous  bool            `json:"anonymous"`
 	AuthOn     bool            `json:"auth_on"`
-	// UserFromStartup 表示当前账号由启动参数定义，密码只能在命令行修改。
-	UserFromStartup bool          `json:"user_from_startup"`
-	Extract         extractLimits `json:"extract_limits"`
+	// UserFromStartup 表示当前账号由启动参数定义，密码修改会保存为覆盖值。
+	UserFromStartup bool `json:"user_from_startup"`
+	// PasswordPersistent 表示用户表有落盘路径；为 false 时改密重启后失效。
+	PasswordPersistent bool          `json:"password_persistent"`
+	Extract            extractLimits `json:"extract_limits"`
 	// UploadDated 表示上传是否会自动归档到日期目录。
 	UploadDated bool `json:"upload_dated"`
 	// UploadDateDir 为当前时刻对应的归档目录段，例如 "2026/09/28"。
@@ -131,25 +133,26 @@ func (s *Server) buildPerms(p permResult) permsData {
 // admin 决定是否显示「服务设置」入口（切换根目录、调整上传上限）。
 func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string, admin bool) pageData {
 	return pageData{
-		Version:          s.cfg.Version,
-		Title:            s.settings.Title(),
-		PathPrefix:       s.PathPrefix(),
-		Path:             listing.Path,
-		Name:             listing.Name,
-		Query:            query,
-		Listing:          listing,
-		Perms:            s.buildPerms(p),
-		AllowUpgrade:     s.cfg.Upgrader != nil,
-		AllowRestart:     s.cfg.Restarter != nil,
-		AllowUninstall:   s.canUninstall(),
-		User:             p.User,
-		Anonymous:        !p.Authenticated,
-		AuthOn:           s.auth.Enabled(),
-		UserFromStartup:  s.auth.FromStartup(p.User),
-		UploadDated:      s.cfg.UploadDated(),
-		UploadDateDir:    s.cfg.UploadDateDir(time.Now()),
-		UploadDateLayout: s.cfg.UploadDateLayout,
-		EditMaxSize:      s.settings.EditMaxSize(),
+		Version:            s.cfg.Version,
+		Title:              s.settings.Title(),
+		PathPrefix:         s.PathPrefix(),
+		Path:               listing.Path,
+		Name:               listing.Name,
+		Query:              query,
+		Listing:            listing,
+		Perms:              s.buildPerms(p),
+		AllowUpgrade:       s.cfg.Upgrader != nil,
+		AllowRestart:       s.cfg.Restarter != nil,
+		AllowUninstall:     s.canUninstall(),
+		User:               p.User,
+		Anonymous:          !p.Authenticated,
+		AuthOn:             s.auth.Enabled(),
+		UserFromStartup:    s.auth.FromStartup(p.User),
+		PasswordPersistent: s.auth.UserFile() != "",
+		UploadDated:        s.cfg.UploadDated(),
+		UploadDateDir:      s.cfg.UploadDateDir(time.Now()),
+		UploadDateLayout:   s.cfg.UploadDateLayout,
+		EditMaxSize:        s.settings.EditMaxSize(),
 		// 密钥面板要排除分享令牌：管理密钥的接口只认账号凭据
 		// （见 handleKeys），所以对分享访客来说那个入口点进去必然 401。
 		// 一个「亮着但用不了」的入口比直接不给更糟。

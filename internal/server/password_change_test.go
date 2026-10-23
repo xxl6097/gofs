@@ -96,6 +96,8 @@ func TestPasswordChangeEndpoint(t *testing.T) {
 		t.Errorf("新密码登录失败：%d %s", r.code, r.body)
 	} else if !strings.Contains(r.body, `"user_from_startup":false`) {
 		t.Errorf("用户表账号的登录响应应标记 user_from_startup=false：%s", r.body)
+	} else if !strings.Contains(r.body, `"password_persistent":true`) {
+		t.Errorf("配置了 user-file 时应标记 password_persistent=true：%s", r.body)
 	}
 
 	// 落盘：重新加载用户表仍认新密码。
@@ -132,10 +134,27 @@ func TestPasswordChangeWithBasicAuth(t *testing.T) {
 	}
 }
 
-// TestPasswordChangeRejectsStartupAccount 确认来自启动参数的账号不能在
-// 运行期改密 —— 它的密码以命令行为准，改了也会在重启时被覆盖。
-func TestPasswordChangeRejectsStartupAccount(t *testing.T) {
-	s := newTestServer(t, testConfig(t, t.TempDir(), "-a", "admin:secret@/:rw"))
+// TestPasswordChangeStartupAccount 确认来自启动参数的账号也能在页面上改密：
+// 覆盖值落盘、重启后仍生效；运维改了命令行密码后，覆盖值自动失效。
+func TestPasswordChangeStartupAccount(t *testing.T) {
+	root := t.TempDir()
+	userFile := filepath.Join(t.TempDir(), "users.json")
+	newServer := func(cliPassword string) *Server {
+		t.Helper()
+		return newTestServer(t, testConfig(t, root,
+			"-a", "admin:"+cliPassword+"@/:rw",
+			"--user-file", userFile,
+			"--auth-fail-limit", "0"))
+	}
+	loginCode := func(s *Server, password string) int {
+		t.Helper()
+		return do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
+			"Authorization": basicAuth("admin", password),
+			"X-Gofs-Ajax":   "1",
+		}).code
+	}
+
+	s := newServer("secret")
 	cookie := login(t, s, "admin", "secret")
 
 	got := do(t, s, http.MethodPost, "/fs/auth/password",
@@ -144,16 +163,39 @@ func TestPasswordChangeRejectsStartupAccount(t *testing.T) {
 			"Cookie":       cookie.Name + "=" + cookie.Value,
 			"Content-Type": "application/json",
 		})
-	if got.code != http.StatusBadRequest || !strings.Contains(got.body, "启动参数") {
+	if got.code != http.StatusNoContent {
 		t.Fatalf("启动参数账号改密返回 %d：%s", got.code, got.body)
 	}
-	// 被拒绝的请求不能把会话弄丢。
-	if r := withCookie(t, s, http.MethodGet, "/fs/auth", cookie, nil); r.code != http.StatusOK {
-		t.Errorf("被拒绝的改密让会话失效了：%d", r.code)
+	if r := withCookie(t, s, http.MethodGet, "/fs/auth", cookie, nil); r.code != http.StatusUnauthorized {
+		t.Errorf("改密后旧会话仍然有效：%d", r.code)
+	}
+	if code := loginCode(s, "secret"); code != http.StatusUnauthorized {
+		t.Errorf("旧密码仍然能登录：%d", code)
+	}
+	if code := loginCode(s, "newpass123"); code != http.StatusOK {
+		t.Errorf("新密码登录失败：%d", code)
 	}
 
-	// Basic 密码不对时必须先回 401，不能因为用户名是启动参数账号就回
-	// 「来自启动参数」—— 那等于用一个不需要口令的错误泄露账号是否存在。
+	// 命令行不变：重启后覆盖值仍然生效。
+	s2 := newServer("secret")
+	if code := loginCode(s2, "newpass123"); code != http.StatusOK {
+		t.Errorf("重启后新密码失效：%d", code)
+	}
+	if code := loginCode(s2, "secret"); code != http.StatusUnauthorized {
+		t.Errorf("重启后命令行旧密码仍然有效：%d", code)
+	}
+
+	// 运维改了命令行密码：覆盖值自动失效，新命令行密码生效。
+	s3 := newServer("changed")
+	if code := loginCode(s3, "changed"); code != http.StatusOK {
+		t.Errorf("修改命令行密码后新密码登录失败：%d", code)
+	}
+	if code := loginCode(s3, "newpass123"); code != http.StatusUnauthorized {
+		t.Errorf("命令行密码已变，旧覆盖值不应继续生效：%d", code)
+	}
+
+	// Basic 密码不对时必须先回 401，不能因为用户名是启动参数账号就
+	// 暴露更多信息。
 	if r := do(t, s, http.MethodPost, "/fs/auth/password",
 		strings.NewReader(`{"current_password":"x","new_password":"newpass123"}`),
 		map[string]string{
@@ -168,10 +210,10 @@ func TestPasswordChangeRejectsStartupAccount(t *testing.T) {
 		t.Errorf("GET 改密接口返回 %d，期望 405", r.code)
 	}
 
-	// 登录响应要告诉前端「这是启动参数账号」，否则页面会画出一个
-	// 点了必然失败的「改密」入口。
+	// 登录响应要告诉前端「这是启动参数账号」，用于在改密弹窗里说明
+	// 覆盖值的行为。
 	if r := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
-		"Authorization": basicAuth("admin", "secret"),
+		"Authorization": basicAuth("admin", "newpass123"),
 		"X-Gofs-Ajax":   "1",
 	}); !strings.Contains(r.body, `"user_from_startup":true`) {
 		t.Errorf("启动参数账号的登录响应缺少 user_from_startup=true：%s", r.body)
