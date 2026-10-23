@@ -112,7 +112,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		s.keyList(w, user, admin)
 	case http.MethodPost:
-		s.keyCreate(w, r, user)
+		s.keyCreate(w, r, user, pass)
 	case http.MethodDelete:
 		s.keyRevoke(w, r, user, admin)
 	default:
@@ -147,7 +147,11 @@ func (s *Server) keyList(w http.ResponseWriter, user string, admin bool) {
 }
 
 // keyCreate 创建密钥并返回**只此一次**的明文。
-func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator string) {
+//
+// creator/password 来自 handleKeys 已校验过的账号凭据。范围授权只按这个
+// 账号计算，**不能**走 checkPerm —— 后者会优先识别 ?share= / 分享 cookie，
+// 于是一个临时分享令牌就能换来一把永久密钥。
+func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator, password string) {
 	var req keyCreateRequest
 	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
 	defer resetRead()
@@ -168,6 +172,10 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 	if req.TTLSeconds > maxKeyTTLSeconds {
 		http.Error(w, fmt.Sprintf("400 Bad Request: 有效期最多 %d 天（要永久请填 0）",
 			maxKeyTTLSeconds/86400), http.StatusBadRequest)
+		return
+	}
+	if err := uploadkey.ValidateScope(req.Scope); err != nil {
+		http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if fsutil.HasParentSegment(req.Scope) {
@@ -196,7 +204,9 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 		needDesc = "读写"
 	}
 	scope := fsutil.CleanURLPath(req.Scope)
-	if sp := s.checkPerm(r, scope); sp < need {
+	// ⚠️ 只用账号凭据计算权限。checkPerm 会优先识别分享令牌，
+	// 那会让一条临时分享变成永久密钥/分享（见 handler_key 顶部注释）。
+	if sp := s.auth.Lookup(scope, creator, password, true); sp < need {
 		http.Error(w, fmt.Sprintf("403 Forbidden: 你对 %s 没有%s权限，无法签发该范围的凭证", scope, needDesc),
 			http.StatusForbidden)
 		return
@@ -259,10 +269,10 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 			// 末尾那行注释是必要的：这条命令本身看不出文件会落到哪，
 			// 而落点由密钥范围决定 —— 不写出来用户只能靠猜。
 			"script": "bash <(curl -sS \"<服务地址>/up?key=" + token + "\") 文件或目录... [目标子目录]\n" +
-				"# 目录连层级一起传；不带目标子目录就落到 " + k.Scope,
+				"# 目录连层级一起传；不带目标子目录就落到 " + scriptCommentText(k.Scope),
 			"header": "curl -T local.txt -H 'X-Gofs-Upload-Key: " + token + "' \"<服务地址>/<目标路径>\"",
 			"query":  "curl -T local.txt \"<服务地址>/<目标路径>?key=" + token + "\"",
-			"scp":    "X-Gofs-Upload-Key 头可用于任何 HTTP 客户端；权限仅限上传，且局限在 " + k.Scope,
+			"scp":    "X-Gofs-Upload-Key 头可用于任何 HTTP 客户端；权限仅限上传，且局限在 " + scriptCommentText(k.Scope),
 		},
 	})
 }
@@ -376,8 +386,11 @@ func (s *Server) handleWithUploadKey(w http.ResponseWriter, r *http.Request, url
 		http.Error(w, "403 Forbidden: 本服务未开启上传（--allow-upload）", http.StatusForbidden)
 		return
 	}
-	if !k.AllowsPath(urlPath) {
-		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", k.Scope), http.StatusForbidden)
+	// scope 之外，创建者当前 ACL 也是上限：签名时 /docs 可写，不代表
+	// 之后仍能写 /docs/finance（更具体的只读规则可能后加/一直存在）。
+	if !s.uploadKeyAllowed(r, k, urlPath) {
+		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s，或创建者已无对应权限", k.Scope),
+			http.StatusForbidden)
 		return
 	}
 	abs, err := s.res.Resolve(urlPath)
@@ -385,9 +398,10 @@ func (s *Server) handleWithUploadKey(w http.ResponseWriter, r *http.Request, url
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
-	// 软链/大小写别名可能把实际写入位置带到 scope 之外。
-	if realURL, within := s.realURLOf(abs); !within || !k.AllowsPath(realURL) {
-		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", k.Scope), http.StatusForbidden)
+	// 软链/大小写别名可能把实际写入位置带到 scope/创建者权限之外。
+	if realURL, within := s.realURLOf(abs); !within || !s.uploadKeyAllowed(r, k, realURL) {
+		http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s，或创建者已无对应权限", k.Scope),
+			http.StatusForbidden)
 		return
 	}
 

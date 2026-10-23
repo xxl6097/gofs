@@ -16,7 +16,7 @@ import (
 func newShare(t *testing.T, s *Server, scope string) string {
 	t.Helper()
 	k, token, err := s.keys.Create(uploadkey.CreateOptions{
-		Name: scope, Scope: scope, Kind: uploadkey.KindRead,
+		Name: scope, Scope: scope, Kind: uploadkey.KindRead, Creator: "boss",
 	})
 	if err != nil {
 		t.Fatalf("建分享链接: %v", err)
@@ -175,7 +175,7 @@ func TestShareLinkInvalidOrRevoked(t *testing.T) {
 
 	t.Run("撤销后失效", func(t *testing.T) {
 		k, tok, err := s.keys.Create(uploadkey.CreateOptions{
-			Name: "临时", Scope: "/docs", Kind: uploadkey.KindRead,
+			Name: "临时", Scope: "/docs", Kind: uploadkey.KindRead, Creator: "boss",
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -420,7 +420,7 @@ func TestShareTokenCannotUpload(t *testing.T) {
 func newShareRW(t *testing.T, s *Server, scope string) string {
 	t.Helper()
 	k, token, err := s.keys.Create(uploadkey.CreateOptions{
-		Name: scope, Scope: scope, Kind: uploadkey.KindReadWrite,
+		Name: scope, Scope: scope, Kind: uploadkey.KindReadWrite, Creator: "boss",
 	})
 	if err != nil {
 		t.Fatalf("建可读写分享: %v", err)

@@ -88,6 +88,29 @@ type Options struct {
 	// AllowSymlink 对应服务的 --allow-symlink：为 true 时允许经由目标
 	// 路径上已有的软链写出（保留旧的显式放开语义）。
 	AllowSymlink bool
+	// Authorize 在**每个将要写出的**目录/文件落盘前调用，rel 是相对
+	// Dest 的路径（已用 / 分隔）。返回错误则中止解压。
+	//
+	// 放在写入点而不是只依赖调用方事前的 List 预检：List 可能因
+	// MaxFiles 截断，而填充条目（符号链接、特殊类型、非法名字）在
+	// Extract 中会被跳过、不计数。只检查截断后的前缀会让后面的真实
+	// 文件完全绕过 ACL。
+	Authorize func(rel string) error
+}
+
+// authorizeWrite 在落盘前执行调用方提供的逐条目授权。
+func authorizeWrite(opts Options, target string) error {
+	if opts.Authorize == nil {
+		return nil
+	}
+	rel, err := filepath.Rel(opts.Dest, target)
+	if err != nil {
+		return fmt.Errorf("条目路径非法: %w", err)
+	}
+	if rel == "." {
+		return nil
+	}
+	return opts.Authorize(filepath.ToSlash(rel))
 }
 
 // Progress 描述解压进度。

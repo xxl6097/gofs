@@ -456,3 +456,27 @@ func TestStartupPrunesExpired(t *testing.T) {
 		t.Fatalf("启动后过期密钥数量 = %d，期望 0", got)
 	}
 }
+
+// TestCreateRejectsControlCharsInScope 确认 scope 里的控制字符在入口被拒绝。
+//
+// scope 会被渲染进 /up 脚本的注释；注释不认引号，换行会提前结束注释，
+// 把后面的内容变成可执行命令。必须在创建时就拒绝，而不是依赖某个输出路径。
+func TestCreateRejectsControlCharsInScope(t *testing.T) {
+	s := newStore(t, "")
+	cases := []string{
+		"/docs/\ntouch /tmp/pwn #",
+		"/docs/\r\nx",
+		"/docs/\tx",
+		"/docs/\x00x",
+		"/docs/\x1bx",
+	}
+	for i, scope := range cases {
+		if _, _, err := s.Create(CreateOptions{Name: "x", Scope: scope}); !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("用例 %d（%q）错误 = %v，期望 ErrInvalidOption", i, scope, err)
+		}
+	}
+	// 普通空格、中文与引号仍然允许。
+	if _, _, err := s.Create(CreateOptions{Name: "x", Scope: "/目录 名/it's"}); err != nil {
+		t.Errorf("合法 scope 被拒绝: %v", err)
+	}
+}

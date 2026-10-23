@@ -145,6 +145,9 @@ func (g *gzReader) Extract(ctx context.Context, opts Options, onProgress func(Pr
 	}
 	defer zr.Close()
 
+	if err := authorizeWrite(opts, target); err != nil {
+		return nil, err
+	}
 	if err := limit.checkNext(g.out, 0); err != nil {
 		return nil, err
 	}

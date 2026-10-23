@@ -278,7 +278,7 @@ func (a *Authenticator) mergeStatic(in *account) error {
 	return nil
 }
 
-// normalizePath 归一化规则中的路径。
+// normalizePath 归一化规则与请求路径。
 //
 // 这里必须折叠 `.`/`..` 与重复斜杠：鉴权与落盘解析（fsutil.CleanURLPath）
 // 必须对同一个请求得出一致的路径。早先只做了去尾斜杠，于是
@@ -286,12 +286,16 @@ func (a *Authenticator) mergeStatic(in *account) error {
 // 受限账号因此可以越出自己的目录。规则本身由 ValidateRules 拒绝 `..`，
 // 所以对合法配置这是纯防御。
 //
+// ⚠️ **不能 trim 请求路径**：`/docs/uploads `（尾随空格）在 Linux/macOS 上
+// 是合法且与 `/docs/uploads` 不同的文件。若这里把请求路径 trim 掉，ACL
+// 会按 `/docs/uploads` 匹配，落盘却打开另一个条目，形成越权。
+// 规则字面量在 parseRule / ValidateRules 的边界处单独 trim。
+//
 // ⚠️ 刻意**不**把 `\` 当成分隔符：Unix 上它是合法的文件名字符，而
 // Resolve 也不会转换它。在鉴权层转换会造成「鉴权看 /docs/secret、
 // 实际打开 /docs\secret」的错位。Windows 上 Resolve 会把它当分隔符，
 // 那时鉴权只会更严格（误拒），不会放行。
 func normalizePath(p string) string {
-	p = strings.TrimSpace(p)
 	if p == "" {
 		return "/"
 	}

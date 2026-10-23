@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 )
 
 // upScriptName 是脚本端点的路径。
@@ -28,7 +29,9 @@ const upScriptName = "/up"
 //     多部分文件名压平到它的基本名。
 //   - 只用 curl 和 bash，没有别的依赖。
 //
-// 占位符只有 __KEY__ 与 __BASE__ 两处，替换前都做过 shell 转义。
+// __KEY__ 与 __BASE__ 在脚本里处于单引号中，替换前做 shell 转义；
+// __SCOPE__ 只出现在注释里，替换前去掉控制字符（注释不认引号，换行会
+// 提前结束注释）。
 const upScriptTpl = `#!/bin/bash
 # gofs 一键上传脚本
 #
@@ -205,7 +208,7 @@ func (s *Server) handleUpScript(w http.ResponseWriter, r *http.Request) {
 	body := strings.NewReplacer(
 		"__KEY__", shellSingleQuote(token),
 		"__BASE__", shellSingleQuote(base),
-		"__SCOPE__", shellSingleQuote(k.Scope),
+		"__SCOPE__", scriptCommentText(k.Scope),
 	).Replace(upScriptTpl)
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
@@ -236,6 +239,24 @@ func (s *Server) publicBaseURL(r *http.Request) string {
 // 那是客户端可控的，不转义就等于把命令注入递给了脚本。
 func shellSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
+// scriptCommentText 把值变成可安全放进 shell 注释的文本。
+//
+// 注释从 # 开始到行尾，引号在其中不生效，因此换行/回车会提前结束注释、
+// 把后面的内容变成命令。控制字符统一换成空格；scope 在创建时已经拒绝
+// 控制字符，这里兜住历史 keys.json 中可能存在的旧数据。
+func scriptCommentText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || unicode.IsControl(r) {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // scopeDir 把密钥的范围变成「上传时 POST 到的目录」。

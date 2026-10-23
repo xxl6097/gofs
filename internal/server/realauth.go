@@ -5,7 +5,46 @@ import (
 
 	"github.com/xxl6097/gofs/internal/auth"
 	"github.com/xxl6097/gofs/internal/fsutil"
+	"github.com/xxl6097/gofs/internal/uploadkey"
 )
+
+// keyCreatorAllowed 判断密钥/分享的创建者当前是否仍有足够权限。
+//
+// 授权发生在**每次使用**时，而不是只在签发时看一次 scope 根：
+// ACL 支持最长前缀，`/docs:rw` + `/docs/finance:r` 这种配置下，
+// 一把 scope=/docs 的密钥不能因此获得 /docs/finance 的写权限。
+//
+// 鉴权未启用时没有路径规则，放行；启用后 Creator 为空的历史/匿名
+// 凭据一律拒绝（它们在当前身份模型里无法再被复核）。
+func (s *Server) keyCreatorAllowed(r *http.Request, k *uploadkey.Key, urlPath string, need auth.Permission) bool {
+	if !s.auth.Enabled() {
+		return true
+	}
+	if k == nil || k.Creator == "" {
+		return false
+	}
+	return s.auth.PermFor(k.Creator, s.canonicalPath(r, urlPath)) >= need
+}
+
+// uploadKeyAllowed 同时校验密钥的 scope 与创建者当前 ACL。
+func (s *Server) uploadKeyAllowed(r *http.Request, k *uploadkey.Key, urlPath string) bool {
+	if k == nil || !k.AllowsPath(urlPath) {
+		return false
+	}
+	return s.keyCreatorAllowed(r, k, urlPath, auth.PermReadWrite)
+}
+
+// shareTokenAllowed 同时校验分享的 scope 与创建者当前 ACL。
+func (s *Server) shareTokenAllowed(r *http.Request, k *uploadkey.Key, urlPath string) bool {
+	if k == nil || !k.IsShare() || !k.AllowsPath(urlPath) {
+		return false
+	}
+	need := auth.PermRead
+	if k.ReadWrite() {
+		need = auth.PermReadWrite
+	}
+	return s.keyCreatorAllowed(r, k, urlPath, need)
+}
 
 // realURLOf 把磁盘路径解析为真实路径，再映射回服务 URL。
 //

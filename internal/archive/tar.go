@@ -22,11 +22,12 @@ const tempFileThreshold = 32 << 20
 // tarReader 实现 tar / tar.gz 归档的读取。
 // tar 是流式的，因此每次操作都从头重新扫描一遍。
 type tarReader struct {
-	f       *os.File
-	format  Format
-	gzipped bool
-	mu      sync.Mutex
-	limits  Limits
+	f         *os.File
+	format    Format
+	gzipped   bool
+	mu        sync.Mutex
+	limits    Limits
+	truncated bool
 }
 
 // SetLimits 设置列表与单条目预览上限。
@@ -125,6 +126,7 @@ func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
 		defer closer.Close()
 	}
 	out := make([]Entry, 0, 128)
+	t.truncated = false
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -137,12 +139,17 @@ func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
 			return nil, fmt.Errorf("读取 tar 失败: %w", err)
 		}
 		if t.limits.MaxFiles > 0 && len(out) >= t.limits.MaxFiles {
+			// 已经读到一个额外 header，说明后面还有条目。
+			t.truncated = true
 			break
 		}
 		out = append(out, tarEntry(hdr))
 	}
 	return out, nil
 }
+
+// Truncated 报告上一次 List 是否因为 MaxFiles 提前结束。
+func (t *tarReader) Truncated() bool { return t.truncated }
 
 // tarEntry 把 tar.Header 转换为统一的 Entry。
 func tarEntry(h *tar.Header) Entry {
@@ -285,6 +292,10 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			if err := authorizeWrite(opts, target); err != nil {
+				rep.ElapsedMs = time.Since(start).Milliseconds()
+				return rep, err
+			}
 			// 目录同样计入条目数，理由见 zip 侧的同名分支。
 			if err := limit.checkNext(hdr.Name, 0); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()
@@ -321,6 +332,10 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			continue
 		}
 
+		if err := authorizeWrite(opts, target); err != nil {
+			rep.ElapsedMs = time.Since(start).Milliseconds()
+			return rep, err
+		}
 		if err := limit.checkNext(name, hdr.Size); err != nil {
 			rep.ElapsedMs = time.Since(start).Milliseconds()
 			return rep, err

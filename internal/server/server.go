@@ -121,6 +121,19 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		_ = logger.Close()
 		return nil, err
 	}
+	// 鉴权开启后，没有 Creator 的历史凭据无法复核权限，会被使用侧拒绝。
+	// 启动时明确提示，避免升级后只看到一片 403 却不知道原因。
+	if authn.Enabled() {
+		orphans := 0
+		for _, k := range keys.List() {
+			if k.Creator == "" {
+				orphans++
+			}
+		}
+		if orphans > 0 {
+			logger.Errorf("安全提示：%d 个上传密钥/分享没有创建者记录，启用鉴权后将被拒绝；请撤销并重新签发", orphans)
+		}
+	}
 
 	srv := &Server{
 		cfg:            cfg,
@@ -666,8 +679,7 @@ func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permiss
 	// auth_required。只在 authorize 里认令牌的话，分享访客拿到的页面是
 	// 「需要登录、权限全无」的空壳 —— 前端会弹登录框，正好是分享要避免的事。
 	if tok := shareTokenOf(r); tok != "" {
-		if k, err := s.keys.Verify(tok); err == nil &&
-			k.IsShare() && k.AllowsPath(urlPath) {
+		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
 			return sharePerm(k), "share:" + k.Prefix, true
 		}
 	}
@@ -745,8 +757,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 写到权限判定之前，是因为这就是一次正常的鉴权判定，
 	// 只是凭据从「账号密码」换成了「分享令牌」。
 	if tok := shareTokenOf(r); tok != "" {
-		if k, err := s.keys.Verify(tok); err == nil &&
-			k.IsShare() && k.AllowsPath(urlPath) {
+		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
 			// 首次拿到令牌的那一次就下发 cookie，之后靠它认人。
 			//
 			// ⚠️ 判据不能只看 `?share=`。分享地址有**两种形式**，而「分享」

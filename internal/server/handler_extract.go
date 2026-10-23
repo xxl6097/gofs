@@ -17,6 +17,11 @@ import (
 	"github.com/xxl6097/gofs/internal/fsutil"
 )
 
+// truncationReporter 由支持“列表可能被 MaxFiles 截断”的归档读取器实现。
+type truncationReporter interface {
+	Truncated() bool
+}
+
 // extractRequest 为解压请求体。
 type extractRequest struct {
 	// Path 为压缩包相对服务根目录的路径。
@@ -400,12 +405,22 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	// List 被 MaxFiles 截断时，entries 不是全集，不能拿它当授权依据。
+	// 直接拒绝解压，而不是“检查前 N 条、后面照写”。
+	if tr, ok := rd.(truncationReporter); ok && tr.Truncated() {
+		http.Error(w, fmt.Sprintf("413 Payload Too Large: 压缩包条目数超过上限 %d，请先解压到本地或调大 --extract-max-files",
+			s.cfg.ExtractMaxFiles), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	// 逐个条目的**最终目标路径**复核写权限。
 	//
 	// 只检查 dest 目录是不够的：ACL 支持最长前缀，部署方完全可能给出
 	// `/docs:rw` + `/docs/secret.txt:r` 这种「目录可写、单文件只读」的规则。
 	// 不逐条检查的话，解压可以覆盖那些只读文件。
+	//
+	// 这一步只对“未截断”的列表有意义；真正落盘前还有 Authorize 回调
+	// （见 opts），两者使用同一套判定。
 	if bad, ok := s.extractTargetsAllowed(r, destClean, entries); !ok {
 		http.Error(w, "403 Forbidden: 压缩包内条目 "+bad+" 没有写权限", http.StatusForbidden)
 		return
@@ -454,6 +469,11 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		MaxFiles:      s.cfg.ExtractMaxFiles,
 		MaxRatio:      s.cfg.ExtractMaxRatio,
 		AllowSymlink:  s.cfg.AllowSymlink,
+		// 落盘前的最后一道授权。即使 List 预检与真实写入集出现偏差
+		//（比如填充条目/TOCTOU），每个真正写出的路径也会再查一次。
+		Authorize: func(rel string) error {
+			return s.extractTargetAllowed(r, destClean, rel)
+		},
 	}
 
 	rep, exErr := rd.Extract(r.Context(), opts, onProgress)
@@ -485,22 +505,35 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// extractTargetAllowed 复核一个条目的最终目标路径是否可写。
+//
+// rel 是相对 destClean 的 URL 路径（已用 / 分隔）。ACL 查目标 URL，
+// 再按软链/大小写别名解析真实路径复核一次。
+func (s *Server) extractTargetAllowed(r *http.Request, destClean, rel string) error {
+	target := fsutil.CleanURLPath(path.Join(destClean, rel))
+	if s.checkPerm(r, target) != auth.PermReadWrite {
+		return fmt.Errorf("条目 %s 没有写权限", target)
+	}
+	// 目标可能经过软链/大小写别名落到另一条 ACL 规则下：按真实路径复核。
+	if abs, err := s.res.Resolve(target); err != nil ||
+		!s.realPermAllowed(r, abs, auth.PermReadWrite) {
+		return fmt.Errorf("条目 %s 的真实路径没有写权限", target)
+	}
+	return nil
+}
+
 // extractTargetsAllowed 对压缩包内每个条目的最终 URL 路径做写权限复核。
 //
 // 返回第一个不通过的路径（用于错误提示）与是否全部通过。
+// 只在 List 未被截断时调用；真正落盘前还有 Authorize 回调兜底。
 func (s *Server) extractTargetsAllowed(r *http.Request, destClean string, entries []archive.Entry) (string, bool) {
 	for _, e := range entries {
-		name := strings.TrimSpace(e.Name)
+		name := e.Name
 		if name == "" {
 			continue
 		}
-		target := fsutil.CleanURLPath(path.Join(destClean, name))
-		if s.checkPerm(r, target) != auth.PermReadWrite {
-			return target, false
-		}
-		// 目标可能经过软链/大小写别名落到另一条 ACL 规则下：按真实路径复核。
-		if abs, err := s.res.Resolve(target); err != nil || !s.realPermAllowed(r, abs, auth.PermReadWrite) {
-			return target, false
+		if err := s.extractTargetAllowed(r, destClean, name); err != nil {
+			return fsutil.CleanURLPath(path.Join(destClean, name)), false
 		}
 	}
 	return "", true

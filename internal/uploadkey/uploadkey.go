@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -299,8 +300,23 @@ func (s *Store) save() error {
 	return nil
 }
 
+// ValidateScope 校验 scope 中不含控制字符。
+//
+// scope 会进入生成的 shell 脚本（/up）与 usage 示例。即使渲染侧已经做了
+// 转义，控制字符（尤其是换行）也可能让注释提前结束，因此创建时就必须
+// 拒绝，而不是只在某一个输出路径上补。
+func ValidateScope(scope string) error {
+	if strings.ContainsFunc(scope, unicode.IsControl) {
+		return fmt.Errorf("%w：scope 不能包含控制字符（换行、制表符等）", ErrInvalidOption)
+	}
+	return nil
+}
+
 // Create 生成一把新密钥，返回记录与**只此一次**的明文。
 func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
+	if err := ValidateScope(opts.Scope); err != nil {
+		return nil, "", err
+	}
 	token, err := generateToken()
 	if err != nil {
 		return nil, "", err
@@ -475,6 +491,44 @@ func (s *Store) Revoke(id string) error {
 	}
 	s.dirty = true
 	return s.save()
+}
+
+// RevokeIDs 批量撤销一组密钥，只落盘一次。
+//
+// 规则变更后可能需要撤销多把凭据；逐把调用 Revoke 会每把都 fsync 一次，
+// 账号下的密钥一多，用户管理接口就会明显变慢。
+func (s *Store) RevokeIDs(ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	drop := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		k, ok := s.keys[id]
+		if !ok {
+			continue
+		}
+		drop[id] = true
+		delete(s.keys, id)
+		delete(s.byHash, k.Hash)
+	}
+	if len(drop) == 0 {
+		return 0, nil
+	}
+	kept := s.order[:0]
+	for _, id := range s.order {
+		if !drop[id] {
+			kept = append(kept, id)
+		}
+	}
+	s.order = kept
+	s.dirty = true
+	if err := s.save(); err != nil {
+		return len(drop), err
+	}
+	return len(drop), nil
 }
 
 // RevokeByCreator 撤销某个账号创建的全部密钥（含分享链接）。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xxl6097/gofs/internal/auth"
+	"github.com/xxl6097/gofs/internal/uploadkey"
 )
 
 // userRuleJSON 是路径规则在接口上的表示。
@@ -103,6 +104,10 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			// 改密码意味着「旧凭据全部作废」。会话已经由 auth 层断掉，
 			// 但该账号此前签发的上传密钥/分享链接是 bearer 凭据，不会自动失效。
 			s.revokeUserKeys(req.Name, "重置密码")
+		} else {
+			// 只改规则时不能全量撤销（可能只是加了一条无关规则），
+			// 但 scope 根已不再满足所需权限的凭据必须收回。
+			s.revokeUncoveredUserKeys(req.Name)
 		}
 		s.logger.Infof("修改用户 %q%s，规则 %s", req.Name, note, describeRules(req.Rules))
 		s.writeJSON(w, s.buildUsers())
@@ -212,6 +217,41 @@ func (s *Server) revokeUserKeys(name, why string) {
 	}
 	if n > 0 {
 		s.logger.Infof("%s：已撤销账号 %q 创建的 %d 个密钥/分享", why, name, n)
+	}
+}
+
+// revokeUncoveredUserKeys 在账号规则变更后，撤销 scope 根已不再满足
+// 所需权限的密钥/分享。
+//
+// 不做全量撤销：管理员改一条无关规则时，不该把整个 CI 流水线的 key 和
+// 对外分享链接全部作废。更细的子路径收窄由使用时的 ACL 复核（
+// uploadKeyAllowed / shareTokenAllowed）兜底。
+func (s *Server) revokeUncoveredUserKeys(name string) {
+	if s.keys == nil || name == "" || !s.auth.Enabled() {
+		return
+	}
+	var ids []string
+	for _, k := range s.keys.List() {
+		if k.Creator != name {
+			continue
+		}
+		need := auth.PermReadWrite
+		if k.KindOf() == uploadkey.KindRead {
+			need = auth.PermRead
+		}
+		if s.auth.PermFor(name, k.Scope) < need {
+			ids = append(ids, k.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	n, err := s.keys.RevokeIDs(ids)
+	if err != nil {
+		s.logger.Errorf("修改权限：撤销账号 %q 的失效密钥失败: %v", name, err)
+	}
+	if n > 0 {
+		s.logger.Infof("修改权限：已撤销账号 %q 的 %d 个不再覆盖其权限的密钥/分享", name, n)
 	}
 }
 

@@ -60,9 +60,10 @@ func CheckZipDirectory(f *os.File, size int64, maxEntries int, maxDirBytes int64
 
 // zipReader 实现 zip 归档的读取。
 type zipReader struct {
-	f      *os.File
-	zr     *zip.Reader
-	limits Limits
+	f         *os.File
+	zr        *zip.Reader
+	limits    Limits
+	truncated bool
 }
 
 // SetLimits 设置列表与单条目预览上限。
@@ -103,17 +104,23 @@ func (z *zipReader) List(ctx context.Context) ([]Entry, error) {
 		capHint = z.limits.MaxFiles
 	}
 	out := make([]Entry, 0, capHint)
+	z.truncated = false
 	for _, f := range z.zr.File {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if z.limits.MaxFiles > 0 && len(out) >= z.limits.MaxFiles {
+			// 还有条目没返回：调用方不能把这份列表当成全集做授权。
+			z.truncated = true
 			break
 		}
 		out = append(out, zipEntry(f))
 	}
 	return out, nil
 }
+
+// Truncated 报告上一次 List 是否因为 MaxFiles 提前结束。
+func (z *zipReader) Truncated() bool { return z.truncated }
 
 // zipEntry 把 zip.File 转换为统一的 Entry。
 func zipEntry(f *zip.File) Entry {
@@ -191,6 +198,9 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			// 目录也要计入条目数：解压炸弹不一定要有文件内容 ——
 			// 一个几百 KB 的包可以声明上百万个空目录，把 inode 吃光。
 			// 早先只在写文件的路径上 checkNext，目录分支整个绕过了上限。
+			if err := authorizeWrite(opts, target); err != nil {
+				return rep, err
+			}
 			if err := limit.checkNext(f.Name, 0); err != nil {
 				return rep, err // 与文件分支一致：超限即中止，不静默跳过
 			}
@@ -222,6 +232,9 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			continue
 		}
 
+		if err := authorizeWrite(opts, target); err != nil {
+			return rep, err
+		}
 		if err := limit.checkNext(f.Name, int64(f.UncompressedSize64)); err != nil {
 			return rep, err
 		}

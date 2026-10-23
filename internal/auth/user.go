@@ -168,6 +168,9 @@ func ValidateRules(rules []Rule) ([]Rule, error) {
 	out := make([]Rule, 0, len(rules))
 	seen := map[string]bool{}
 	for _, r := range rules {
+		// 规则字面量允许用户在首尾留空格；请求路径不 trim，所以这里
+		// 必须在入口把规则的空白清掉，否则 UI 输入会静默匹配不上。
+		r.Path = strings.TrimSpace(r.Path)
 		// 在归一化**之前**检查 `..` 段：normalizePath 会把它静默折叠掉，
 		// 之后再查就查不到了。规则里的 `..` 是歧义输入，直接拒绝比猜测意图好。
 		for _, seg := range strings.Split(strings.ReplaceAll(r.Path, "\\", "/"), "/") {

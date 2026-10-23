@@ -1143,14 +1143,16 @@ func TestExtractQuotaFiles(t *testing.T) {
 
 	s := newTestServer(t, testConfig(t, root, "-A", "--extract-max-files", "5"))
 	_, r := runExtract(t, s, `{"path":"/many.zip","dest":"/quota"}`)
-	if r.code != 200 {
-		t.Fatalf("状态码 = %d", r.code)
-	}
-	if !strings.Contains(r.body, "event: error") {
-		t.Errorf("期望触发条目数上限报错，实际 = %s", r.body)
+	// List 被 MaxFiles 截断时必须在写入前拒绝：不能拿截断后的前缀
+	// 做授权，也不能先写一部分再说超限。
+	if r.code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("状态码 = %d，期望 413；%s", r.code, r.body)
 	}
 	if !strings.Contains(r.body, "条目数超过上限 5") {
 		t.Errorf("错误信息未提及上限，实际 = %s", r.body)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "quota")); err == nil && len(entries) > 0 {
+		t.Errorf("超限归档仍写出了 %d 个条目", len(entries))
 	}
 }
 

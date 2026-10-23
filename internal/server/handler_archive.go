@@ -276,7 +276,11 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 		src, err := os.Open(it.abs)
 		if err != nil {
 			// 无法读取时写入说明文本，保持包结构完整。
-			_, _ = io.WriteString(fw, fmt.Sprintf("[gofs] 无法读取该文件: %v\n", err))
+			//
+			// ⚠️ 不能把 err 的文本写进 zip：*os.PathError 带服务器绝对路径，
+			// 下载者能据此还原主机目录布局。详细错误只进服务端日志。
+			s.logger.Errorf("打包条目 %s 读取失败: %v", it.rel, err)
+			_, _ = io.WriteString(fw, "[gofs] 无法读取该文件（权限不足或已删除）\n")
 			continue
 		}
 		_, cerr := io.Copy(fw, src)

@@ -107,9 +107,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	destPath := s.applyUploadLayout(r, urlPath)
 	if destPath != fsutil.CleanURLPath(urlPath) {
 		if p.UploadKey != nil {
-			// 密钥场景没有 Basic 凭据，改用密钥自身的范围来判定。
-			if !p.UploadKey.AllowsPath(destPath) {
-				http.Error(w, "403 Forbidden: 归档目录超出该密钥允许的范围", http.StatusForbidden)
+			// 密钥场景没有 Basic 凭据，改用密钥自身的范围 + 创建者 ACL 判定。
+			if !s.uploadKeyAllowed(r, p.UploadKey, destPath) {
+				http.Error(w, "403 Forbidden: 归档目录超出该密钥允许的范围，或创建者已无对应权限",
+					http.StatusForbidden)
 				return
 			}
 		} else if s.checkPerm(r, destPath) != auth.PermReadWrite {
@@ -130,9 +131,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	if realURL, realPerm, within := s.realPermOf(r, abs); within {
 		if realURL != destPath {
 			if p.UploadKey != nil {
-				if !p.UploadKey.AllowsPath(realURL) {
-					http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", p.UploadKey.Scope),
-						http.StatusForbidden)
+				if !s.uploadKeyAllowed(r, p.UploadKey, realURL) {
+					http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s，或创建者已无对应权限",
+						p.UploadKey.Scope), http.StatusForbidden)
 					return
 				}
 			} else if realPerm < auth.PermReadWrite {
@@ -292,9 +293,10 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		}
 	}
 	if p.UploadKey != nil {
-		// 密钥场景没有 Basic 凭据，改用密钥自身的范围来判定。
-		if !p.UploadKey.AllowsPath(destDir) {
-			http.Error(w, "403 Forbidden: 目标目录超出该密钥允许的范围", http.StatusForbidden)
+		// 密钥场景没有 Basic 凭据，改用密钥自身的范围 + 创建者 ACL 判定。
+		if !s.uploadKeyAllowed(r, p.UploadKey, destDir) {
+			http.Error(w, "403 Forbidden: 目标目录超出该密钥允许的范围，或创建者已无对应权限",
+				http.StatusForbidden)
 			return
 		}
 	} else if s.checkPerm(r, destDir) != auth.PermReadWrite {
@@ -342,8 +344,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		// 「目录可写、单文件只读」的规则不能被一次表单上传绕过。
 		fileURL := path.Join(destDir, name)
 		if p.UploadKey != nil {
-			if !p.UploadKey.AllowsPath(fileURL) {
-				http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围", http.StatusForbidden)
+			if !s.uploadKeyAllowed(r, p.UploadKey, fileURL) {
+				http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围，或创建者已无对应权限",
+					http.StatusForbidden)
 				return
 			}
 		} else if s.checkPerm(r, fileURL) != auth.PermReadWrite {
@@ -353,8 +356,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		// 目标目录/叶子可能是软链或大小写别名：按真实路径再复核一次。
 		if realURL, within := s.realURLOf(dst); within {
 			if p.UploadKey != nil {
-				if !p.UploadKey.AllowsPath(realURL) {
-					http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围", http.StatusForbidden)
+				if !s.uploadKeyAllowed(r, p.UploadKey, realURL) {
+					http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围，或创建者已无对应权限",
+						http.StatusForbidden)
 					return
 				}
 			} else if s.checkPerm(r, realURL) != auth.PermReadWrite {
