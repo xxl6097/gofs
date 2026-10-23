@@ -391,7 +391,7 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 			// identityPermOf/requireAdmin 等路径写入）；没有就退回会话身份。
 			user := s.verifiedUser(r)
 			if user == "" {
-				if u, ok := s.auth.ResolveSession(sessionToken(r)); ok {
+				if u, ok := s.auth.ResolveSession(s.sessionToken(r)); ok {
 					user = u
 				}
 			}
@@ -551,8 +551,14 @@ func queryAuthCrossSite(r *http.Request) bool {
 //
 // 安全取舍见 session.go 与 handleAuth 的注释。
 
-// sessionCookieName 是会话 cookie 的名字。
-const sessionCookieName = "gofs_sid"
+// sessionCookieName 是兼容旧部署的会话 cookie 名字。
+//
+// HTTPS 根路径部署优先使用 __Host- 前缀：它要求 Secure、Path=/、且不带
+// Domain，子域无法用 Domain Cookie 覆盖/伪造它（cookie tossing）。
+const (
+	sessionCookieName     = "gofs_sid"
+	sessionCookieHostName = "__Host-gofs_sid"
+)
 
 // shareCookieName 是分享链接的 cookie 名字。
 //
@@ -563,19 +569,29 @@ const sessionCookieName = "gofs_sid"
 //
 // 它和会话 cookie 是两回事：这条只代表「某个分享链接被打开过」，
 // 权限级别照抄令牌（只读或可读写），且严格限制在链接自身的范围内。
-const shareCookieName = "gofs_share"
+//
+// 根路径 + HTTPS 时同样优先使用 __Host- 前缀；子路径分享（Path=/docs/）
+// 不满足 __Host- 的 Path=/ 要求，继续使用旧名字。
+const (
+	shareCookieName     = "gofs_share"
+	shareCookieHostName = "__Host-gofs_share"
+)
 
 // shareTokenOf 取出请求里的分享令牌：查询参数优先，其次是 cookie。
 //
 // 查询参数优先是有意的：同一个浏览器可能开过多个分享链接，
 // 显式带上来的那一个才是当前意图。
-func shareTokenOf(r *http.Request) string {
+func (s *Server) shareTokenOf(r *http.Request) string {
 	// 路径形式（/s/<token>/…）：令牌在 context 里，伪造不了。
 	if v, ok := r.Context().Value(shareCtxKey{}).(string); ok && v != "" {
 		return v
 	}
 	if v := r.URL.Query().Get("share"); v != "" {
 		return v
+	}
+	// __Host- 优先：同名的 Domain Cookie 无法覆盖它。
+	if c, err := r.Cookie(shareCookieHostName); err == nil && c.Value != "" {
+		return c.Value
 	}
 	if c, err := r.Cookie(shareCookieName); err == nil {
 		return c.Value
@@ -611,8 +627,13 @@ func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, token, s
 	if strings.HasPrefix(p, "//") {
 		p = "/"
 	}
+	// __Host- 只能用于 Path=/ 且 Secure 的 cookie；子路径分享继续用旧名。
+	name := shareCookieName
+	if p == "/" && s.cookieSecure(r) {
+		name = shareCookieHostName
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     shareCookieName,
+		Name:     name,
 		Value:    token,
 		Path:     p,
 		MaxAge:   maxAge,
@@ -661,12 +682,20 @@ func cookiePathForPrefix(prefix string) string {
 //	对写方法的同源校验兜住，与本次改动无关。）
 //
 // Secure：仅在 HTTPS 下加，否则纯 HTTP 部署会收不到 cookie。
-func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, remember bool) {
+	name := sessionCookieName
+	if s.sessionCookiePath() == "/" && s.cookieSecure(r) {
+		name = sessionCookieHostName
+	}
+	maxAge := 0 // 0 = 浏览器会话 Cookie
+	if remember {
+		maxAge = int(auth.SessionTTL().Seconds())
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     name,
 		Value:    token,
 		Path:     s.sessionCookiePath(),
-		MaxAge:   int(auth.SessionTTL().Seconds()),
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   s.cookieSecure(r),
@@ -682,25 +711,40 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 //
 // 前缀变更时要清的是**旧 Path** 的那条：浏览器的 cookie 是按 (name, domain,
 // path) 三元组存的，新 Path 上那条清不掉旧 Path 上那条。
+// 同时清旧名字，保证从旧版本升级后不会残留一张可用的旧会话票。
 func (s *Server) clearSessionCookieAt(w http.ResponseWriter, r *http.Request, path string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     path,
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   s.cookieSecure(r),
-	})
+	clear := func(name string) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     path,
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   s.cookieSecure(r),
+		})
+	}
+	clear(sessionCookieName)
+	if path == "/" && s.cookieSecure(r) {
+		clear(sessionCookieHostName)
+	}
 }
 
 // sessionToken 取出请求里的会话 token（没有则空串）。
-func sessionToken(r *http.Request) string {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
+//
+// HTTPS 根路径部署只认 __Host-gofs_sid，不透支旧名：否则同站子域可以
+// 用 Domain Cookie 把受害者登录成攻击者账号（cookie tossing）。
+func (s *Server) sessionToken(r *http.Request) string {
+	if c, err := r.Cookie(sessionCookieHostName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	if s.sessionCookiePath() == "/" && s.cookieSecure(r) {
 		return ""
 	}
-	return c.Value
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 // credsOf 解析请求身份，返回权限判定需要的三样东西。
@@ -714,7 +758,7 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 	if hasCred {
 		return user, pass, true, ""
 	}
-	if token := sessionToken(r); token != "" {
+	if token := s.sessionToken(r); token != "" {
 		if u, ok := s.auth.ResolveSession(token); ok {
 			return "", "", false, u
 		}
@@ -754,7 +798,7 @@ func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permiss
 	// 优先，管理员打开一次分享链接就会被降级成只读，连服务设置都进不去
 	// （实测可稳定复现）。反过来，显式身份权限更低时仍可借分享读到内容，
 	// 不会因为“身份优先”把已登录用户挡在分享之外。
-	if tok := shareTokenOf(r); tok != "" {
+	if tok := s.shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
 			if sp := sharePerm(k); sp > idPerm {
 				return sp, "share:" + k.Prefix, true
@@ -874,7 +918,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		shareToken string
 		shareOK    bool
 	)
-	if tok := shareTokenOf(r); tok != "" {
+	if tok := s.shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
 			shareKey, shareToken, shareOK = k, tok, true
 		}
@@ -923,11 +967,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		s.noteAuthFailure(ip, limitClass, limitUser)
 	}
 
-	hadCookie := sessionToken(r) != ""
+	hadCookie := s.sessionToken(r) != ""
 	if s.auth.NeedsAuth(urlPath) {
 		// cookie 无效就顺手清掉，免得浏览器每个后续请求都带着一张废票。
 		if hadCookie {
-			if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
+			if _, ok := s.auth.ResolveSession(s.sessionToken(r)); !ok {
 				s.clearSessionCookie(w, r)
 			}
 		}
@@ -1083,7 +1127,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		leafLink = true
 	}
 	if !(leafLink && (r.Method == http.MethodDelete || r.Method == MethodMove)) {
-		realURL, realPerm, within := s.realPermOf(r, abs)
+		realURL, realAbs, realPerm, within := s.realPermOf(r, abs)
+		// 记录授权时看到的真实目标，后续 open 用它做 inode 复核，堵住
+		// “检查完再把路径换成软链”的 TOCTOU。
+		s.noteAuthorizedPath(r, urlPath, realAbs)
+		if realURL != urlPath {
+			s.noteAuthorizedPath(r, realURL, realAbs)
+		}
 		if within {
 			if realURL != urlPath {
 				if realPerm == auth.PermNone {
@@ -1193,7 +1243,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 
 	// 渲染 index.html。
 	if s.cfg.RenderIndex || s.cfg.RenderTryIndex {
-		if s.tryServeIndex(w, r, abs) {
+		if s.tryServeIndex(w, r, urlPath, abs) {
 			return
 		}
 		if s.cfg.RenderIndex {
@@ -1283,7 +1333,7 @@ func (s *Server) writeListing(w http.ResponseWriter, r *http.Request,
 	// 命令行工具（wget / curl 这类）要的是**带链接的列表**，不是 SPA 外壳。
 	// 走这一支的判据与 ?json / ?simple 一致：由客户端用 Accept 声明要什么。
 	if isToolClient(r) {
-		s.renderLinkIndex(w, r, listing, shareTokenOf(r))
+		s.renderLinkIndex(w, r, listing, s.shareTokenOf(r))
 		return
 	}
 
@@ -1297,8 +1347,12 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
-	f, err := os.Open(abs)
+	f, err := s.secureOpenRead(r, urlPath, abs)
 	if err != nil {
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 目标路径在请求期间发生变化，请重试", http.StatusConflict)
+			return
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			if s.cfg.RenderSPA {
 				s.serveIndexFallback(w, r)
@@ -1340,7 +1394,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 				http.StatusServiceUnavailable)
 			return
 		}
-		sum, err := fileSHA256(abs)
+		sum, err := fileSHA256Of(f)
 		release()
 		if err != nil {
 			s.writeErr(w, err)
@@ -1482,13 +1536,11 @@ func isScriptableContent(name string) bool {
 	return scriptableExts[strings.ToLower(filepath.Ext(name))]
 }
 
-// fileSHA256 计算文件摘要。
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
+// fileSHA256Of 计算已经通过授权快照打开的文件摘要。
+func fileSHA256Of(f *os.File) (string, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
-	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err

@@ -470,7 +470,7 @@ func portOfAddr(addr string) string {
 //
 // 没有会话 cookie 的请求（curl、Basic 直连的脚本）自然什么都不做。
 func (s *Server) migrateSessionCookie(w http.ResponseWriter, r *http.Request, oldPrefix, newPrefix string) {
-	tok := sessionToken(r)
+	tok := s.sessionToken(r)
 	if tok == "" {
 		return
 	}
@@ -478,7 +478,7 @@ func (s *Server) migrateSessionCookie(w http.ResponseWriter, r *http.Request, ol
 	if oldPath != newPath {
 		s.clearSessionCookieAt(w, r, oldPath)
 	}
-	s.setSessionCookie(w, r, tok)
+	s.setSessionCookie(w, r, tok, true)
 }
 
 // maxTitleRunes 是站点标题允许的最大字符数（按字符数，不是字节数）。
@@ -720,24 +720,33 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 		return permResult{Perm: auth.PermNone}, true
 	}
 	user, pass, hasCred, class := credentialsWithSource(r)
-	ip, ok := s.checkAuthLimit(w, r, class, user)
-	if !ok {
-		return permResult{}, false
-	}
-	if !hasCred || user == "" || !s.auth.Verify(user, pass) {
-		if hasCred {
+	if hasCred && user != "" {
+		ip, ok := s.checkAuthLimit(w, r, class, user)
+		if !ok {
+			return permResult{}, false
+		}
+		if !s.auth.Verify(user, pass) {
 			s.noteAuthFailure(ip, class, user)
+			if shouldChallenge(r) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+			}
+			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+			return permResult{}, false
 		}
-		if shouldChallenge(r) {
-			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
-		}
-		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
-		return permResult{}, false
+		s.noteVerifiedUser(r, user)
+		s.noteAuthSuccess(ip, class, user)
+		return permResult{Perm: s.auth.PermFor(user, "/"), User: user, Authenticated: true}, true
 	}
-	s.noteVerifiedUser(r, user)
-	s.noteAuthSuccess(ip, class, user)
-	perm := s.auth.Lookup("/", user, pass, true)
-	return permResult{Perm: perm, User: user, Authenticated: true}, true
+
+	// 没有显式凭据时接受 HttpOnly 会话，页面刷新后设置页仍可用。
+	if u, ok := s.auth.ResolveSession(s.sessionToken(r)); ok && u != "" {
+		return permResult{Perm: s.auth.PermFor(u, "/"), User: u, Authenticated: true}, true
+	}
+	if shouldChallenge(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+	}
+	http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+	return permResult{}, false
 }
 
 // isAdminRequest 判断请求是否来自「对服务根拥有读写权限」的账号。
@@ -833,7 +842,7 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 	// 它是 256 位随机值，伪造/过期都不构成口令猜测，计入只会让
 	// 匿名请求有机会污染有效会话的限速桶。合法但非管理员的会话
 	// 只回 403。
-	if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
+	if _, ok := s.auth.ResolveSession(s.sessionToken(r)); !ok {
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 		}

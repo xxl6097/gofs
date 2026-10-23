@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/xxl6097/gofs/internal/fsutil"
@@ -146,6 +147,41 @@ func (z *zipReader) List(ctx context.Context) ([]Entry, error) {
 // Truncated 报告上一次 List 是否因为 MaxFiles 提前结束。
 func (z *zipReader) Truncated() bool { return z.truncated }
 
+// zipDataSpans 用中央目录里的真实数据偏移计算每个条目的物理跨度。
+//
+// 压缩比防护不能相信条目里声明的 CompressedSize64（攻击者可以填大来稀释
+// 比例）。数据偏移来自中央目录，跨度到下一个条目的起点（最后一个到文件尾）
+// 是一个**已知、无法通过声明值伪造**的上界；中间若插入填充数据，攻击者
+// 也必须真的上传这些字节。
+func zipDataSpans(zr *zip.Reader, archiveSize int64) map[*zip.File]int64 {
+	type item struct {
+		f   *zip.File
+		off int64
+	}
+	items := make([]item, 0, len(zr.File))
+	for _, f := range zr.File {
+		off, err := f.DataOffset()
+		if err != nil || off < 0 || off > archiveSize {
+			continue
+		}
+		items = append(items, item{f: f, off: off})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].off < items[j].off })
+	out := make(map[*zip.File]int64, len(items))
+	for i, it := range items {
+		end := archiveSize
+		if i+1 < len(items) && items[i+1].off > it.off {
+			end = items[i+1].off
+		}
+		span := end - it.off
+		if span < 0 {
+			span = 0
+		}
+		out[it.f] = span
+	}
+	return out
+}
+
 // zipSize 把 zip 的 uint64 声明值安全转成 int64。
 // 超过 MaxInt64 时返回 -1（未知），调用方不应据此设置 Content-Length。
 func zipSize(v uint64) int64 {
@@ -208,6 +244,7 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 	if fi, err := z.f.Stat(); err == nil {
 		archiveSize = fi.Size()
 	}
+	spans := zipDataSpans(z.zr, archiveSize)
 
 	if err := os.MkdirAll(opts.Dest, 0o755); err != nil {
 		return nil, err
@@ -296,13 +333,8 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 		if err != nil {
 			return rep, err
 		}
-		compressed := int64(0)
-		if f.CompressedSize64 <= math.MaxInt64 {
-			compressed = int64(f.CompressedSize64)
-		}
-		if archiveSize > 0 && compressed > archiveSize {
-			compressed = archiveSize
-		}
+		// 用物理跨度而不是可伪造的 CompressedSize64 计算压缩比。
+		compressed := spans[f]
 		n, werr := writeFile(target, rc, opts, limit, compressed, f.Name, f.Modified)
 		rc.Close()
 		if werr != nil {

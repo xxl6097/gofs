@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/xxl6097/gofs/internal/auth"
@@ -41,35 +42,43 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 与 authorize 用同一套限速：这个接口现在会下发会话 cookie，
-	// 不设闸门等于把口令交给字典攻击 —— 而且登录成功一次就能拿到
-	// 一张长期有效的 cookie，比逐个请求试密码划算得多。
+	// 与 authorize 用同一套限速：这个接口会下发会话 cookie，不设闸门
+	// 等于把口令交给字典攻击 —— 登录成功一次就能拿到一张长期通行证，
+	// 比逐个请求试密码划算得多。
 	user, pass, ok, class := credentialsWithSource(r)
 	ip := s.clientIP(r)
-	if blocked, remain := s.authBlocked(ip, class, user); blocked {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
-		s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
-			"message": "认证失败次数过多，请稍后再试",
-		})
-		return
-	}
+	passwordLogin := ok && user != ""
 
-	if !ok || user == "" {
-		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
-			"message": "请输入用户名与密码",
-		})
-		return
+	if passwordLogin {
+		if blocked, remain := s.authBlocked(ip, class, user); blocked {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
+			s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+				"message": "认证失败次数过多，请稍后再试",
+			})
+			return
+		}
+		if !s.auth.Verify(user, pass) {
+			s.noteAuthFailure(ip, class, user)
+			s.logger.Errorf("登录失败：账号 %q 凭据不正确", truncateAuthUser(user))
+			s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+				"message": "用户名或密码不正确",
+			})
+			return
+		}
+		s.noteVerifiedUser(r, user)
+		s.noteAuthSuccess(ip, class, user)
+	} else {
+		// 没有显式凭据时，允许用现有的 HttpOnly 会话刷新身份。这样页面
+		// 刷新/重新打开时不再需要从 localStorage 读取 Basic 密码。
+		u, valid := s.auth.ResolveSession(s.sessionToken(r))
+		if !valid || u == "" {
+			s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
+				"message": "请输入用户名与密码",
+			})
+			return
+		}
+		user = u
 	}
-	if !s.auth.Verify(user, pass) {
-		s.noteAuthFailure(ip, class, user)
-		s.logger.Errorf("登录失败：账号 %q 凭据不正确", truncateAuthUser(user))
-		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
-			"message": "用户名或密码不正确",
-		})
-		return
-	}
-	s.noteVerifiedUser(r, user)
-	s.noteAuthSuccess(ip, class, user)
 
 	// 下发会话 cookie。之后浏览器**自己**发起的请求（<video>/<img> 的加载、
 	// <a download> 的下载）会带上它，于是 Range 流式播放与原生下载都可用，
@@ -80,38 +89,46 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 登录到攻击者账号（登录 CSRF）。查询串是 `<img>` 唯一能带上的
 	// 凭据形式；而 Authorization 头跨站设置不了，POST 又有同源校验。
 	// 这类 GET 仍然可以做一次凭据校验，只是不产生会话。
-	fromQuery := class == authClassQuery
-	// GET + Basic 仍可校验凭据，但只有明确带 X-Gofs-Ajax（应用自己的登录框）
-	// 或 POST 才建立会话。否则 `https://user:pass@host/fs/auth` 这类顶层导航
-	// 会让受害者静默登录到攻击者账号（登录 CSRF）；非浏览器客户端请改用 POST。
-	issueSession := r.Method == http.MethodPost ||
-		(r.Method == http.MethodGet && r.Header.Get("X-Gofs-Ajax") == "1")
-	if !fromQuery && issueSession {
-		// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
-		token, ok := s.auth.NewSession(user)
-		if !ok {
-			s.writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
-				"message": "会话数已达上限，请稍后再试",
-			})
-			return
+	if passwordLogin {
+		fromQuery := class == authClassQuery
+		// GET + Basic 仍可校验凭据，但只有明确带 X-Gofs-Ajax（应用自己的登录框）
+		// 或 POST 才建立会话。否则 `https://user:pass@host/fs/auth` 这类顶层导航
+		// 会让受害者静默登录到攻击者账号（登录 CSRF）；非浏览器客户端请改用 POST。
+		issueSession := r.Method == http.MethodPost ||
+			(r.Method == http.MethodGet && r.Header.Get("X-Gofs-Ajax") == "1")
+		if !fromQuery && issueSession {
+			// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
+			token, ok := s.auth.NewSession(user)
+			if !ok {
+				s.writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{
+					"message": "会话数已达上限，请稍后再试",
+				})
+				return
+			}
+			remember := false
+			switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("remember"))) {
+			case "1", "true", "yes", "on":
+				remember = true
+			}
+			s.setSessionCookie(w, r, token, remember)
 		}
-		s.setSessionCookie(w, r, token)
+		s.logger.Infof("登录成功：%s", user)
 	}
 
 	// 该账号的权限用于决定页面按钮显隐。
 	// 默认按根目录计算，但对根目录无权限时退化为只读，避免整页按钮全灭。
 	// 调用方可以带 ?path= 指定自己实际所在的目录：一个只被授予 /docs 权限的
 	// 账号站在 /docs 里时，理应拿到完整的按钮，而不是被当成只读。
-	perm := s.auth.Lookup("/", user, pass, true)
+	// 会话与 Basic 都按**已确认的账号名**计算，避免再验一次密码。
+	perm := s.auth.PermFor(user, "/")
 	if p := r.URL.Query().Get("path"); p != "" && !fsutil.HasParentSegment(p) {
-		if scoped := s.auth.Lookup(p, user, pass, true); scoped != auth.PermNone {
+		if scoped := s.auth.PermFor(user, p); scoped != auth.PermNone {
 			perm = scoped
 		}
 	}
 	if perm == auth.PermNone {
 		perm = auth.PermRead
 	}
-	s.logger.Infof("登录成功：%s", user)
 
 	// 登录后该落到哪个目录、哪些上级地址读得到。
 	//
@@ -123,15 +140,15 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// home_path 让前端换乘到它自己的目录；read_paths 让它别把必被拒绝的
 	// 上级（面包屑上的「根目录」、「上一级」按钮）画成能点的链接 ——
 	// 那两处是同一个坑的另一半。
-	home := s.auth.HomePath(user, pass, true)
-	readPaths := s.auth.ReadPaths(user, pass, true)
+	home := s.auth.HomePathFor(user)
+	readPaths := s.auth.ReadPathsFor(user)
 
 	// 除了权限，还要把「未登录外壳里刻意没下发」的配置一并补齐，
 	// 否则前端登录后仍然不知道上传归档、在线编辑、密钥等能力是否可用。
 	//
 	// allow_settings 要按**服务根**的权限算，而不是调用方所在的路径：
 	// 只有能读写整个服务的账号才该看到「服务设置」入口。
-	admin := s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
+	admin := s.auth.PermFor(user, "/") == auth.PermReadWrite
 	reply := map[string]any{
 		"auth_on":         true,
 		"authenticated":   true,
@@ -173,7 +190,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 // 无论会话是否存在都返回 204：登出是个应该永远成功的动作，
 // 为一个已经过期的会话报错只会让前端多写一段没意义的处理。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if token := sessionToken(r); token != "" {
+	if token := s.sessionToken(r); token != "" {
 		s.auth.DropSession(token)
 	}
 	s.clearSessionCookie(w, r)

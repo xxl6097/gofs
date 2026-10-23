@@ -27,6 +27,9 @@ type canonicalCache struct {
 	mu   sync.Mutex
 	m    map[string]string
 	dirs map[string]dirListing
+	// paths 保存“授权时看到的真实文件/目录快照”，打开文件时用来防止
+	// 检查与 open 之间的软链/目录替换（TOCTOU）。
+	paths map[string]*authorizedPath
 	// authUser 是本次请求中**真的验过密码**的账号名。
 	// 访问日志只应记录它，而不是客户端随手塞进 Authorization 头的用户名。
 	authUser string
@@ -52,6 +55,33 @@ func (s *Server) noteVerifiedUser(r *http.Request, user string) {
 	if c, ok := r.Context().Value(canonicalCacheKey{}).(*canonicalCache); ok {
 		c.setAuthUser(user)
 	}
+}
+
+// noteAuthorizedPath 记录一次授权时看到的真实路径快照。
+func (s *Server) noteAuthorizedPath(r *http.Request, urlPath, real string) {
+	if urlPath == "" || real == "" {
+		return
+	}
+	if c, ok := r.Context().Value(canonicalCacheKey{}).(*canonicalCache); ok {
+		c.mu.Lock()
+		if len(c.paths) < 256 {
+			c.paths[urlPath] = snapshotAuthorized(real)
+		}
+		c.mu.Unlock()
+	}
+}
+
+// authorizedPathFor 取出某个 URL 对应的授权快照；没有则返回 nil。
+func (s *Server) authorizedPathFor(r *http.Request, urlPath string) *authorizedPath {
+	if urlPath == "" {
+		return nil
+	}
+	if c, ok := r.Context().Value(canonicalCacheKey{}).(*canonicalCache); ok {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.paths[urlPath]
+	}
+	return nil
 }
 
 // verifiedUser 返回本次请求已验证的账号名；没有则为空串。
@@ -85,8 +115,9 @@ func (c *canonicalCache) ReadDir(dir string) ([]os.DirEntry, error) {
 func (s *Server) withCanonicalCache(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := &canonicalCache{
-			m:    make(map[string]string),
-			dirs: make(map[string]dirListing),
+			m:     make(map[string]string),
+			dirs:  make(map[string]dirListing),
+			paths: make(map[string]*authorizedPath),
 		}
 		next.ServeHTTP(w, r.WithContext(
 			context.WithValue(r.Context(), canonicalCacheKey{}, c)))

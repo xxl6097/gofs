@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -115,7 +116,7 @@ func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath 
 		return nil, "", noop, false
 	}
 	// 软链目标可能落在另一条 ACL 规则下：按真实路径再复核一次。
-	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+	if !s.requireRealPerm(w, r, clean, abs, auth.PermRead) {
 		return nil, "", noop, false
 	}
 	st, err := os.Stat(abs)
@@ -139,7 +140,17 @@ func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath 
 		http.Error(w, "503 Service Unavailable: 解压任务过多，请稍后重试", http.StatusServiceUnavailable)
 		return nil, "", noop, false
 	}
-	rd, err := archive.Open(abs)
+	f, err := s.secureOpenRead(r, clean, abs)
+	if err != nil {
+		release()
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 压缩包在请求期间发生变化，请重试", http.StatusConflict)
+			return nil, "", noop, false
+		}
+		s.writeErr(w, err)
+		return nil, "", noop, false
+	}
+	rd, err := archive.OpenFile(f, abs)
 	if err != nil {
 		release()
 		if errors.Is(err, archive.ErrUnsupported) {
@@ -335,7 +346,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "404 Not Found: 压缩包不存在", http.StatusNotFound)
 		return
 	}
-	if !s.requireRealPerm(w, r, srcAbs, auth.PermReadWrite) {
+	if !s.requireRealPerm(w, r, srcClean, srcAbs, auth.PermReadWrite) {
 		return
 	}
 
@@ -355,7 +366,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden: 目标目录非法", http.StatusForbidden)
 		return
 	}
-	if !s.requireRealPerm(w, r, destAbs, auth.PermReadWrite) {
+	if !s.requireRealPerm(w, r, destClean, destAbs, auth.PermReadWrite) {
 		return
 	}
 	if destAbs == srcAbs {
@@ -383,7 +394,16 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	rd, err := archive.Open(srcAbs)
+	srcFile, err := s.secureOpenRead(r, srcClean, srcAbs)
+	if err != nil {
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 压缩包在请求期间发生变化，请重试", http.StatusConflict)
+			return
+		}
+		s.writeErr(w, err)
+		return
+	}
+	rd, err := archive.OpenFile(srcFile, srcAbs)
 	if err != nil {
 		if errors.Is(err, archive.ErrUnsupported) {
 			http.Error(w, "415 Unsupported Media Type: 仅支持 zip / tar / tar.gz / tgz / gz",
@@ -473,7 +493,24 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		// 落盘前的最后一道授权。即使 List 预检与真实写入集出现偏差
 		//（比如填充条目/TOCTOU），每个真正写出的路径也会再查一次。
 		Authorize: func(rel string) error {
-			return s.extractTargetAllowed(r, destClean, rel)
+			if err := s.extractTargetAllowed(r, destClean, rel); err != nil {
+				return err
+			}
+			// 记录授权时的 inode；OpenWrite 用 os.Root + 快照复核落盘。
+			target := filepath.Join(destAbs, filepath.FromSlash(rel))
+			realTarget := target
+			if _, real, ok := s.realPathOf(target); ok {
+				realTarget = real
+			}
+			s.noteAuthorizedPath(r, "extract:"+rel, realTarget)
+			return nil
+		},
+		OpenWrite: func(target string, flags int, perm fs.FileMode) (*os.File, error) {
+			key := ""
+			if rel, err := filepath.Rel(destAbs, target); err == nil {
+				key = "extract:" + filepath.ToSlash(rel)
+			}
+			return s.secureOpenWrite(r, key, target, flags, perm)
 		},
 	}
 

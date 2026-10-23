@@ -37,6 +37,8 @@ func main() {
 	owner := flag.String("owner", "xxl6097", "GitHub 账号")
 	repo := flag.String("repo", "gofs", "仓库名")
 	apiBase := flag.String("api-base", "", "API 根地址（GitHub Enterprise 用），默认 api.github.com")
+	publicKey := flag.String("public-key", "",
+		"Ed25519 公钥（hex/base64），设置后强制校验 checksums.txt.sig")
 	assetPrefix := flag.String("asset-prefix", "gofs", "资产名前缀，默认 gofs（即 gofs-<goos>-<goarch>）")
 	root := flag.String("root", ".", "要服务的目录")
 	port := flag.Int("port", 8000, "监听端口")
@@ -54,6 +56,7 @@ func main() {
 		APIBase:        *apiBase,
 		AssetPrefix:    *assetPrefix,
 		CurrentVersion: *version,
+		PublicKeyText:  *publicKey,
 		DryRun:         *dryRun,
 	})
 	if err != nil {

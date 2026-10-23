@@ -79,7 +79,7 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
-	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+	if !s.requireRealPerm(w, r, clean, abs, auth.PermRead) {
 		return
 	}
 	st, err := os.Stat(abs)
@@ -125,8 +125,12 @@ func (s *Server) handleOffice(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	f, err := os.Open(abs)
+	f, err := s.secureOpenRead(r, clean, abs)
 	if err != nil {
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 文件在请求期间发生变化，请重试", http.StatusConflict)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}

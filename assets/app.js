@@ -309,12 +309,17 @@
   //
   // 页面使用 HTTP Basic 认证，但刻意不依赖浏览器原生登录框：
   // 原生框无法登出、无法承载跳转、移动端体验差，且一旦被浏览器缓存，
-  // 退出后必须重启浏览器才失效。这里由应用自己弹出登录框，
-  // 把凭据存在 sessionStorage（默认）或 localStorage（勾选「记住」），
-  // 每次请求通过 Authorization 头带上。
+  // 退出后必须重启浏览器才失效。
+  //
+  // ⚠️ **不再把密码写进 sessionStorage/localStorage**：持久化身份由服务端
+  // HttpOnly 会话 Cookie 承担，页面刷新时用 GET /fs/auth（无 Authorization）
+  // 换回身份。内存里的 creds 只用于当前页面的请求；任何 XSS 也读不到
+  // 已经下发的 30 天会话 Cookie。
 
   var STORE_SESSION = 'gofs-auth';
   var STORE_PERSIST = 'gofs-auth-remember';
+  var STORE_USER = 'gofs-auth-user';
+  // creds 只保留用户名，用于刷新时先画顶栏；**永远不保存密码**。
   var creds = null;
 
   // b64encode 支持非 ASCII 凭据（用户名或密码含中文时 btoa 会直接抛错）。
@@ -323,35 +328,40 @@
   }
 
   function loadCreds() {
-    var raw = null;
+    // 清理旧版本可能留下的明文密码，只保留用户名标记。
+    var user = '';
     try {
-      raw = sessionStorage.getItem(STORE_SESSION) || localStorage.getItem(STORE_PERSIST);
-    } catch (e) { raw = null; }
-    if (!raw) return null;
-    try {
-      var o = JSON.parse(raw);
-      if (o && typeof o.u === 'string' && typeof o.p === 'string') {
-        return { user: o.u, pass: o.p };
-      }
-    } catch (e) { /* 数据损坏，当作未登录 */ }
-    return null;
+      sessionStorage.removeItem(STORE_SESSION);
+      localStorage.removeItem(STORE_PERSIST);
+      user = sessionStorage.getItem(STORE_USER) || localStorage.getItem(STORE_USER) || '';
+    } catch (e) { /* 隐私模式忽略 */ }
+    return user ? { user: user } : null;
   }
 
   function saveCreds(user, pass, remember) {
-    creds = { user: user, pass: pass };
-    var raw = JSON.stringify({ u: user, p: pass });
+    // remember 只决定服务端会话 Cookie 的寿命（浏览器会话 vs 30 天）
+    // 以及用户名标记放哪里；密码不落 storage，也不留在 JS 内存。
+    creds = { user: user };
     try {
-      sessionStorage.setItem(STORE_SESSION, raw);
-      if (remember) localStorage.setItem(STORE_PERSIST, raw);
-      else localStorage.removeItem(STORE_PERSIST);
-    } catch (e) { /* 隐私模式下可能写入失败，内存里仍然有效 */ }
+      sessionStorage.removeItem(STORE_SESSION);
+      localStorage.removeItem(STORE_PERSIST);
+      if (remember) {
+        localStorage.setItem(STORE_USER, user);
+        sessionStorage.removeItem(STORE_USER);
+      } else {
+        sessionStorage.setItem(STORE_USER, user);
+        localStorage.removeItem(STORE_USER);
+      }
+    } catch (e) { /* 忽略 */ }
   }
 
   function clearCreds() {
     creds = null;
     try {
       sessionStorage.removeItem(STORE_SESSION);
+      sessionStorage.removeItem(STORE_USER);
       localStorage.removeItem(STORE_PERSIST);
+      localStorage.removeItem(STORE_USER);
     } catch (e) { /* 忽略 */ }
   }
 
@@ -379,7 +389,7 @@
     var h = {};
     if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k]; } }
     h['X-Gofs-Ajax'] = '1';
-    if (creds) h['Authorization'] = 'Basic ' + b64encode(creds.user + ':' + creds.pass);
+    // 不再逐请求带 Basic：持久身份是 HttpOnly 会话 Cookie，JS 不持有密码。
     return h;
   }
 
@@ -525,7 +535,7 @@
     var remember = document.createElement('input');
     remember.type = 'checkbox';
     var rememberText = document.createElement('span');
-    rememberText.textContent = '记住我（保存在本机，适合个人设备）';
+    rememberText.textContent = '保持登录（30 天；密码不会保存到浏览器）';
     rememberWrap.appendChild(remember);
     rememberWrap.appendChild(rememberText);
     card.appendChild(rememberWrap);
@@ -566,7 +576,9 @@
       setBusy(true);
       var res;
       try {
-        res = await fetch(BASE + '/fs/auth?path=' + encodeURIComponent(state.path || '/'), {
+        var authURL = BASE + '/fs/auth?path=' + encodeURIComponent(state.path || '/');
+        if (remember.checked) authURL += '&remember=1';
+        res = await fetch(authURL, {
           method: 'GET',
           headers: {
             'Authorization': 'Basic ' + b64encode(u + ':' + pw),
@@ -6904,11 +6916,13 @@
     // 等下面某条路径调到 endBoot() 才露出来。这正是要的效果：
     // 未登录的人不该先瞥见一眼文件界面。
     render();
-    if (creds) {
-      resumeSession().then(function (ok) {
+    // 无论有没有用户名标记都尝试一次：可能只是换了个标签页，HttpOnly
+    // 会话 Cookie 仍然有效；没有会话时会 401，再弹登录框。
+    var hadUser = !!creds;
+    resumeSession().then(function (ok) {
         if (!ok) {
-          // 凭据过期：showLogin() 内部会撤遮挡。
-          showLogin('保存的登录已失效，请重新登录');
+          // 凭证/会话过期：showLogin() 内部会撤遮挡。
+          showLogin(hadUser ? '登录已失效，请重新登录' : '');
           return;
         }
         // 会话有效。先把用户名、登出按钮与各功能入口的显隐补齐……
@@ -6934,9 +6948,6 @@
         // 免得遮挡卡死在那儿等 4 秒兜底。
         showLogin('无法确认登录状态，请重新登录');
       });
-    } else {
-      showLogin('');
-    }
   } else {
     // 无需鉴权：正常目录画完就放行；如果 URL 带着搜索但服务端没有
     // 直接给出搜索结果，就把搜索跑完再撤遮挡。

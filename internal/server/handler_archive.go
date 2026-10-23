@@ -200,6 +200,9 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 
 	var totalBytes int64
 	for _, it := range items {
+		// 记录打包时看到的 inode，写出前按快照复核，防止扫描后条目被换成
+		// 指向根外的软链。
+		s.noteAuthorizedPath(r, it.rel, it.abs)
 		if !it.info.IsDir() {
 			totalBytes += it.info.Size()
 		}
@@ -273,7 +276,7 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 			s.logger.Errorf("打包条目 %s 失败: %v", it.rel, err)
 			return
 		}
-		src, err := os.Open(it.abs)
+		src, err := s.secureOpenRead(r, it.rel, it.abs)
 		if err != nil {
 			// 无法读取时写入说明文本，保持包结构完整。
 			//

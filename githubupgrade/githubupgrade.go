@@ -40,8 +40,11 @@ package githubupgrade
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -105,6 +108,17 @@ type Options struct {
 	// ChecksumsName 为校验和文件名，留空用 DefaultChecksumsName。
 	ChecksumsName string
 
+	// SignatureName 为校验和文件的分离签名名，默认 checksums.txt.sig。
+	// 签名内容为该文件原始字节的 Ed25519 签名（base64 或 hex，任一种）。
+	SignatureName string
+	// PublicKey 是用于验证校验和文件的 Ed25519 公钥（32 字节）。
+	// 设置后**强制要求**同 release 里存在签名资产且验证通过；
+	// 未设置时退回“只校验 SHA-256”的旧行为。
+	PublicKey ed25519.PublicKey
+	// PublicKeyText 是 PublicKey 的文本形式（hex 或 base64），供命令行使用。
+	// 与 PublicKey 同时给出时以 PublicKey 为准。
+	PublicKeyText string
+
 	// DryRun 为 true 时只下载并校验，不替换自己。
 	// 第一次接入、或在生产上试水时先开它。
 	DryRun bool
@@ -117,6 +131,8 @@ type Upgrader struct {
 	apiBase        string
 	assetName      func(goos, goarch string) string
 	checksumsName  string
+	signatureName  string
+	publicKey      ed25519.PublicKey
 	client         *http.Client
 	dryRun         bool
 }
@@ -173,6 +189,20 @@ func New(opts Options) (*Upgrader, error) {
 	if sums == "" {
 		sums = DefaultChecksumsName
 	}
+	sigName := strings.TrimSpace(opts.SignatureName)
+	if sigName == "" {
+		sigName = "checksums.txt.sig"
+	}
+	pub := opts.PublicKey
+	if len(pub) == 0 && strings.TrimSpace(opts.PublicKeyText) != "" {
+		pub, err = parseEd25519PublicKey(opts.PublicKeyText)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(pub) > 0 && len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("githubupgrade: Ed25519 公钥长度必须为 %d 字节", ed25519.PublicKeySize)
+	}
 	client := opts.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
@@ -189,6 +219,8 @@ func New(opts Options) (*Upgrader, error) {
 		apiBase:        base,
 		assetName:      name,
 		checksumsName:  sums,
+		signatureName:  sigName,
+		publicKey:      pub,
 		client:         client,
 		dryRun:         opts.DryRun,
 	}, nil
@@ -479,21 +511,41 @@ func (u *Upgrader) fetchChecksum(ctx context.Context, rel ghRelease, name string
 		return "", fmt.Errorf("这个 release 没有 %s，拒绝在没有校验的情况下升级", u.checksumsName)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumAsset.URL, nil)
-	if err != nil {
-		return "", err
-	}
-	res, err := u.client.Do(req)
+	body, err := u.fetchAssetBytes(ctx, sumAsset.URL, 1<<20)
 	if err != nil {
 		return "", fmt.Errorf("下载校验和失败: %w", err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("下载校验和返回 %d", res.StatusCode)
+
+	// 配置了公钥就强制验证签名。否则换掉 checksums.txt 与二进制即可
+	// 同时绕过 SHA-256 校验 —— 校验和必须来自可信的签名，而不是同一份
+	// 可变的 release 元数据。
+	if len(u.publicKey) > 0 {
+		var sigAsset *ghAsset
+		for i := range rel.Assets {
+			if strings.EqualFold(rel.Assets[i].Name, u.signatureName) {
+				sigAsset = &rel.Assets[i]
+				break
+			}
+		}
+		if sigAsset == nil {
+			return "", fmt.Errorf("这个 release 没有签名文件 %s，拒绝在未验证签名的情况下升级",
+				u.signatureName)
+		}
+		rawSig, err := u.fetchAssetBytes(ctx, sigAsset.URL, 8<<10)
+		if err != nil {
+			return "", fmt.Errorf("下载签名失败: %w", err)
+		}
+		sig, err := decodeDetachedSignature(rawSig)
+		if err != nil {
+			return "", err
+		}
+		if !ed25519.Verify(u.publicKey, body, sig) {
+			return "", errors.New("校验和文件签名验证失败，已中止升级")
+		}
 	}
 
 	// 格式是 `sha256sum` 的输出：<摘要>  <文件名>，每行一条。
-	sc := bufio.NewScanner(io.LimitReader(res.Body, 1<<20))
+	sc := bufio.NewScanner(bytes.NewReader(body))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) != 2 {
@@ -505,6 +557,71 @@ func (u *Upgrader) fetchChecksum(ctx context.Context, rel ghRelease, name string
 		}
 	}
 	return "", fmt.Errorf("校验和文件里没有 %s", name)
+}
+
+// fetchAssetBytes 下载一个资产并限制响应体大小。
+func (u *Upgrader) fetchAssetBytes(ctx context.Context, url string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := u.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("返回 %d", res.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("响应体超过上限 %d 字节", limit)
+	}
+	return data, nil
+}
+
+// parseEd25519PublicKey 接受 hex、base64（std/raw/url）三种写法。
+func parseEd25519PublicKey(s string) (ed25519.PublicKey, error) {
+	raw := strings.TrimSpace(s)
+	if b, err := hex.DecodeString(raw); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), nil
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(raw); err == nil && len(b) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(b), nil
+		}
+	}
+	return nil, fmt.Errorf("githubupgrade: 无法解析 Ed25519 公钥（需要 %d 字节的 hex/base64）",
+		ed25519.PublicKeySize)
+}
+
+// decodeDetachedSignature 接受原始 64 字节或 base64/hex 文本。
+func decodeDetachedSignature(raw []byte) ([]byte, error) {
+	// 原始 64 字节签名必须原样返回：首尾字节恰好是空白字符时，
+	// TrimSpace 会改掉签名本身。
+	if len(raw) == ed25519.SignatureSize {
+		return raw, nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if b, err := hex.DecodeString(string(trimmed)); err == nil && len(b) == ed25519.SignatureSize {
+		return b, nil
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(string(trimmed)); err == nil && len(b) == ed25519.SignatureSize {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("签名格式无法识别（需要 %d 字节原始值或 base64/hex）",
+		ed25519.SignatureSize)
 }
 
 // VersionLess 判断 a 是否比 b 旧。

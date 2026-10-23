@@ -426,3 +426,40 @@ func TestAuthFailCountNotResetByAnonymousAccess(t *testing.T) {
 		t.Error("夹着匿名请求就一直猜不到封禁 —— 失败计数被匿名访问清零了")
 	}
 }
+
+// TestSessionWorksWithoutBasicCredentials 钉住“不再把密码存浏览器”的前提：
+// 页面刷新后只有 HttpOnly 会话 Cookie，也必须能读身份、设置与密钥面板，
+// 并以会话身份创建分享。
+func TestSessionWorksWithoutBasicCredentials(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t, testConfig(t, root, "-A", "-a", "boss:pw@/:rw"))
+	c := login(t, s, "boss", "pw")
+
+	auth := withCookie(t, s, http.MethodGet, "/fs/auth?path=/", c,
+		map[string]string{"X-Gofs-Ajax": "1"})
+	if auth.code != http.StatusOK || !strings.Contains(auth.body, `"user":"boss"`) {
+		t.Fatalf("会话刷新身份失败：%d %s", auth.code, auth.body)
+	}
+	if got := withCookie(t, s, http.MethodGet, "/fs/settings", c, nil); got.code != http.StatusOK {
+		t.Fatalf("会话读设置失败：%d %s", got.code, got.body)
+	}
+	if got := withCookie(t, s, http.MethodGet, "/fs/keys", c, nil); got.code != http.StatusOK {
+		t.Fatalf("会话读密钥面板失败：%d %s", got.code, got.body)
+	}
+	// withCookie 不支持 body；手动带 cookie 发 POST。
+	r := httptest.NewRequest(http.MethodPost, "/fs/keys",
+		strings.NewReader(`{"name":"分享","scope":"/","kind":"read"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.AddCookie(c)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	res := w.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("会话创建分享失败：%d %s", res.StatusCode, b)
+	}
+}

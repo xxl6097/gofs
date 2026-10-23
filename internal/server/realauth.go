@@ -56,24 +56,31 @@ func (s *Server) shareTokenAllowed(r *http.Request, k *uploadkey.Key, urlPath st
 // 或路径已被删除）。root 内的软链会返回它**目标**的 URL，因此调用方可以
 // 用目标路径再跑一次 ACL。
 func (s *Server) realURLOf(abs string) (string, bool) {
-	real, err := fsutil.ResolveReal(abs)
-	if err != nil {
-		return "", false
-	}
-	rel, err := s.res.Rel(real)
-	if err != nil {
-		return "", false
-	}
-	return rel, true
+	rel, _, ok := s.realPathOf(abs)
+	return rel, ok
 }
 
-// realPermOf 计算磁盘目标真实路径的 URL 与权限。
-func (s *Server) realPermOf(r *http.Request, abs string) (url string, perm auth.Permission, within bool) {
-	rel, ok := s.realURLOf(abs)
-	if !ok {
-		return "", auth.PermNone, false
+// realPathOf 同时返回真实路径对应的服务 URL 和磁盘真实路径。
+func (s *Server) realPathOf(abs string) (rel, real string, ok bool) {
+	real, err := fsutil.ResolveReal(abs)
+	if err != nil {
+		return "", "", false
 	}
-	return rel, s.checkPerm(r, rel), true
+	rel, err = s.res.Rel(real)
+	if err != nil {
+		return "", "", false
+	}
+	return rel, real, true
+}
+
+// realPermOf 计算磁盘目标真实路径的 URL、真实磁盘路径与权限。
+// real 供调用方记录“授权时的目标快照”，打开文件时据此防止软链竞态。
+func (s *Server) realPermOf(r *http.Request, abs string) (url, real string, perm auth.Permission, within bool) {
+	rel, real, ok := s.realPathOf(abs)
+	if !ok {
+		return "", "", auth.PermNone, false
+	}
+	return rel, real, s.checkPerm(r, rel), true
 }
 
 // realPermAllowed 与 requireRealPerm 相同，但不写响应，供遍历辅助函数使用。
@@ -81,9 +88,9 @@ func (s *Server) realPermOf(r *http.Request, abs string) (url string, perm auth.
 // 根外目标：分享/上传密钥没有可表达的路径规则，一律拒绝；普通账号由
 // --allow-symlink 显式决定（该开关的定义就是允许链接指向根外）。
 func (s *Server) realPermAllowed(r *http.Request, abs string, need auth.Permission) bool {
-	_, perm, within := s.realPermOf(r, abs)
+	_, _, perm, within := s.realPermOf(r, abs)
 	if !within {
-		return s.cfg.AllowSymlink && shareTokenOf(r) == "" && uploadKeyToken(r) == ""
+		return s.cfg.AllowSymlink && s.shareTokenOf(r) == "" && uploadKeyToken(r) == ""
 	}
 	return perm >= need
 }
@@ -91,8 +98,21 @@ func (s *Server) realPermAllowed(r *http.Request, abs string, need auth.Permissi
 // requireRealPerm 在请求路径权限之外，再按磁盘真实路径复核一次。
 // 这是软链绕过 ACL 的修复点：请求路径可以命中较宽的规则，链接目标却可能
 // 落在另一条更严格的规则下。
-func (s *Server) requireRealPerm(w http.ResponseWriter, r *http.Request, abs string, need auth.Permission) bool {
-	if s.realPermAllowed(r, abs, need) {
+func (s *Server) requireRealPerm(w http.ResponseWriter, r *http.Request, urlPath, abs string, need auth.Permission) bool {
+	realURL, realAbs, perm, within := s.realPermOf(r, abs)
+	// 把授权时看到的真实目标记入请求快照；后续 secureOpen* 会用它做
+	// inode 复核，防止检查完再换软链。
+	s.noteAuthorizedPath(r, urlPath, realAbs)
+	if realURL != urlPath {
+		s.noteAuthorizedPath(r, realURL, realAbs)
+	}
+	ok := false
+	if within {
+		ok = perm >= need
+	} else {
+		ok = s.cfg.AllowSymlink && s.shareTokenOf(r) == "" && uploadKeyToken(r) == ""
+	}
+	if ok {
 		return true
 	}
 	http.Error(w, "403 Forbidden: 没有足够的权限", http.StatusForbidden)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +38,9 @@ func TestSavePartRenamesTempFile(t *testing.T) {
 	defer src.Close()
 
 	dst := filepath.Join(dir, "final.bin")
-	if err := savePart(dst, src); err != nil {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := s.savePart(r, "/final.bin", dst, src); err != nil {
 		t.Fatalf("savePart: %v", err)
 	}
 
@@ -69,7 +72,9 @@ func TestSavePartCopiesGenericReader(t *testing.T) {
 	payload := []byte("in-memory section")
 	dst := filepath.Join(dir, "copied.bin")
 
-	if err := savePart(dst, bytes.NewReader(payload)); err != nil {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := s.savePart(r, "/copied.bin", dst, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("savePart: %v", err)
 	}
 	got, err := os.ReadFile(dst)

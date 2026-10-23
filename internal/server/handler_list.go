@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -294,7 +295,7 @@ func (s *Server) hardenIndex(w http.ResponseWriter) {
 }
 
 // tryServeIndex 在目录下尝试返回 index.html。
-func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir string) bool {
+func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, urlPath, dir string) bool {
 	idx := filepath.Join(dir, "index.html")
 	if !s.cfg.AllowSymlink {
 		// 不服务指向根外的 index.html：它会被浏览器当成同源页面执行。
@@ -307,10 +308,20 @@ func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir strin
 		return false
 	}
 	// index.html 本身也可能是软链/大小写别名：按真实目标复核读权限。
-	if !s.realPermAllowed(r, idx, auth.PermRead) {
+	realURL, realAbs, perm, within := s.realPermOf(r, idx)
+	idxURL := path.Join(urlPath, "index.html")
+	if within {
+		if perm < auth.PermRead {
+			return false
+		}
+		s.noteAuthorizedPath(r, idxURL, realAbs)
+		if realURL != idxURL {
+			s.noteAuthorizedPath(r, realURL, realAbs)
+		}
+	} else if !s.cfg.AllowSymlink || s.shareTokenOf(r) != "" || uploadKeyToken(r) != "" {
 		return false
 	}
-	f, err := os.Open(idx)
+	f, err := s.secureOpenRead(r, idxURL, idx)
 	if err != nil {
 		return false
 	}
@@ -333,11 +344,21 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !s.realPermAllowed(r, idx, auth.PermRead) {
+	realURL, realAbs, perm, within := s.realPermOf(r, idx)
+	if within {
+		if perm < auth.PermRead {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
+		s.noteAuthorizedPath(r, "/index.html", realAbs)
+		if realURL != "/index.html" {
+			s.noteAuthorizedPath(r, realURL, realAbs)
+		}
+	} else if !s.cfg.AllowSymlink || s.shareTokenOf(r) != "" || uploadKeyToken(r) != "" {
 		http.Error(w, "404 Not Found", http.StatusNotFound)
 		return
 	}
-	f, err := os.Open(idx)
+	f, err := s.secureOpenRead(r, "/index.html", idx)
 	if err != nil {
 		if s.ui.notFound != nil {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")

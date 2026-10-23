@@ -2,7 +2,9 @@ package githubupgrade
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -268,4 +270,51 @@ func execSelf(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestFetchChecksumRequiresValidSignature 确认配置公钥后，校验和文件必须
+// 带有效 Ed25519 签名；换掉校验和会让升级在落地前中止。
+func TestFetchChecksumRequiresValidSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sums := []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  gofs-linux-amd64\n")
+	sig := ed25519.Sign(priv, sums)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/checksums.txt":
+			_, _ = w.Write(sums)
+		case "/checksums.txt.sig":
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(sig)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	u := &Upgrader{
+		checksumsName: "checksums.txt",
+		signatureName: "checksums.txt.sig",
+		publicKey:     pub,
+		client:        srv.Client(),
+	}
+	rel := ghRelease{Assets: []ghAsset{
+		{Name: "checksums.txt", URL: srv.URL + "/checksums.txt"},
+		{Name: "checksums.txt.sig", URL: srv.URL + "/checksums.txt.sig"},
+	}}
+	got, err := u.fetchChecksum(context.Background(), rel, "gofs-linux-amd64")
+	if err != nil {
+		t.Fatalf("签名校验失败: %v", err)
+	}
+	if got != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+		t.Fatalf("摘要 = %q", got)
+	}
+
+	// 篡改校验和：签名必须失败。
+	sums = []byte("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  gofs-linux-amd64\n")
+	if _, err := u.fetchChecksum(context.Background(), rel, "gofs-linux-amd64"); err == nil {
+		t.Fatal("被篡改的校验和通过了签名验证")
+	}
 }

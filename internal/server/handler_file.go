@@ -128,7 +128,11 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 大小写别名落到另一条规则下。handleRoot 复核的是**改写前**的 URL，
 	// 改写之后必须按真实目标再复核一次 —— 否则根内一条 `2026 -> private`
 	// 的软链就能把写入重定向到没有写权限的目录；上传密钥同理，会越过 scope。
-	if realURL, realPerm, within := s.realPermOf(r, abs); within {
+	if realURL, realAbs, realPerm, within := s.realPermOf(r, abs); within {
+		s.noteAuthorizedPath(r, destPath, realAbs)
+		if realURL != destPath {
+			s.noteAuthorizedPath(r, realURL, realAbs)
+		}
 		if realURL != destPath {
 			if p.UploadKey != nil {
 				if !s.uploadKeyAllowed(r, p.UploadKey, realURL) {
@@ -141,7 +145,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 				return
 			}
 		}
-	} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+	} else if p.UploadKey != nil || s.shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
 		http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
 		return
 	}
@@ -173,8 +177,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 		return
 	}
 
-	f, err := os.OpenFile(abs, flags, 0o644)
+	f, err := s.secureOpenWrite(r, destPath, abs, flags, 0o644)
 	if err != nil {
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 目标路径在请求期间发生变化，请重试", http.StatusConflict)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}
@@ -332,7 +340,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 				return
 			}
 		}
-	} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+	} else if p.UploadKey != nil || s.shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
 		http.Error(w, "403 Forbidden: 目标目录超出服务范围", http.StatusForbidden)
 		return
 	}
@@ -342,6 +350,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 	type uploadTarget struct {
 		fh  *multipart.FileHeader
 		dst string
+		url string
 	}
 	targets := make([]uploadTarget, 0, len(files))
 	skipped := make([]string, 0)
@@ -372,7 +381,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 			return
 		}
 		// 目标目录/叶子可能是软链或大小写别名：按真实路径再复核一次。
-		if realURL, within := s.realURLOf(dst); within {
+		if realURL, realAbs, within := s.realPathOf(dst); within {
+			s.noteAuthorizedPath(r, fileURL, realAbs)
 			if p.UploadKey != nil {
 				if !s.uploadKeyAllowed(r, p.UploadKey, realURL) {
 					http.Error(w, "403 Forbidden: 上传目标超出该密钥允许的范围，或创建者已无对应权限",
@@ -383,7 +393,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 				http.Error(w, "403 Forbidden: 对目标文件的真实路径没有写权限", http.StatusForbidden)
 				return
 			}
-		} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+		} else if p.UploadKey != nil || s.shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
 			http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
 			return
 		}
@@ -399,7 +409,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 				return
 			}
 		}
-		targets = append(targets, uploadTarget{fh: fh, dst: dst})
+		targets = append(targets, uploadTarget{fh: fh, dst: dst, url: fileURL})
 	}
 
 	// 整批校验全部通过后才创建目标目录，避免“前几个文件越权、目录却已建好”
@@ -418,9 +428,13 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 			s.writeErr(w, err)
 			return
 		}
-		err = savePart(t.dst, src)
+		err = s.savePart(r, t.url, t.dst, src)
 		src.Close()
 		if err != nil {
+			if errors.Is(err, errPathChanged) {
+				http.Error(w, "409 Conflict: 目标路径在请求期间发生变化，请重试", http.StatusConflict)
+				return
+			}
 			s.writeErr(w, err)
 			return
 		}
@@ -446,7 +460,19 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 // 所以：如果 src 就是那个临时文件（*os.File），且目标与临时文件在同一个文件系统，
 // 直接 rename 过去即可 —— 那是纯元数据操作，不搬数据。跨文件系统（EXDEV，比如
 // /tmp 是 tmpfs 而数据盘在别处）时 rename 会失败，退回按字节拷贝。
-func savePart(dst string, src io.Reader) error {
+func (s *Server) savePart(r *http.Request, urlPath, dst string, src io.Reader) error {
+	// 授权时记录了真实目标：rename 也用这条**已经解析过软链**的路径，
+	// 否则攻击者只要把 dst 路径上的某一级目录换成软链，rename 就会改道。
+	// 同时复核快照里的父目录没有被替换。
+	if ap := s.authorizedPathFor(r, urlPath); ap != nil {
+		if err := s.verifyAuthorizedParent(r, urlPath); err != nil {
+			return err
+		}
+		if ap.real == "" {
+			return errPathChanged
+		}
+		dst = ap.real
+	}
 	if f, ok := src.(*os.File); ok && f.Name() != "" {
 		if err := os.Rename(f.Name(), dst); err == nil {
 			// 临时文件是 0600，rename 不改权限；补齐成普通上传文件的 0644。
@@ -455,10 +481,33 @@ func savePart(dst string, src io.Reader) error {
 			return nil
 		}
 	}
-	return writeAll(dst, src)
+	return s.writeAllAuthorized(r, urlPath, dst, src)
 }
 
-// writeAll 把 src 全量写入 dst。
+// writeAllAuthorized 在授权快照复核通过后把 src 写入 dst。
+func (s *Server) writeAllAuthorized(r *http.Request, urlPath, dst string, src io.Reader) error {
+	// 与 rename 分支同理：目录创建与写入都走授权时解析出的真实路径，
+	// 不再重新跟随可能被替换的软链。
+	if ap := s.authorizedPathFor(r, urlPath); ap != nil {
+		if ap.real == "" {
+			return errPathChanged
+		}
+		dst = ap.real
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	f, err := s.secureOpenWrite(r, urlPath, dst,
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = copyUpload(f, src)
+	return err
+}
+
+// writeAll 把 src 全量写入 dst（内部复制兜底，没有 HTTP 授权上下文）。
 func writeAll(dst string, src io.Reader) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -645,7 +694,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 			http.Error(w, "403 Forbidden: 对目标真实路径没有写权限", http.StatusForbidden)
 			return
 		}
-	} else if shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+	} else if s.shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
 		http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
 		return
 	}

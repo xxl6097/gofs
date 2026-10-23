@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/tls"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -217,4 +219,74 @@ func TestAuthFailKeyIsFixedLength(t *testing.T) {
 
 func strconvQuote(s string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+// TestHostPrefixedSessionCookieIgnoresLegacy 钉住 HTTPS 根路径下的
+// __Host- Cookie：旧名字不再被采信，子域无法用 Domain Cookie 覆盖会话。
+func TestHostPrefixedSessionCookieIgnoresLegacy(t *testing.T) {
+	s := newTestServer(t, testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw"))
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	s.setSessionCookie(w, r, "tok", false)
+	raw := strings.Join(w.Result().Header.Values("Set-Cookie"), "\n")
+	for _, want := range []string{sessionCookieHostName + "=tok", "Secure", "Path=/"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("Set-Cookie 缺少 %q：%s", want, raw)
+		}
+	}
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.TLS = &tls.ConnectionState{}
+	r2.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "attacker"})
+	if got := s.sessionToken(r2); got != "" {
+		t.Fatalf("HTTPS 根路径仍采信了旧 Cookie：%q", got)
+	}
+	r2.AddCookie(&http.Cookie{Name: sessionCookieHostName, Value: "tok"})
+	if got := s.sessionToken(r2); got != "tok" {
+		t.Fatalf("__Host- Cookie 没被采信：%q", got)
+	}
+}
+
+// TestAuthorizedOpenDetectsReplacement 钉住 TOCTOU 复核：
+// 授权后被换掉的文件不能继续按旧权限打开。
+func TestAuthorizedOpenDetectsReplacement(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(a, []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := snapshotAuthorized(a)
+	if _, err := snap.openRead(); err != nil {
+		t.Fatalf("授权后立即打开失败: %v", err)
+	}
+	if err := os.Rename(b, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snap.openRead(); !errors.Is(err, errPathChanged) {
+		t.Fatalf("替换后的文件未被识别：%v", err)
+	}
+}
+
+// TestAuthorizedOpenRejectsSymlinkAtCreation 确认新建路径在授权后变成
+// 软链时不会被跟随写入。
+func TestAuthorizedOpenRejectsSymlinkAtCreation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	link := filepath.Join(dir, "new.txt")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := snapshotAuthorized(link)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("本环境不支持软链：%v", err)
+	}
+	if _, err := snap.openWrite(os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); !errors.Is(err, errPathChanged) {
+		t.Fatalf("软链未被拒绝：%v", err)
+	}
 }

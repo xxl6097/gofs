@@ -114,7 +114,7 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.requireRealPerm(w, r, abs, auth.PermRead) {
+	if !s.requireRealPerm(w, r, clean, abs, auth.PermRead) {
 		return
 	}
 
@@ -137,7 +137,7 @@ func (s *Server) textRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := os.ReadFile(abs)
+	raw, err := s.readFileAuthorized(r, clean, abs)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -240,7 +240,7 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "403 Forbidden: 保存需要读写权限", http.StatusForbidden)
 		return
 	}
-	if !s.requireRealPerm(w, r, abs, auth.PermReadWrite) {
+	if !s.requireRealPerm(w, r, clean, abs, auth.PermReadWrite) {
 		return
 	}
 
@@ -257,7 +257,7 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 		baseInfo = st
 		// 只在体积可控时读原内容，避免为了判定换行把大文件整个读进内存。
 		if st.Size() <= s.settings.EditMaxSize() {
-			existing, _ = os.ReadFile(abs)
+			existing, _ = s.readFileAuthorized(r, clean, abs)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		s.writeErr(w, err)
@@ -317,6 +317,10 @@ func (s *Server) textSave(w http.ResponseWriter, r *http.Request) {
 		created = false
 	}
 
+	if err := s.verifyAuthorizedParent(r, clean); err != nil {
+		http.Error(w, "409 Conflict: 目标路径在请求期间发生变化，请重试", http.StatusConflict)
+		return
+	}
 	if err := atomicWriteFile(abs, out, mode); err != nil {
 		s.writeErr(w, err)
 		return

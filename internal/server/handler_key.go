@@ -83,28 +83,46 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	// 管理密钥的门槛。先验凭据，再看是否在任一目录上有写权限。
 	user, pass, hasCred, class := credentialsWithSource(r)
 	admin := !s.auth.Enabled()
+	fromSession := false
 	if s.auth.Enabled() {
-		// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
-		// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
-		ip, ok := s.checkAuthLimit(w, r, class, user)
-		if !ok {
-			return
-		}
-		if !hasCred || !s.auth.Verify(user, pass) {
-			if hasCred {
+		if hasCred && user != "" {
+			// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
+			// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
+			ip, ok := s.checkAuthLimit(w, r, class, user)
+			if !ok {
+				return
+			}
+			if !s.auth.Verify(user, pass) {
 				s.noteAuthFailure(ip, class, user)
+				if shouldChallenge(r) {
+					w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+				}
+				http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+				return
 			}
-			if shouldChallenge(r) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+			s.noteVerifiedUser(r, user)
+			s.noteAuthSuccess(ip, class, user)
+			admin = s.auth.PermFor(user, "/") == auth.PermReadWrite
+		} else {
+			// 页面刷新后没有 Basic 密码可用了，改用 HttpOnly 会话。
+			u, ok := s.auth.ResolveSession(s.sessionToken(r))
+			if !ok || u == "" {
+				if shouldChallenge(r) {
+					w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
+				}
+				http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
+				return
 			}
-			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
-			return
+			user = u
+			fromSession = true
+			admin = s.auth.PermFor(user, "/") == auth.PermReadWrite
 		}
-		s.noteVerifiedUser(r, user)
-		s.noteAuthSuccess(ip, class, user)
-		admin = s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
 	}
-	if !s.auth.HasAnyWrite(user, pass, hasCred) {
+	hasWrite := s.auth.HasAnyWrite(user, pass, hasCred)
+	if fromSession {
+		hasWrite = s.auth.HasAnyWriteUser(user)
+	}
+	if !hasWrite {
 		http.Error(w, "403 Forbidden: 管理上传密钥需要有可写的目录权限", http.StatusForbidden)
 		return
 	}
@@ -113,7 +131,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		s.keyList(w, user, admin)
 	case http.MethodPost:
-		s.keyCreate(w, r, user, pass)
+		s.keyCreate(w, r, user, pass, fromSession)
 	case http.MethodDelete:
 		s.keyRevoke(w, r, user, admin)
 	default:
@@ -152,7 +170,7 @@ func (s *Server) keyList(w http.ResponseWriter, user string, admin bool) {
 // creator/password 来自 handleKeys 已校验过的账号凭据。范围授权只按这个
 // 账号计算，**不能**走 checkPerm —— 后者会优先识别 ?share= / 分享 cookie，
 // 于是一个临时分享令牌就能换来一把永久密钥。
-func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator, password string) {
+func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator, password string, fromSession bool) {
 	var req keyCreateRequest
 	resetRead := withBodyReadDeadline(w, apiBodyReadTimeout)
 	defer resetRead()
@@ -205,9 +223,15 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator, pass
 		needDesc = "读写"
 	}
 	scope := fsutil.CleanURLPath(req.Scope)
-	// ⚠️ 只用账号凭据计算权限。checkPerm 会优先识别分享令牌，
+	// ⚠️ 只用账号身份/会话身份计算权限。checkPerm 会优先识别分享令牌，
 	// 那会让一条临时分享变成永久密钥/分享（见 handler_key 顶部注释）。
-	if sp := s.auth.Lookup(scope, creator, password, true); sp < need {
+	var sp auth.Permission
+	if fromSession {
+		sp = s.auth.PermFor(creator, scope)
+	} else {
+		sp = s.auth.Lookup(scope, creator, password, true)
+	}
+	if sp < need {
 		http.Error(w, fmt.Sprintf("403 Forbidden: 你对 %s 没有%s权限，无法签发该范围的凭证", scope, needDesc),
 			http.StatusForbidden)
 		return

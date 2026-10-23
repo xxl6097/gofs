@@ -577,6 +577,70 @@ func (a *Authenticator) ReadPaths(username, password string, authenticated bool)
 	return out
 }
 
+// HomePathFor 与 HomePath 相同，但只按**已确认的账号名**计算，供会话
+// Cookie 使用（会话里没有密码，也没有必要在每次请求时重验）。
+func (a *Authenticator) HomePathFor(username string) string {
+	if a == nil || !a.Enabled() {
+		return "/"
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	acc := a.lookupAccount(username)
+	if acc == nil {
+		return ""
+	}
+	best := ""
+	bestPerm := PermNone
+	for _, r := range acc.Rules {
+		if r.Perm == PermNone {
+			continue
+		}
+		if best == "" || r.Perm > bestPerm || (r.Perm == bestPerm && len(r.Path) < len(best)) {
+			best, bestPerm = r.Path, r.Perm
+		}
+	}
+	return best
+}
+
+// ReadPathsFor 与 ReadPaths 相同，但只按已确认的账号名计算。
+func (a *Authenticator) ReadPathsFor(username string) []string {
+	if a == nil || !a.Enabled() {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	acc := a.lookupAccount(username)
+	if acc == nil {
+		return nil
+	}
+	out := make([]string, 0, len(acc.Rules))
+	for _, r := range acc.Rules {
+		if r.Perm != PermNone {
+			out = append(out, r.Path)
+		}
+	}
+	return out
+}
+
+// HasAnyWriteUser 与 HasAnyWrite 相同，但只按已确认的账号名计算。
+func (a *Authenticator) HasAnyWriteUser(username string) bool {
+	if a == nil || !a.Enabled() {
+		return true
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	acc := a.lookupAccount(username)
+	if acc == nil {
+		return false
+	}
+	for _, r := range acc.Rules {
+		if r.Perm == PermReadWrite {
+			return true
+		}
+	}
+	return false
+}
+
 // NeedsAuth 判断该路径是否要求客户端提供凭据（用于决定是否回 401 挑战）。
 func (a *Authenticator) NeedsAuth(urlPath string) bool {
 	if !a.Enabled() {

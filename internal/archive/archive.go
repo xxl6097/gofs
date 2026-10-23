@@ -97,6 +97,10 @@ type Options struct {
 	// Extract 中会被跳过、不计数。只检查截断后的前缀会让后面的真实
 	// 文件完全绕过 ACL。
 	Authorize func(rel string) error
+	// OpenWrite 可选：替换默认的 os.OpenFile，供调用方用 os.Root 或
+	// 其它安全打开方式落盘。target 是绝对路径，flags/perm 与 os.OpenFile
+	// 相同。为 nil 时退回 os.OpenFile。
+	OpenWrite func(target string, flags int, perm fs.FileMode) (*os.File, error)
 }
 
 // authorizeWrite 在落盘前执行调用方提供的逐条目授权。
@@ -223,6 +227,13 @@ func Open(filename string) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return OpenFile(f, filename)
+}
+
+// OpenFile 与 Open 相同，但使用调用方已经打开（并已完成安全校验）的文件。
+//
+// 所有权转移给 Reader：成功时由 Reader.Close 关闭，失败时由本函数关闭。
+func OpenFile(f *os.File, filename string) (Reader, error) {
 	head := make([]byte, 512)
 	n, err := io.ReadFull(f, head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
@@ -230,6 +241,11 @@ func Open(filename string) (Reader, error) {
 		return nil, err
 	}
 	head = head[:n]
+	// 后续 reader 会自行 Seek(0) 重新扫描；这里只读文件头做格式嗅探。
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
 
 	format := Detect(filename, head)
 	switch format {
@@ -504,7 +520,13 @@ func writeFile(target string, src io.Reader, opts Options, limit *limiter, compr
 		}
 	}
 	// 恒用 0644，忽略包内权限位。
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	var f *os.File
+	var err error
+	if opts.OpenWrite != nil {
+		f, err = opts.OpenWrite(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	} else {
+		f, err = os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	}
 	if err != nil {
 		return 0, err
 	}
