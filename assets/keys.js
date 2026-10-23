@@ -121,14 +121,119 @@
     createRow.appendChild(createBtn);
     createBox.appendChild(createRow);
 
-    // 列表区
+    // 列表区：标题与批量操作放在同一行
+    var listHead = document.createElement('div');
+    listHead.className = 'key-list-head';
+
     var listTitle = document.createElement('div');
     listTitle.className = 'key-list-title';
-    body.appendChild(listTitle);
+    listHead.appendChild(listTitle);
+
+    var listTools = document.createElement('div');
+    listTools.className = 'key-bulk';
+
+    var selectAllLabel = document.createElement('label');
+    selectAllLabel.className = 'key-select-all';
+    var selectAll = document.createElement('input');
+    selectAll.type = 'checkbox';
+    selectAll.disabled = true;
+    var selectAllText = document.createElement('span');
+    selectAllText.textContent = '全选';
+    selectAllLabel.appendChild(selectAll);
+    selectAllLabel.appendChild(selectAllText);
+    listTools.appendChild(selectAllLabel);
+
+    var bulkBtn = G.btn('撤销所选', 'danger', function () { revokeSelected(); });
+    bulkBtn.classList.add('btn-sm');
+    bulkBtn.disabled = true;
+    listTools.appendChild(bulkBtn);
+    listHead.appendChild(listTools);
+    body.appendChild(listHead);
 
     var listBox = document.createElement('div');
     listBox.className = 'key-list';
     body.appendChild(listBox);
+
+    var currentKeys = [];
+    var selected = {};
+
+    function selectedCount() {
+      var n = 0;
+      for (var id in selected) {
+        if (Object.prototype.hasOwnProperty.call(selected, id)) n++;
+      }
+      return n;
+    }
+
+    function updateBulk() {
+      var n = selectedCount();
+      bulkBtn.textContent = n ? '撤销所选（' + n + '）' : '撤销所选';
+      bulkBtn.disabled = n === 0;
+      selectAll.disabled = currentKeys.length === 0;
+      selectAll.checked = currentKeys.length > 0 && n === currentKeys.length;
+      selectAll.indeterminate = n > 0 && n < currentKeys.length;
+    }
+
+    function setAllChecked(checked) {
+      selected = {};
+      if (checked) {
+        currentKeys.forEach(function (k) { selected[k.id] = k; });
+      }
+      var boxes = listBox.querySelectorAll('.key-check input');
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].checked = checked;
+        var item = boxes[i].closest ? boxes[i].closest('.key-item') : null;
+        if (item) item.classList.toggle('selected', checked);
+      }
+      updateBulk();
+    }
+
+    selectAll.onchange = function () { setAllChecked(selectAll.checked); };
+
+    function revokeSelected() {
+      var items = currentKeys.filter(function (k) { return selected[k.id]; });
+      if (!items.length) return;
+      var names = items.slice(0, 3).map(function (k) { return '「' + k.name + '」'; }).join('、');
+      if (items.length > 3) names += ' 等 ' + items.length + ' 个';
+      G.confirm({
+        title: '撤销所选密钥',
+        message: '确定要撤销选中的 ' + items.length + ' 个密钥吗？',
+        detail: names + ' 会立即失效，使用它们的脚本将收到 401，且无法恢复。',
+        okLabel: '撤销',
+        danger: true
+      }).then(function (yes) {
+        if (yes) bulkRevoke(items);
+      });
+    }
+
+    async function bulkRevoke(items) {
+      bulkBtn.disabled = true;
+      bulkBtn.textContent = '撤销中…';
+      var ok = 0;
+      var failed = [];
+      for (var i = 0; i < items.length; i++) {
+        var k = items[i];
+        bulkBtn.textContent = '撤销中…（' + (i + 1) + '/' + items.length + '）';
+        try {
+          var res = await G.apiFetch(KEYS_EP + '?id=' + encodeURIComponent(k.id),
+            { method: 'DELETE' });
+          if (res.status !== 204 && !res.ok) {
+            throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+          }
+          ok++;
+        } catch (e) {
+          failed.push('「' + k.name + '」：' + e.message);
+        }
+      }
+      selected = {};
+      await load();
+      if (failed.length) {
+        G.toast('err', '已撤销 ' + ok + ' 个，' + failed.length +
+          ' 个失败。' + failed[0], 6000);
+      } else {
+        G.toast('ok', '已撤销 ' + ok + ' 个密钥');
+      }
+    }
 
     // ---- 创建 ----
 
@@ -208,25 +313,72 @@
       // 用法就是下面这一行，不用存文件、不用改任何地方。
       var scriptURL = base + '/up?key=' + encodeURIComponent(token);
       var samples = [
-        ['一键脚本上传（推荐）',
-          'bash <(curl -sS "' + scriptURL + '") 文件或目录... [目标子目录]\n' +
-          '# 目录会连层级一起上传；不带目标子目录就传到 ' + data.key.scope],
-        ['请求头',
-          "curl -T local.txt -H 'X-Gofs-Upload-Key: " + token + "' \"" + base + target + "\""],
-        ['查询参数',
-          'curl -T local.txt "' + base + target + '?key=' + token + '"'],
-        ['保存脚本备用',
-          'curl -sSLo gofs-up.sh "' + scriptURL + '" && chmod +x gofs-up.sh']
+        {
+          label: '一键脚本上传（推荐）',
+          // 复制的只有命令本身；文件/目录参数另行展示，粘进终端后自己补。
+          cmd: 'bash <(curl -sS "' + scriptURL + '")',
+          example: 'bash <(curl -sS "' + scriptURL + '") 文件或目录... [目标子目录]',
+          note: '目录会连层级一起上传；不带目标子目录就传到 ' + data.key.scope
+        },
+        {
+          label: '请求头',
+          cmd: "curl -T local.txt -H 'X-Gofs-Upload-Key: " + token + "' \"" + base + target + "\""
+        },
+        {
+          label: '查询参数',
+          cmd: 'curl -T local.txt "' + base + target + '?key=' + token + '"'
+        },
+        {
+          label: '保存脚本备用',
+          cmd: 'curl -sSLo gofs-up.sh "' + scriptURL + '" && chmod +x gofs-up.sh'
+        }
       ];
       samples.forEach(function (s) {
+        // 标签与「复制」放在同一行：命令普遍很长，复制按钮贴着标签更显眼，
+        // 也不用在 pre 上浮一层（长命令折行时浮层会跟着错位）。
+        var head = document.createElement('div');
+        head.className = 'key-usage-head';
         var lb = document.createElement('div');
         lb.className = 'key-usage-label';
-        lb.textContent = s[0];
-        usage.appendChild(lb);
+        lb.textContent = s.label;
+        head.appendChild(lb);
+
+        var copy = G.btn('复制', 'btn-sm', function () {
+          copyText(s.cmd).then(function () {
+            copy.textContent = '已复制 ✓';
+            copy.disabled = true;
+            setTimeout(function () {
+              copy.textContent = '复制';
+              copy.disabled = false;
+            }, 2000);
+          }).catch(function (e) {
+            G.toast('err', '复制失败：' + e.message);
+          });
+        });
+        copy.title = '复制这段命令';
+        copy.setAttribute('aria-label', '复制「' + s.label + '」命令');
+        head.appendChild(copy);
+        usage.appendChild(head);
+
         var pre = document.createElement('pre');
         pre.className = 'ed-code key-cmd';
-        pre.textContent = s[1];
+        pre.textContent = s.cmd;
         usage.appendChild(pre);
+
+        // 带参数的完整用法单独展示：不在复制内容里，避免把占位符
+        // 当成真实路径粘进终端。
+        if (s.example) {
+          var ex = document.createElement('div');
+          ex.className = 'key-usage-example';
+          ex.textContent = '示例：' + s.example;
+          usage.appendChild(ex);
+        }
+        if (s.note) {
+          var note = document.createElement('div');
+          note.className = 'key-usage-note';
+          note.textContent = s.note;
+          usage.appendChild(note);
+        }
       });
       box.appendChild(usage);
 
@@ -259,6 +411,12 @@
       var data = await res.json();
       var keys = data.keys || [];
 
+      currentKeys = keys;
+      selected = {};
+      selectAll.checked = false;
+      selectAll.indeterminate = false;
+      updateBulk();
+
       listTitle.textContent = '已有密钥（' + keys.length + '）' +
         (data.persistent ? '' : '　·　当前为内存存储，重启后失效');
 
@@ -272,7 +430,24 @@
 
       keys.forEach(function (k) {
         var item = document.createElement('div');
-        item.className = 'key-item' + (k.status === 'expired' ? ' expired' : '');
+        item.className = 'key-item selectable' + (k.status === 'expired' ? ' expired' : '');
+
+        var checkWrap = document.createElement('label');
+        checkWrap.className = 'key-check';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.setAttribute('aria-label', '选择「' + k.name + '」');
+        cb.onchange = function () {
+          if (cb.checked) {
+            selected[k.id] = k;
+          } else {
+            delete selected[k.id];
+          }
+          item.classList.toggle('selected', cb.checked);
+          updateBulk();
+        };
+        checkWrap.appendChild(cb);
+        item.appendChild(checkWrap);
 
         var main = document.createElement('div');
         main.className = 'key-main';

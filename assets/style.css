@@ -2866,6 +2866,33 @@ html.booting body::after {
 
 .key-list { display: flex; flex-direction: column; gap: var(--space-2); }
 
+/* 标题与「全选 / 删除所选」同一行；窄屏自动换行。 */
+.key-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 20px 0 10px;
+}
+.key-list-head .key-list-title { margin: 0; }
+.key-bulk { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.key-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.key-check input,
+.key-select-all input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .key-item {
   display: flex;
   align-items: flex-start;
@@ -2877,6 +2904,19 @@ html.booting body::after {
   background: var(--bg-elev);
 }
 .key-item.expired { opacity: .62; }
+
+/* 只有密钥列表带选择框；用户列表复用 .key-item，不受影响。 */
+.key-item.selectable { position: relative; padding-left: 44px; }
+.key-item.selected { border-color: var(--accent); background: var(--accent-soft); }
+.key-check {
+  position: absolute;
+  left: 12px;
+  top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
 
 .key-main { min-width: 0; flex: 1; }
 .key-name {
@@ -2961,16 +3001,37 @@ html.booting body::after {
   color: var(--text-dim);
   margin-bottom: 8px;
 }
+.key-usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0 5px;
+}
 .key-usage-label {
   font-size: var(--fs-xs);
   color: var(--text-mute);
-  margin: 10px 0 5px;
+  margin: 0;
 }
+.key-usage-head .btn { flex: none; }
 .key-cmd {
   font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-all;
 }
+.key-usage-example,
+.key-usage-note {
+  margin-top: 5px;
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.key-usage-example {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.key-usage-note { color: var(--text-mute); }
 
 /* ---------------------------------------------------------------- 触摸设备 */
 
@@ -2991,6 +3052,10 @@ html.booting body::after {
   .ops-more { width: 40px; height: 40px; justify-content: center; padding: 0; }
   .checkbox input,
   .login-remember input { width: 20px; height: 20px; }
+  /* 密钥列表的勾选框与「全选」同样按触摸目标放大。 */
+  .key-check { left: 0; top: 6px; min-width: 40px; min-height: 40px; }
+  .key-item.selectable { padding-left: 50px; }
+  .key-select-all { min-height: 40px; }
   /* 「全选」也算一个可点目标，撑到 40px 高。 */
   .checkbox { min-height: 40px; }
   /* 记住我是整行可点的 label，别让可点高度只有文字那一行。 */
