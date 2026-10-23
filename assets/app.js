@@ -116,6 +116,7 @@
       DATA.read_paths = info.read_paths;
     }
     if (info.user !== undefined) DATA.user = info.user;
+    if (typeof info.user_from_startup === 'boolean') DATA.user_from_startup = info.user_from_startup;
     if (typeof info.auth_on === 'boolean') DATA.auth_on = info.auth_on;
   }
 
@@ -701,12 +702,160 @@
     });
   }
 
+  // openPasswordDialog 让当前登录账号修改自己的密码。
+  //
+  // 服务端要求再验一次当前密码：会话 cookie 可能是被窃取的，若只凭 cookie
+  // 就能改密，攻击者一进门就能把主人锁在外面。改密成功后该账号的所有
+  // 会话、上传密钥与分享都会失效 —— 它会连同本次会话一起被踢下线，
+  // 所以这里成功后直接回到登录框，让用户用新密码重新登录。
+  function openPasswordDialog() {
+    if (!DATA.auth_on) {
+      G.toast('warn', '当前未启用鉴权，没有可修改的账户密码');
+      return;
+    }
+    if (!DATA.user) {
+      showLogin('请先登录');
+      return;
+    }
+    // 启动参数里的账号密码以命令行为准。提前说明原因，别让用户填完
+    // 表单才收到「来自启动参数」的拒绝 —— 那种失败看起来像后端故障。
+    if (DATA.user_from_startup) {
+      G.confirm({
+        title: '无法在页面上修改密码',
+        message: '账号 **' + DATA.user + '** 来自启动参数（-a / GOFS_AUTH）。',
+        detail: '请修改命令行参数后重启服务。运行期的改动会在下次启动时' +
+          '被命令行覆盖，所以这里不提供修改入口。',
+        okLabel: '知道了'
+      });
+      return;
+    }
+
+    var body = document.createElement('div');
+
+    function pwField(labelText, placeholder, autocomplete) {
+      var field = document.createElement('div');
+      field.className = 'key-field';
+      var label = document.createElement('label');
+      label.textContent = labelText;
+      field.appendChild(label);
+
+      var row = document.createElement('div');
+      row.className = 'pw-row';
+      var input = document.createElement('input');
+      input.type = 'password';
+      input.className = 'key-input';
+      input.placeholder = placeholder;
+      input.autocomplete = autocomplete;
+      row.appendChild(input);
+
+      var show = G.btn('显示', 'btn-sm', function () {
+        var hidden = input.type === 'password';
+        input.type = hidden ? 'text' : 'password';
+        show.textContent = hidden ? '隐藏' : '显示';
+      });
+      row.appendChild(show);
+      field.appendChild(row);
+      body.appendChild(field);
+      return input;
+    }
+
+    var currentInput = pwField('当前密码', '请输入现在使用的密码', 'current-password');
+    var newInput = pwField('新密码', '至少 6 位', 'new-password');
+    var confirmInput = pwField('确认新密码', '再输入一次新密码', 'new-password');
+
+    var errBox = document.createElement('div');
+    errBox.className = 'hint-box danger';
+    errBox.hidden = true;
+    body.appendChild(errBox);
+
+    var hint = document.createElement('div');
+    hint.className = 'key-hint';
+    hint.textContent = '修改后，该账号的所有登录会话、上传密钥与分享链接都会立即失效，' +
+      '需要用新密码重新登录。';
+    body.appendChild(hint);
+
+    var modal = G.openModal({
+      title: '修改密码 · ' + DATA.user,
+      body: body,
+      footer: G.modalFoot([
+        { label: '取消', onClick: function () { modal.close(); } },
+        {
+          id: 'password-submit',
+          label: '修改密码',
+          cls: 'primary',
+          onClick: function () { submit(); }
+        }
+      ])
+    });
+
+    var submitBtn = $('password-submit');
+
+    function fail(msg) {
+      errBox.hidden = false;
+      errBox.textContent = msg;
+    }
+
+    function setBusy(busy) {
+      submitBtn.disabled = busy;
+      submitBtn.textContent = busy ? '提交中…' : '修改密码';
+    }
+
+    async function submit() {
+      errBox.hidden = true;
+      var current = currentInput.value;
+      var next = newInput.value;
+      if (!current) { fail('请输入当前密码'); currentInput.focus(); return; }
+      if (next.length < 6) { fail('新密码至少 6 位'); newInput.focus(); return; }
+      if (next !== confirmInput.value) {
+        fail('两次输入的新密码不一致');
+        confirmInput.focus();
+        return;
+      }
+      if (next === current) {
+        fail('新密码不能与当前密码相同');
+        newInput.focus();
+        return;
+      }
+
+      setBusy(true);
+      try {
+        var res = await G.apiFetch(BASE + '/fs/auth/password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ current_password: current, new_password: next })
+        });
+        if (!res.ok) {
+          var text = (await res.text()).trim() || ('HTTP ' + res.status);
+          // 服务端错误统一写成「403 Forbidden: 当前密码不正确」，
+          // 弹窗里只需要冒号后面那句给人看的话。
+          throw new Error(text.replace(/^\d{3}\s+[^:]+:\s*/, ''));
+        }
+      } catch (e) {
+        // apiFetch 在 401 时已经切到登录界面了，这里不必再叠一条错误。
+        if (e && e.message === '未登录') return;
+        setBusy(false);
+        fail('修改失败：' + (e && e.message ? e.message : '未知错误'));
+        return;
+      }
+
+      modal.close();
+      clearCreds();
+      DATA.user = '';
+      DATA.user_from_startup = false;
+      DATA.auth_required = true;
+      G.toast('ok', '密码已修改，请用新密码重新登录');
+      showLogin('密码已修改，请用新密码重新登录');
+    }
+  }
+
   function updateAuthChip() {
     var chip = $('user-chip');
     var moreOut = $('btn-logout-more');
+    var morePw = $('btn-password-more');
     if (!DATA.auth_on) {
       chip.hidden = true;
       if (moreOut) moreOut.hidden = true;
+      if (morePw) morePw.hidden = true;
       return;
     }
     chip.hidden = false;
@@ -728,7 +877,15 @@
     span.textContent = DATA.user || '匿名';
     chip.appendChild(span);
     if (DATA.user) {
-      // 桌面端：账号芯片里直接露出「退出」。
+      // 桌面端：账号芯片里直接露出「改密」与「退出」。
+      var pwd = document.createElement('button');
+      pwd.type = 'button';
+      pwd.className = 'user-logout';
+      pwd.title = '修改当前账号的密码';
+      pwd.textContent = '改密';
+      pwd.onclick = openPasswordDialog;
+      chip.appendChild(pwd);
+
       var out = document.createElement('button');
       out.type = 'button';
       out.className = 'user-logout';
@@ -737,13 +894,20 @@
       out.onclick = requestLogout;
       chip.appendChild(out);
     }
-    // 手机端：芯片只保留用户名，退出收进「更多」，给面包屑腾出宽度。
+    // 手机端：芯片只保留用户名，改密/退出收进「更多」，给面包屑腾出宽度。
     // 这里的 hidden 只管「有没有登录」，显隐断点交给 CSS。
     if (moreOut) {
       moreOut.hidden = !DATA.user;
       moreOut.onclick = function () {
         if (G.closeMore) G.closeMore();
         requestLogout();
+      };
+    }
+    if (morePw) {
+      morePw.hidden = !DATA.user;
+      morePw.onclick = function () {
+        if (G.closeMore) G.closeMore();
+        openPasswordDialog();
       };
     }
   }

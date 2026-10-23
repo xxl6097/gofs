@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,65 @@ func TestUserStoreUpdateAndDelete(t *testing.T) {
 	}
 	if len(a.Users()) != 1 {
 		t.Errorf("删除后剩余账号数 = %d, 期望 1", len(a.Users()))
+	}
+}
+
+// TestChangePassword 覆盖账号自助改密：必须验旧密码、旧密码立刻失效、
+// 会话全部断开、以及启动参数账号不能改。
+func TestChangePassword(t *testing.T) {
+	file := tmpUserFile(t)
+	a := mustOpen(t, []string{"admin:secret@/:rw"}, file)
+	if err := a.AddUser("alice", "alicepass", []Rule{{Path: "/", Perm: PermReadWrite}}); err != nil {
+		t.Fatal(err)
+	}
+	token, ok := a.NewSession("alice")
+	if !ok {
+		t.Fatal("NewSession 失败")
+	}
+
+	// 旧密码不对：必须是可识别的哨兵错误，且密码保持不变。
+	if err := a.ChangePassword("alice", "wrong-pass", "newpass123"); !errors.Is(err, ErrPasswordMismatch) {
+		t.Fatalf("旧密码错误时应返回 ErrPasswordMismatch，实际 %v", err)
+	}
+	if !a.Verify("alice", "alicepass") {
+		t.Fatal("校验失败的改密不应改动密码")
+	}
+
+	// 新密码太短。
+	if err := a.ChangePassword("alice", "alicepass", "12345"); err == nil {
+		t.Fatal("短密码应被拒绝")
+	}
+
+	if err := a.ChangePassword("alice", "alicepass", "newpass123"); err != nil {
+		t.Fatalf("ChangePassword 失败: %v", err)
+	}
+	if a.Verify("alice", "alicepass") {
+		t.Error("旧密码仍然有效 —— 密码校验缓存没有随改动失效")
+	}
+	if !a.Verify("alice", "newpass123") {
+		t.Error("新密码无效")
+	}
+	if _, ok := a.ResolveSession(token); ok {
+		t.Error("改密之后旧会话仍然有效")
+	}
+
+	// 必须落盘：重启后仍然是新密码。
+	b := mustOpen(t, []string{"admin:secret@/:rw"}, file)
+	if !b.Verify("alice", "newpass123") {
+		t.Error("重启后新密码无效 —— 用户表没有落盘")
+	}
+
+	// 启动参数里的账号以命令行为准。
+	if err := a.ChangePassword("admin", "secret", "newpass123"); err == nil {
+		t.Error("启动参数账号不应允许在运行期改密")
+	}
+	if !a.Verify("admin", "secret") {
+		t.Error("被拒绝的改密不应影响启动参数账号")
+	}
+
+	// 不存在的账号。
+	if err := a.ChangePassword("ghost", "x", "newpass123"); err == nil {
+		t.Error("不存在的账号应报错")
 	}
 }
 

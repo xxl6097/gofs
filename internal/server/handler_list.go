@@ -64,7 +64,9 @@ type pageData struct {
 	User       string          `json:"user"`
 	Anonymous  bool            `json:"anonymous"`
 	AuthOn     bool            `json:"auth_on"`
-	Extract    extractLimits   `json:"extract_limits"`
+	// UserFromStartup 表示当前账号由启动参数定义，密码只能在命令行修改。
+	UserFromStartup bool          `json:"user_from_startup"`
+	Extract         extractLimits `json:"extract_limits"`
 	// UploadDated 表示上传是否会自动归档到日期目录。
 	UploadDated bool `json:"upload_dated"`
 	// UploadDateDir 为当前时刻对应的归档目录段，例如 "2026/09/28"。
@@ -143,6 +145,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		User:             p.User,
 		Anonymous:        !p.Authenticated,
 		AuthOn:           s.auth.Enabled(),
+		UserFromStartup:  s.auth.FromStartup(p.User),
 		UploadDated:      s.cfg.UploadDated(),
 		UploadDateDir:    s.cfg.UploadDateDir(time.Now()),
 		UploadDateLayout: s.cfg.UploadDateLayout,

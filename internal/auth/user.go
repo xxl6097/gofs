@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -237,6 +238,20 @@ func (a *Authenticator) RulePathsUnder(prefix string) []string {
 	return out
 }
 
+// FromStartup 报告某个账号是否由启动参数（-a / GOFS_AUTH）定义。
+//
+// 这类账号的密码与规则都以命令行为准，页面上不能改（见 ChangePassword /
+// UpdateUser / DeleteUser）。界面用它提前说明「为什么改不了」，而不是
+// 让用户填完表单再收到一条错误。
+func (a *Authenticator) FromStartup(name string) bool {
+	if a == nil || name == "" {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.findStatic(name) != nil
+}
+
 // UserFile 返回用户表的落盘路径（空串表示仅内存）。
 func (a *Authenticator) UserFile() string {
 	if a == nil {
@@ -419,6 +434,83 @@ func (a *Authenticator) UpdateUser(name, password string, rules []Rule) error {
 	// 改了密码就把这个账号已发的会话全部作废。
 	// 光清 pwCache 只能让旧密码不再通过校验，已经发出去的 cookie 还能读到东西 ——
 	// 那正是「我都改密码了，怎么还被登着」。
+	a.dropUserSessions(name)
+	return nil
+}
+
+// ErrPasswordMismatch 表示账号自助改密时给出的「当前密码」不正确。
+//
+// 单独一个哨兵错误，好让调用方把「旧密码不对」（403，可计入失败限速）
+// 与「新密码太短 / 账号来自启动参数 / 落盘失败」（400）区分开。
+var ErrPasswordMismatch = errors.New("当前密码不正确")
+
+// ChangePassword 供账号**自助**修改自己的密码，必须同时提供当前密码。
+//
+// 与 UpdateUser 的区别：UpdateUser 是管理员重置，可以不提供旧密码；
+// 这里是一张已登录的会话（或 Basic 凭据）在改自己的密码，要求再验一次
+// 当前密码，避免会话被窃取后攻击者直接换掉密码把主人锁在门外。
+//
+// 只适用于用户表里的账号：启动参数里的密码以命令行为准，运行期改了
+// 下次重启就会被覆盖 —— 那只会让人误以为改成功了，所以直接拒绝。
+func (a *Authenticator) ChangePassword(name, currentPassword, newPassword string) error {
+	if a == nil {
+		return fmt.Errorf("当前没有启用鉴权")
+	}
+	name, err := ValidateUserName(name)
+	if err != nil {
+		return err
+	}
+	if len(newPassword) < minUserPasswordLen {
+		return fmt.Errorf("新密码至少 %d 位", minUserPasswordLen)
+	}
+
+	a.mu.RLock()
+	if a.findStatic(name) != nil {
+		a.mu.RUnlock()
+		return fmt.Errorf("用户 %q 的密码来自启动参数，请在命令行修改后重启", name)
+	}
+	acc := a.findUser(name)
+	if acc == nil {
+		a.mu.RUnlock()
+		return fmt.Errorf("用户 %q 不存在", name)
+	}
+	// 旧密码校验可能要跑一次 PBKDF2（约 100ms）。放在读锁里完成，
+	// 不占写锁 —— 否则一个改密请求就能把所有人的权限查询挡在后面。
+	currentHash := acc.hash
+	matched := a.passwordMatches(acc, currentPassword)
+	a.mu.RUnlock()
+	if !matched {
+		return ErrPasswordMismatch
+	}
+
+	hash, err := hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// 校验与落盘之间账号可能被删除，或被管理员重置了密码。
+	// 后者必须重新来一遍：否则会拿旧密码的校验结果覆盖掉新密码。
+	acc = a.findUser(name)
+	if acc == nil {
+		return fmt.Errorf("用户 %q 不存在", name)
+	}
+	if acc.hash != currentHash {
+		return fmt.Errorf("用户 %q 的密码刚刚被其他人修改，请重新登录后再试", name)
+	}
+	// 先在副本上改，落盘成功后再换上去 —— 失败时内存状态原样保留。
+	oldHash, oldUpdated := acc.hash, acc.updatedAt
+	acc.hash = hash
+	acc.updatedAt = time.Now().Unix()
+	if err := a.commit(); err != nil {
+		acc.hash, acc.updatedAt = oldHash, oldUpdated
+		return err
+	}
+	a.pwCache.clear()
+	// 与管理员重置密码同一条规则：旧密码、旧会话都当场失效。
+	// 光清 pwCache 只能挡住旧密码，已经发出去的 cookie 仍能读到东西。
 	a.dropUserSessions(name)
 	return nil
 }

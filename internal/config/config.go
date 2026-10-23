@@ -1389,10 +1389,14 @@ func usageText() string {
   POST   /fs/users                  请求体 {"name","password","rules":[{"path","perm"}]}
   PUT    /fs/users                  同上；省略 password 表示不改密码
   DELETE /fs/users?name=<name>      删除
+  POST   /fs/auth/password          账号自助改密（普通账号即可）：
+                                    {"current_password","new_password"}
+                                    成功后该账号所有会话与密钥/分享作废
   perm   "rw" 可读写 / "r" 只读，按最长前缀匹配，未命中的路径一律拒绝
   权限   只有「对服务根拥有读写权限」的账号能用；且服务必须已启用鉴权
          （先用 -a 配一个账号，再来页面创建其他用户）
   密码   只保存 PBKDF2-HMAC-SHA256 摘要，每用户独立随机盐，服务端拿不回明文
+         启动参数（-a）里的账号密码只能在命令行修改，页面与接口都会拒绝
 
 服务设置（运行期，免重启）:
   GET    /fs/settings               读取当前设置

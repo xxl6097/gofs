@@ -252,6 +252,12 @@ const (
 	authClassQuery   = "query"
 	authClassSession = "session"
 	authClassAnon    = "anon"
+	// authClassPassword 是「已登录账号在改密时提交当前密码」这条路径。
+	//
+	// 单列一档而不是并进 basic：会话本身可能是被窃取的，攻击者拿到会话后
+	// 可以在这里尝试猜当前密码。它需要限速，但不该把同一 IP 的正常登录
+	// 一起封掉 —— 两边的失败计数互不连坐。
+	authClassPassword = "password"
 )
 
 // maxAuthUserLogBytes 限制写入日志的用户名长度。

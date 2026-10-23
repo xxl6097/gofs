@@ -222,6 +222,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fs/health", s.handleHealth)
 	mux.HandleFunc("/fs/auth", s.handleAuth)
+	// 账号自助改密：与 /fs/auth 分开注册，避免在登录接口里堆一套请求体解析。
+	mux.HandleFunc("/fs/auth/password", s.handlePasswordChange)
 	mux.HandleFunc("/fs/keys", s.handleKeys)
 	// 一键上传脚本：用上传密钥换一段可执行的脚本（见 up_script.go）。
 	// 走密钥而非账号密码，所以放在 keys 之外单独注册。
@@ -891,7 +893,10 @@ func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, u
 	// 服务端签发的随机 token，无效值不构成口令猜测；匿名请求更不应被
 	// 别人的失败记录连坐。早先所有类别共用空用户名桶，10 个坏 Cookie
 	// 就能锁死同一 IP 上的全部有效会话/匿名访问。
-	if class != authClassBasic && class != authClassQuery {
+	//
+	// authClassPassword 也在这里：改密接口要求提交当前密码，会话被窃取时
+	// 它就是一条可以反复尝试的口令入口，必须和登录用同一套闸门。
+	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
 		return ip, true
 	}
 	if blocked, remain := s.authBlocked(ip, class, user); blocked {

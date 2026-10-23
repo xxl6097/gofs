@@ -2301,8 +2301,9 @@ html.booting body::after {
 }
 .user-logout:hover { opacity: 1; background: var(--bg-active); }
 
-/* 「退出登录」的移动端入口默认藏起来；桌面端仍用芯片里的「退出」。
-   在 820px 断点里再打开，并隐藏芯片里的那颗按钮。 */
+/* 「修改密码 / 退出登录」的移动端入口默认藏起来；桌面端仍用芯片里的
+   那两颗按钮。在 820px 断点里再打开，并隐藏芯片里的按钮。 */
+#btn-password-more,
 #btn-logout-more { display: none; }
 
 /* ================================================================ 全屏弹窗 */
@@ -3202,9 +3203,10 @@ html.booting body::after {
      会把账号芯片挤到下一行，顶栏从两行变成三行。
      设成 0 后它只吃剩余空间，超出的路径自己横向滚动。 */
   .breadcrumb { order: 3; width: auto; flex: 1 1 0; min-width: 0; }
-  /* 手机端账号芯片只留用户名：退出入口已移到「更多」里，
+  /* 手机端账号芯片只留用户名：改密/退出入口已移到「更多」里，
      省下的宽度正好给面包屑。 */
   .user-logout { display: none; }
+  #btn-password-more,
   #btn-logout-more { display: flex; }
   #user-chip { order: 4; }
   .topbar-actions {
