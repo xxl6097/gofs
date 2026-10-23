@@ -3,6 +3,7 @@ package office
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -72,10 +73,14 @@ func (p *xlsxParser) loadSharedStrings(data []byte) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	p.strings = make([]string, 0, 256)
 	var sb strings.Builder
+	guard := &xmlGuard{}
 	inSI, inT := false, false
 	for {
-		tok, err := dec.Token()
+		tok, err := guard.token(dec)
 		if err != nil {
+			if errors.Is(err, ErrNotOffice) {
+				p.rd.truncated = true
+			}
 			break
 		}
 		switch t := tok.(type) {
@@ -112,10 +117,14 @@ func (p *xlsxParser) sheetNames() []string {
 		return nil
 	}
 	dec := xml.NewDecoder(bytes.NewReader(data))
+	guard := &xmlGuard{}
 	var names []string
 	for {
-		tok, err := dec.Token()
+		tok, err := guard.token(dec)
 		if err != nil {
+			if errors.Is(err, ErrNotOffice) {
+				p.rd.truncated = true
+			}
 			break
 		}
 		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "sheet" {
@@ -181,18 +190,24 @@ func (p *xlsxParser) sheet(data []byte) []Block {
 			if len(curRow) > maxCol {
 				maxCol = len(curRow)
 			}
-		} else {
+		} else if len(curRow) < maxTableCols {
 			curRow = append(curRow, *curCell)
+		} else {
+			truncRow = true
 		}
 		curCell = nil
 		val.Reset()
 	}
 
+	guard := &xmlGuard{}
 loop:
 	for {
-		tok, err := dec.Token()
+		tok, err := guard.token(dec)
 		if err != nil {
-			break
+			if errors.Is(err, ErrNotOffice) {
+				p.rd.truncated = true
+			}
+			break loop
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:

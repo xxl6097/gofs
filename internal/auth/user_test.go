@@ -374,3 +374,62 @@ func TestMemoryOnlyStoreWhenNoFile(t *testing.T) {
 		t.Errorf("仅内存模式下登录失败")
 	}
 }
+
+// TestCommitDoesNotFollowPredictableTempSymlink 确认用户表落盘使用随机临时名。
+//
+// 旧实现写固定的 users.json.tmp：本地攻击者预先在该路径放一条指向任意文件的
+// 软链，服务下一次提交用户表就会以自身权限覆盖那个文件。
+func TestCommitDoesNotFollowPredictableTempSymlink(t *testing.T) {
+	dir := t.TempDir()
+	userFile := filepath.Join(dir, "users.json")
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, userFile+".tmp"); err != nil {
+		t.Skipf("当前环境不支持创建软链接：%v", err)
+	}
+
+	a := mustOpen(t, []string{"admin:secret@/:rw"}, userFile)
+	if err := a.AddUser("bob", "bobpw1", []Rule{
+		{Path: "/docs", Perm: PermReadWrite},
+	}); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ORIGINAL" {
+		t.Fatalf("固定临时名的软链被跟随，victim 被覆盖：%q", got)
+	}
+	st, err := os.Stat(userFile)
+	if err != nil {
+		t.Fatalf("用户表未生成: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o600 {
+		t.Errorf("用户表权限 = %o，期望 600", perm)
+	}
+}
+
+// TestRulePathsUnder 确认站点标签冲突提示只收集落在该前缀下的规则。
+func TestRulePathsUnder(t *testing.T) {
+	a := mustOpen(t, []string{
+		"admin:secret@/:rw",
+		"bob:bobpw@/backup:rw,/backup/x:r,/docs:r",
+	}, "")
+	got := a.RulePathsUnder("/backup")
+	want := []string{"/backup", "/backup/x"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("RulePathsUnder = %v，期望 %v", got, want)
+	}
+	if hits := a.RulePathsUnder("/nothing"); len(hits) != 0 {
+		t.Errorf("无关前缀不应有命中：%v", hits)
+	}
+
+	var nilAuth *Authenticator
+	if hits := nilAuth.RulePathsUnder("/backup"); hits != nil {
+		t.Errorf("nil Authenticator 应返回 nil，实际 %v", hits)
+	}
+}

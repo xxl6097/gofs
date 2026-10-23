@@ -163,20 +163,21 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		PathPrefix:             s.PathPrefix(),
 		PathPrefixDefault:      s.cfg.PathPrefix,
 		PathPrefixLocked:       s.cfg.PathPrefix != "",
-		ListenAddr:             s.ListenBind(),
-		ListenPort:             s.ListenPort(),
-		ListenAddrDefault:      s.cfg.Bind,
-		ListenPortDefault:      s.cfg.Port,
-		ListenLocked:           s.cfg.BindSet || s.cfg.PortSet,
-		ListenEditable:         s.listenEditable(),
 	}
 	if s.cfg.UploadDated() {
 		rep.UploadDateDir = s.cfg.UploadDateDir(time.Now())
 	}
 	if !admin {
-		// 非管理员不必知道服务跑在磁盘的哪个位置。
+		// 非管理员不必知道服务跑在磁盘的哪个位置 —— 监听地址也可能是
+		// unix socket 的绝对路径，同样属于主机布局信息。
 		return rep
 	}
+	rep.ListenAddr = s.ListenBind()
+	rep.ListenPort = s.ListenPort()
+	rep.ListenAddrDefault = s.cfg.Bind
+	rep.ListenPortDefault = s.cfg.Port
+	rep.ListenLocked = s.cfg.BindSet || s.cfg.PortSet
+	rep.ListenEditable = s.listenEditable()
 	rep.Root = s.res.Root()
 	// 有附加站点时不允许运行期换主根（换掉哪一个？其余的呢？）——
 	// 与站点增删是两件事：站点随时可增删，主根要换得先把站点清掉。
@@ -556,6 +557,7 @@ func (s *Server) addSite(path, wantLabel string) (fsutil.Mount, error) {
 	if err != nil {
 		return fsutil.Mount{}, err
 	}
+	s.warnSiteACLOverlap(m.Label)
 	// 先改内存再落盘：落盘失败时站点**已经生效**，照实告诉调用方，
 	// 别让人以为「没加成」而反复重试（与 SetTitle 同一口径）。
 	if err := s.persistSites(); err != nil {
@@ -615,6 +617,22 @@ func (s *Server) writeErrForSite(w http.ResponseWriter, err error) {
 	}
 }
 
+// warnSiteACLOverlap 在站点标签与现有 ACL 规则重叠时给出安全提示。
+//
+// 标签按 URL 首段路由，ACL 也按 URL 前缀匹配：一条 `/backup:rw` 规则在
+// 名为 backup 的站点挂上之后会作用于新站点，而配置者很可能只想着主目录。
+// 不强行拒绝（遮蔽同名目录是这套 URL 形状的既有取舍），但必须让运维看见。
+func (s *Server) warnSiteACLOverlap(label string) {
+	if s.auth == nil {
+		return
+	}
+	if hits := s.auth.RulePathsUnder("/" + label); len(hits) > 0 {
+		s.logger.Errorf("安全提示：站点标签 %q 与现有 ACL 规则 %s 重叠，"+
+			"这些规则会同时作用于新站点；如非本意请换一个标签或调整规则",
+			label, strings.Join(hits, "、"))
+	}
+}
+
 // switchRoot 把服务根目录切换到 newRoot。
 //
 // 三层校验，缺一不可：
@@ -624,6 +642,12 @@ func (s *Server) writeErrForSite(w http.ResponseWriter, err error) {
 //  3. 规范化要用 fsutil.NormalizePath，先把软链解析掉 ——
 //     否则在允许范围内放一个指向 /etc 的软链就能绕过第 1 条。
 func (s *Server) switchRoot(newRoot string) error {
+	// 与站点增删共用一把锁：否则「检查 MultiRoot() 为 false」与 SetRoot
+	// 之间可能插进一个 AddSite，导致新主根与已有站点互相嵌套，破坏
+	// Roots 依赖的「各根互不嵌套」不变量。
+	s.sitesMu.Lock()
+	defer s.sitesMu.Unlock()
+
 	// 兜底：updateSettings 已经拦过一次，但这里再挡一道 ——
 	// 换根会改 *Resolver 里的根，而多根用的是 *Roots，语义上根本不该走到这。
 	if s.MultiRoot() {
@@ -687,14 +711,14 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 		}
 		return permResult{Perm: auth.PermNone}, true
 	}
-	ip, ok := s.checkAuthLimit(w, r)
+	user, pass, hasCred := credentials(r)
+	ip, ok := s.checkAuthLimit(w, r, user)
 	if !ok {
 		return permResult{}, false
 	}
-	user, pass, hasCred := credentials(r)
 	if !hasCred || user == "" || !s.auth.Verify(user, pass) {
 		if hasCred {
-			s.noteAuthFailure(ip)
+			s.noteAuthFailure(ip, user)
 		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
@@ -702,7 +726,7 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 		return permResult{}, false
 	}
-	s.noteAuthSuccess(ip)
+	s.noteAuthSuccess(ip, user)
 	perm := s.auth.Lookup("/", user, pass, true)
 	return permResult{Perm: perm, User: user, Authenticated: true}, true
 }
@@ -768,24 +792,24 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 			http.StatusForbidden)
 		return false
 	}
-	ip, ok := s.checkAuthLimit(w, r)
+	user, pass, hasCred := credentials(r)
+	ip, ok := s.checkAuthLimit(w, r, user)
 	if !ok {
 		return false
 	}
 
-	user, pass, hasCred := credentials(r)
 	if hasCred {
 		// 显式凭据：先验密码，再判断权限。密码错误才计入失败，
 		// 一个合法的普通账号访问管理接口得到的是 403，而不是被封禁。
 		if !s.auth.Verify(user, pass) {
-			s.noteAuthFailure(ip)
+			s.noteAuthFailure(ip, user)
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return false
 		}
-		s.noteAuthSuccess(ip)
+		s.noteAuthSuccess(ip, user)
 		if s.isAdminRequest(r) {
 			return true
 		}
@@ -799,7 +823,7 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 	// 只回 403，不能把正常用户打进封禁名单。
 	if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
 		if sessionToken(r) != "" {
-			s.noteAuthFailure(ip)
+			s.noteAuthFailure(ip, "")
 		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)

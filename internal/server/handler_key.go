@@ -86,13 +86,13 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	if s.auth.Enabled() {
 		// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
 		// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
-		ip, ok := s.checkAuthLimit(w, r)
+		ip, ok := s.checkAuthLimit(w, r, user)
 		if !ok {
 			return
 		}
 		if !hasCred || !s.auth.Verify(user, pass) {
 			if hasCred {
-				s.noteAuthFailure(ip)
+				s.noteAuthFailure(ip, user)
 			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
@@ -100,7 +100,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		s.noteAuthSuccess(ip)
+		s.noteAuthSuccess(ip, user)
 		admin = s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
 	}
 	if !s.auth.HasAnyWrite(user, pass, hasCred) {
@@ -134,12 +134,16 @@ func (s *Server) keyList(w http.ResponseWriter, user string, admin bool) {
 		}
 		views = append(views, s.keyView(k))
 	}
-	s.writeJSON(w, map[string]any{
+	out := map[string]any{
 		"keys":       views,
 		"persistent": s.keys.Persistent(),
-		"path":       s.keys.Path(),
 		"total":      len(views),
-	})
+	}
+	// 密钥文件路径属于主机布局信息，只给管理员。
+	if admin {
+		out["path"] = s.keys.Path()
+	}
+	s.writeJSON(w, out)
 }
 
 // keyCreate 创建密钥并返回**只此一次**的明文。
@@ -215,7 +219,14 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator strin
 		Kind:    kind,
 	})
 	if err != nil {
-		s.writeErr(w, err)
+		switch {
+		case errors.Is(err, uploadkey.ErrTooManyKeys):
+			http.Error(w, "409 Conflict: "+err.Error(), http.StatusConflict)
+		case errors.Is(err, uploadkey.ErrInvalidOption):
+			http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+		default:
+			s.writeErr(w, err)
+		}
 		return
 	}
 

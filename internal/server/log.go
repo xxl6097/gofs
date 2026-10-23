@@ -179,10 +179,10 @@ func replaceHTTPHeaders(line string, r *http.Request) string {
 		}
 		key := strings.ReplaceAll(line[idx+len("$http_"):end], "_", "-")
 		value := r.Header.Get(key)
-		// Authorization / Cookie 里是可直接复用的凭据，自定义日志格式
-		// 即使显式写了它们，也不该把值原样落盘。
+		// Authorization / Cookie / 上传密钥头里是可直接复用的凭据，
+		// 自定义日志格式即使显式写了它们，也不该把值原样落盘。
 		switch strings.ToLower(key) {
-		case "authorization", "proxy-authorization", "cookie":
+		case "authorization", "proxy-authorization", "cookie", "x-gofs-upload-key":
 			value = "***"
 		}
 		b.WriteString(value)

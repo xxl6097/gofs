@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -94,5 +95,34 @@ func TestRedactURI(t *testing.T) {
 	}
 	if !strings.Contains(got, "user=boss") || !strings.Contains(got, "x=1") {
 		t.Fatalf("非敏感参数被误删：%s", got)
+	}
+}
+
+// TestUploadKeyHeaderIsRedacted 确认自定义日志格式里的上传密钥头也会被脱敏。
+func TestUploadKeyHeaderIsRedacted(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Gofs-Upload-Key", "gofs_super_secret")
+	got := replaceHTTPHeaders("key=$http_x_gofs_upload_key", r)
+	if strings.Contains(got, "gofs_super_secret") {
+		t.Fatalf("上传密钥被写进日志：%s", got)
+	}
+	if !strings.Contains(got, "***") {
+		t.Fatalf("敏感头没有被替换：%s", got)
+	}
+}
+
+// TestAccessLogIgnoresUnverifiedQueryUser 确认未认证请求的 ?user= 不能伪造日志身份。
+func TestAccessLogIgnoresUnverifiedQueryUser(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A", "--log-format", "$remote_user"))
+
+	var buf bytes.Buffer
+	s.logger.mu.Lock()
+	s.logger.out = &buf
+	s.logger.mu.Unlock()
+
+	do(t, s, http.MethodGet, "/?user=admin", nil, nil)
+	if got := strings.TrimSpace(buf.String()); got != "" {
+		t.Fatalf("未认证请求的查询串用户名被当成了身份：%q", got)
 	}
 }

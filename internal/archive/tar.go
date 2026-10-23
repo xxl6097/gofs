@@ -48,26 +48,76 @@ func (t *tarReader) Format() Format { return t.format }
 // Close 关闭文件。
 func (t *tarReader) Close() error { return t.f.Close() }
 
-// reader 从头构造一个 tar.Reader。
+// scanSlack 是扫描预算的余量。
+//
+// tar.Reader 在读到结尾时仍可能再请求一个块；如果预算恰好等于解压后
+// 大小，这个「最后一次读」会被误判为超限。多给一个块即可避免误杀。
+const scanSlack = 512
+
+// budgetReader 把从底层读出的（已解压）字节计入预算，超限返回 ErrScanTooLarge。
+type budgetReader struct {
+	r      io.Reader
+	remain int64
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	if b.remain <= 0 {
+		return 0, ErrScanTooLarge
+	}
+	if int64(len(p)) > b.remain {
+		p = p[:b.remain]
+	}
+	n, err := b.r.Read(p)
+	b.remain -= int64(n)
+	return n, err
+}
+
+// reader 从头构造一个 tar.Reader（不限制扫描量，供 Extract 使用）。
 func (t *tarReader) reader() (*tar.Reader, io.Closer, error) {
+	return t.readerWithBudget(0)
+}
+
+// scanReader 与 reader 相同，但把解压后的扫描量限制在 MaxScanBytes 内
+// （未设置时回落到 MaxTotalBytes）。
+//
+// 只用于 List / OpenEntry：这两个操作不需要写出文件，却必须顺序扫描整个
+// 流，是高压缩比 tar.gz 最容易打穿 CPU/IO 的入口。Extract 不需要这层，
+// 它有独立的写出量限额。
+func (t *tarReader) scanReader() (*tar.Reader, io.Closer, error) {
+	budget := t.limits.MaxScanBytes
+	if budget <= 0 {
+		budget = t.limits.MaxTotalBytes
+	}
+	if budget > 0 {
+		budget += scanSlack
+	}
+	return t.readerWithBudget(budget)
+}
+
+func (t *tarReader) readerWithBudget(budget int64) (*tar.Reader, io.Closer, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, err := t.f.Seek(0, io.SeekStart); err != nil {
 		return nil, nil, err
 	}
-	if !t.gzipped {
-		return tar.NewReader(t.f), nil, nil
+	var r io.Reader = t.f
+	var closer io.Closer
+	if t.gzipped {
+		gz, err := gzip.NewReader(t.f)
+		if err != nil {
+			return nil, nil, fmt.Errorf("解析 gzip 失败: %w", err)
+		}
+		r, closer = gz, gz
 	}
-	gz, err := gzip.NewReader(t.f)
-	if err != nil {
-		return nil, nil, fmt.Errorf("解析 gzip 失败: %w", err)
+	if budget > 0 {
+		r = &budgetReader{r: r, remain: budget}
 	}
-	return tar.NewReader(gz), gz, nil
+	return tar.NewReader(r), closer, nil
 }
 
 // List 遍历 tar 内所有条目。
 func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
-	tr, closer, err := t.reader()
+	tr, closer, err := t.scanReader()
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +165,7 @@ func tarEntry(h *tar.Header) Entry {
 // OpenEntry 读取包内单个文件。tar 流式读取的特性决定了这里必须把内容缓冲下来。
 func (t *tarReader) OpenEntry(ctx context.Context, name string) (io.ReadCloser, Entry, error) {
 	want := normalizeEntryName(name)
-	tr, closer, err := t.reader()
+	tr, closer, err := t.scanReader()
 	if err != nil {
 		return nil, Entry{}, err
 	}

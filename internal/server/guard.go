@@ -228,15 +228,33 @@ func (s *Server) externalScheme(r *http.Request) string {
 // 认证失败限速
 // ---------------------------------------------------------------------------
 
-// authBlocked 判断该来源是否正处在封禁期。
-func (s *Server) authBlocked(ip string) (bool, time.Duration) {
+// maxAuthFailEntries 是失败记录表的硬上限。
+//
+// 键里带用户名之后，攻击者可以用大量随机用户名把表撑大；惰性清理只清
+// 「已经过期」的项，挡不住持续注入的新键。超过上限时先清过期项，仍超限
+// 则丢弃一半 —— 这是可用性与内存之间的取舍，限速本来就是尽力而为。
+const maxAuthFailEntries = 65536
+
+// authFailKey 把「来源 + 尝试的账号」拼成失败计数的键。
+//
+// ⚠️ 不能只用 IP：否则任何持有合法账号的人，只要在两次错误猜测之间
+// 穿插一次自己的成功请求，就能把整个 IP 的失败计数清零，对别人的账号
+// 做无限次口令猜测（BCP 的经典绕过）。成功只能清掉**本账号**的记录。
+func authFailKey(ip, user string) string {
+	// 用户名按原样比较：鉴权查找本身区分大小写，限速键也应与之一致，
+	// 否则两个仅大小写不同的账号会共用一份计数。
+	return ip + "\x00" + strings.TrimSpace(user)
+}
+
+// authBlocked 判断该来源+账号是否正处在封禁期。
+func (s *Server) authBlocked(ip, user string) (bool, time.Duration) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return false, 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	rec := g.fails[ip]
+	rec := g.fails[authFailKey(ip, user)]
 	if rec == nil {
 		return false, 0
 	}
@@ -248,18 +266,22 @@ func (s *Server) authBlocked(ip string) (bool, time.Duration) {
 }
 
 // noteAuthFailure 记录一次认证失败，达到阈值时开始封禁。
-func (s *Server) noteAuthFailure(ip string) {
+//
+// user 是本次**尝试的账号**（没有凭据时为空串）。计数按「来源 + 账号」
+// 隔离，成功登录不会清掉别人账号的失败记录。
+func (s *Server) noteAuthFailure(ip, user string) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return
 	}
 	limit := s.cfg.AuthFailLimit
 	window := s.cfg.AuthFailWindow
+	key := authFailKey(ip, user)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// 顺手做一次惰性清理，避免被大量伪造来源撑爆内存。
+	// 顺手做一次惰性清理，避免被大量伪造来源/用户名撑爆内存。
 	// 只在字典明显变大时才扫，正常情况下这份开销可以忽略。
 	if len(g.fails) > 4096 {
 		now := time.Now()
@@ -269,31 +291,51 @@ func (s *Server) noteAuthFailure(ip string) {
 			}
 		}
 	}
+	// 硬上限：持续注入新键时，仅靠「清过期」挡不住内存增长。
+	if len(g.fails) >= maxAuthFailEntries {
+		n := 0
+		for k := range g.fails {
+			if n >= maxAuthFailEntries/2 {
+				break
+			}
+			delete(g.fails, k)
+			n++
+		}
+	}
 
-	rec := g.fails[ip]
+	rec := g.fails[key]
 	now := time.Now()
 	if rec == nil || now.Sub(rec.last) > window {
 		rec = &failRecord{}
-		g.fails[ip] = rec
+		g.fails[key] = rec
 	}
 	rec.count++
 	rec.last = now
 	if rec.count >= limit {
 		rec.blocked = now.Add(window)
 		rec.count = 0
-		s.logger.Errorf("来源 %s 认证失败达 %d 次，封禁至 %s", ip, limit, rec.blocked.Format(time.RFC3339))
+		if user == "" {
+			s.logger.Errorf("来源 %s 认证失败达 %d 次，封禁至 %s",
+				ip, limit, rec.blocked.Format(time.RFC3339))
+			return
+		}
+		s.logger.Errorf("来源 %s（账号 %q）认证失败达 %d 次，封禁至 %s",
+			ip, user, limit, rec.blocked.Format(time.RFC3339))
 	}
 }
 
-// noteAuthSuccess 在认证通过后清掉该来源的失败计数。
-func (s *Server) noteAuthSuccess(ip string) {
+// noteAuthSuccess 在认证通过后清掉**该来源+该账号**的失败计数。
+//
+// 绝不能只按 IP 清：那会让任何持有合法账号的人通过穿插成功请求
+// 把针对别的账号的失败记录一并抹掉，限速形同虚设。
+func (s *Server) noteAuthSuccess(ip, user string) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.fails, ip)
+	delete(g.fails, authFailKey(ip, user))
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ package uploadkey
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -376,5 +377,82 @@ func TestShareKindsGetDefaultName(t *testing.T) {
 		if k.Name != "分享链接" {
 			t.Errorf("kind=%s 的默认名 = %q，期望「分享链接」", kind, k.Name)
 		}
+	}
+}
+
+// TestRevokeByCreator 确认按创建者撤销只影响该账号名下的密钥。
+func TestRevokeByCreator(t *testing.T) {
+	s := newStore(t, "")
+	bobKey, _, err := s.Create(CreateOptions{Name: "bob-key", Scope: "/", Creator: "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceKey, _, err := s.Create(CreateOptions{Name: "alice-key", Scope: "/", Creator: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.RevokeByCreator("bob")
+	if err != nil {
+		t.Fatalf("RevokeByCreator: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("撤销数量 = %d，期望 1", n)
+	}
+	if _, ok := s.Get(bobKey.ID); ok {
+		t.Error("bob 的密钥仍然存在")
+	}
+	if _, ok := s.Get(aliceKey.ID); !ok {
+		t.Error("alice 的密钥被误删")
+	}
+	if n, err := s.RevokeByCreator(""); n != 0 || err != nil {
+		t.Errorf("空创建者不应撤销任何东西：n=%d err=%v", n, err)
+	}
+}
+
+// TestKeyQuota 确认单账号配额生效，且不会误伤其它账号。
+func TestKeyQuota(t *testing.T) {
+	s := newStore(t, "")
+	for i := 0; i < MaxKeysPerCreator; i++ {
+		if _, _, err := s.Create(CreateOptions{Name: "k", Scope: "/", Creator: "bob"}); err != nil {
+			t.Fatalf("第 %d 个密钥创建失败: %v", i+1, err)
+		}
+	}
+	if _, _, err := s.Create(CreateOptions{Name: "over", Scope: "/", Creator: "bob"}); !errors.Is(err, ErrTooManyKeys) {
+		t.Fatalf("超出配额时错误 = %v，期望 ErrTooManyKeys", err)
+	}
+	if _, _, err := s.Create(CreateOptions{Name: "alice", Scope: "/", Creator: "alice"}); err != nil {
+		t.Fatalf("其它账号不应被配额误伤: %v", err)
+	}
+}
+
+// TestKeyFieldLimits 确认名称/备注/scope 的超长输入会被拒绝。
+func TestKeyFieldLimits(t *testing.T) {
+	s := newStore(t, "")
+	cases := []CreateOptions{
+		{Name: strings.Repeat("n", MaxKeyNameRunes+1), Scope: "/"},
+		{Name: "n", Scope: "/", Note: strings.Repeat("x", MaxKeyNoteRunes+1)},
+		{Name: "n", Scope: "/" + strings.Repeat("a", MaxKeyScopeRunes)},
+	}
+	for i, opt := range cases {
+		if _, _, err := s.Create(opt); !errors.Is(err, ErrInvalidOption) {
+			t.Errorf("用例 %d 错误 = %v，期望 ErrInvalidOption", i, err)
+		}
+	}
+}
+
+// TestStartupPrunesExpired 确认启动时会清掉已过期的密钥。
+func TestStartupPrunesExpired(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.json")
+	s := newStore(t, path)
+	if _, _, err := s.Create(CreateOptions{Name: "expired", Scope: "/", TTL: time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	s2 := newStore(t, path)
+	if got := s2.Count(); got != 0 {
+		t.Fatalf("启动后过期密钥数量 = %d，期望 0", got)
 	}
 }

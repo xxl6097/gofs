@@ -160,6 +160,7 @@ func (s *Server) restoreSites() {
 			s.logger.Errorf("恢复站点 %q 失败: %v", rec.Path, err)
 			continue
 		}
+		s.warnSiteACLOverlap(m.Label)
 		s.logger.Infof("已恢复站点：/%s → %s", m.Label, m.Res.Root())
 	}
 }
@@ -344,9 +345,10 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		// 用 defer 保证 panic 场景下也能留下访问记录。
 		defer func() {
 			user, _, _ := r.BasicAuth()
-			if user == "" {
-				user = r.URL.Query().Get("user")
-			}
+			// ⚠️ 查询串里的 user 不能直接写进日志：它由客户端提供、没有经过
+			// 任何校验，任何匿名请求都能用 `?user=admin` 伪造审计身份。
+			// 需要查询串凭据的客户端应改用 Authorization 头或会话。
+			//
 			// 会话身份也要记上，否则登录之后的媒体请求在日志里全是空用户 ——
 			// 而「谁在读这个大文件」正是访问日志最该回答的问题。
 			if user == "" {
@@ -704,9 +706,9 @@ func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trusted
 // 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
 // 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
 // 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
-func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, user string) (string, bool) {
 	ip := s.clientIP(r)
-	if blocked, remain := s.authBlocked(ip); blocked {
+	if blocked, remain := s.authBlocked(ip, user); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
 		return ip, false
@@ -724,8 +726,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	urlPath = s.canonicalPath(r, urlPath)
 
 	// 认证限速：Basic 认证可以被无限次尝试，不设闸门就等于把口令交给
-	// 字典攻击。这里按来源统计失败次数，超限后临时封禁。
-	ip, ok := s.checkAuthLimit(w, r)
+	// 字典攻击。计数按「来源 + 尝试的账号」隔离：只按来源统计的话，
+	// 持有任意合法账号的人可以穿插自己的成功请求把别人的失败计数清零。
+	limitUser, _, _ := credentials(r)
+	ip, ok := s.checkAuthLimit(w, r, limitUser)
 	if !ok {
 		return permResult{}, false
 	}
@@ -784,7 +788,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		// 会话 cookie 同理不在这里清：它是「过去某次登录成功」的凭据，
 		// 不代表当下验过密码，而且可能被第三方持有一份。
 		if perm != auth.PermNone {
-			s.noteAuthSuccess(ip)
+			s.noteAuthSuccess(ip, user)
 		}
 	case cookieUser != "":
 		// 会话身份：cookie 在登录时已经验过密码，这里只按身份取权限。
@@ -804,7 +808,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 无效 cookie（过期/已撤销/伪造）同样算失败：cookie 值完全由客户端提供，
 	// 伪造一个来试探是可行的，所以它和错密码一样该计数。
 	if hasCred || hadCookie {
-		s.noteAuthFailure(ip)
+		s.noteAuthFailure(ip, limitUser)
 	}
 
 	if s.auth.NeedsAuth(urlPath) {
@@ -901,18 +905,19 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// 用 PBKDF2 把 CPU 打满。
 	if s.auth.Enabled() && isAppShellNavigation(r) {
 		ip := s.clientIP(r)
-		if blocked, remain := s.authBlocked(ip); blocked {
+		user, _, hasCred := credentials(r)
+		if blocked, remain := s.authBlocked(ip, user); blocked {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 			http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
 				http.StatusTooManyRequests)
 			return
 		}
 		if s.checkPerm(r, urlPath) == auth.PermNone {
-			if _, _, hasCred := credentials(r); hasCred {
-				s.noteAuthFailure(ip)
+			if hasCred {
+				s.noteAuthFailure(ip, user)
 			} else if sessionToken(r) != "" {
 				// 无效/过期的 cookie 与猜密码同性质。
-				s.noteAuthFailure(ip)
+				s.noteAuthFailure(ip, "")
 			}
 			s.renderAuthGate(w, r, urlPath)
 			return

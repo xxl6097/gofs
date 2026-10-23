@@ -20,6 +20,7 @@ package office
 
 import (
 	"archive/zip"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -48,7 +49,57 @@ const (
 	maxRunLen = 100_000
 	// maxEntries 扫描 zip 目录时最多看多少个条目。
 	maxEntries = 20000
+	// maxXMLDepth 是 XML 嵌套深度的硬上限。
+	//
+	// encoding/xml 每遇到一个 StartElement 就会在内部栈上压一个节点，
+	// 而节点大小远大于输入字节（实测 4 MiB 的 `<a>` 嵌套可占约 139 MiB）。
+	// 一条 32 MiB 的 word/document.xml 足以在单个预览请求里吃掉数百 MB
+	// 甚至上 GB 堆内存 —— 这属于「不可信输入必须设硬上限」的范畴。
+	maxXMLDepth = 512
+	// maxXMLTokens 限制一次解析最多处理多少个 XML token，兜住 CPU 与
+	// 无深度但极宽（大量同级元素）的输入。
+	maxXMLTokens = 2_000_000
+	// maxPendingStyles 是 docx 单段内待应用样式标记的上限。
+	// 样式只有粗体/斜体/下划线三种，超过这个数量没有语义意义。
+	maxPendingStyles = 64
+	// maxRunsPerBlock 是单段落/单单元格内文本片段的上限。
+	maxRunsPerBlock = 10_000
+	// maxNotes 是给用户看的解析提示上限（图片、特殊条目等）。
+	maxNotes = 16
 )
+
+// xmlGuard 给 XML token 流加上深度与总量上限。
+//
+// 只限制**字节数**是不够的：同一批字节可以嵌套出上百万层元素，
+// 让 encoding/xml 的解析栈放大几十倍。所有 OOXML 解析循环都必须经过它。
+type xmlGuard struct {
+	depth  int
+	tokens int
+}
+
+// token 返回下一个 token；超过深度/总量上限时返回 ErrNotOffice。
+func (g *xmlGuard) token(dec *xml.Decoder) (xml.Token, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return tok, err
+	}
+	g.tokens++
+	if g.tokens > maxXMLTokens {
+		return nil, ErrNotOffice
+	}
+	switch tok.(type) {
+	case xml.StartElement:
+		g.depth++
+		if g.depth > maxXMLDepth {
+			return nil, ErrNotOffice
+		}
+	case xml.EndElement:
+		if g.depth > 0 {
+			g.depth--
+		}
+	}
+	return tok, nil
+}
 
 // ErrNotOffice 表示这个文件不是可解析的 OOXML 文档。
 var ErrNotOffice = errors.New("不是可解析的 Office 文档")

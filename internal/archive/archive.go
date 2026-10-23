@@ -135,6 +135,14 @@ var ErrUnsupported = errors.New("不支持的压缩包格式")
 // ErrEntryTooLarge 表示单个条目的解压后体积超过预览上限。
 var ErrEntryTooLarge = errors.New("压缩包条目过大")
 
+// ErrScanTooLarge 表示为了列出条目或查找某个条目而需要扫描的解压数据
+// 超过预算。
+//
+// tar 是流式的：枚举/定位条目必须从头顺序读，`Next()` 会跳过（也就是
+// 解压）前面条目的全部内容。只限制「写出的字节数」挡不住一个高压缩比
+// 的 tar.gz —— 它可以在不写任何文件的情况下吃掉大量 CPU/IO。
+var ErrScanTooLarge = errors.New("压缩包扫描量超过上限")
+
 // Limits 限制「列表 / 单条目预览」的规模。
 //
 // 这些操作与 Extract 共用同一份配置，但语义不同：列表只是给界面看，
@@ -144,6 +152,12 @@ type Limits struct {
 	MaxFiles      int
 	MaxTotalBytes int64
 	MaxEntryBytes int64
+	// MaxScanBytes 是「为了列表/定位条目而允许解压扫描」的字节上限。
+	//
+	// 只对 tar 这类流式格式有意义：列出一个条目要先把前面所有内容读完。
+	// 它通常应小于 MaxTotalBytes —— 列表/预览不需要把整份 10 GiB 的归档
+	// 解压一遍。为 0 时回落到 MaxTotalBytes。
+	MaxScanBytes int64
 }
 
 // LimitSetter 是可选能力：支持限额的 Reader 实现它。

@@ -3,6 +3,7 @@ package office
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"regexp"
 	"strings"
@@ -67,13 +68,19 @@ func (r *reader) docx() (*Doc, error) {
 	// 让 xml 包跳过非法字节 —— 总比整份解析失败强。
 	dec.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) { return input, nil }
 
+	guard := &xmlGuard{}
 	started := false
 	for {
-		tok, err := dec.Token()
+		tok, err := guard.token(dec)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			// 超过深度/总量上限是恶意的结构性输入，不能当成「解析到一半」：
+			// 明确拒绝，避免继续为它分配内存。
+			if errors.Is(err, ErrNotOffice) {
+				return nil, err
+			}
 			// XML 坏了：返回已经解析出来的部分，用户至少能看到前面几段。
 			break
 		}
@@ -135,13 +142,15 @@ func (p *docxParser) start(t xml.StartElement) {
 	case "br", "cr":
 		p.textBuf.WriteByte('\n')
 	case "b":
-		p.pendingStyles = append(p.pendingStyles, func(r *Run) { r.Bold = true })
+		p.addStyle(func(r *Run) { r.Bold = true })
 	case "i":
-		p.pendingStyles = append(p.pendingStyles, func(r *Run) { r.Italic = true })
+		p.addStyle(func(r *Run) { r.Italic = true })
 	case "u":
-		p.pendingStyles = append(p.pendingStyles, func(r *Run) { r.Underline = true })
+		p.addStyle(func(r *Run) { r.Underline = true })
 	case "drawing", "pict", "object":
-		p.notes = append(p.notes, "跳过了文档中的图片或嵌入对象")
+		if len(p.notes) < maxNotes {
+			p.notes = append(p.notes, "跳过了文档中的图片或嵌入对象")
+		}
 	}
 }
 
@@ -162,7 +171,11 @@ func (p *docxParser) end(t xml.EndElement) {
 				sb.WriteString(run.Text)
 			}
 			p.cell.Text = strings.TrimSpace(sb.String())
-			p.curRow = append(p.curRow, *p.cell)
+			if len(p.curRow) < maxTableCols {
+				p.curRow = append(p.curRow, *p.cell)
+			} else {
+				p.rd.truncated = true
+			}
 			p.cell = nil
 			p.cellRuns = nil
 		}
@@ -186,6 +199,18 @@ func (p *docxParser) end(t xml.EndElement) {
 	}
 }
 
+// addStyle 记录一个待应用的样式标记。
+//
+// 上限存在的原因：恶意文档可以连续写几百万个 `<w:b/>`，而它们在下一次
+// pushRun/resetPara 之前会一直留在切片里 —— 输入很小、内存却按元素数增长。
+func (p *docxParser) addStyle(fn func(*Run)) {
+	if len(p.pendingStyles) >= maxPendingStyles {
+		p.rd.truncated = true
+		return
+	}
+	p.pendingStyles = append(p.pendingStyles, fn)
+}
+
 // pushRun 收集一段文本，套上此前遇到的样式标记。
 func (p *docxParser) pushRun(text string) {
 	if text == "" {
@@ -198,10 +223,18 @@ func (p *docxParser) pushRun(text string) {
 	p.pendingStyles = nil
 
 	if p.tblDepth > 0 && p.cell != nil {
-		p.cellRuns = append(p.cellRuns, run)
+		if len(p.cellRuns) < maxRunsPerBlock {
+			p.cellRuns = append(p.cellRuns, run)
+		} else {
+			p.rd.truncated = true
+		}
 		return
 	}
-	p.runs = append(p.runs, run)
+	if len(p.runs) < maxRunsPerBlock {
+		p.runs = append(p.runs, run)
+	} else {
+		p.rd.truncated = true
+	}
 }
 
 // resetPara 开始收集一个新段落。

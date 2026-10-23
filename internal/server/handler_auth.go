@@ -44,8 +44,9 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 与 authorize 用同一套限速：这个接口现在会下发会话 cookie，
 	// 不设闸门等于把口令交给字典攻击 —— 而且登录成功一次就能拿到
 	// 一张长期有效的 cookie，比逐个请求试密码划算得多。
+	user, pass, ok := credentials(r)
 	ip := s.clientIP(r)
-	if blocked, remain := s.authBlocked(ip); blocked {
+	if blocked, remain := s.authBlocked(ip, user); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
 			"message": "认证失败次数过多，请稍后再试",
@@ -53,7 +54,6 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, pass, ok := credentials(r)
 	if !ok || user == "" {
 		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
 			"message": "请输入用户名与密码",
@@ -61,14 +61,14 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.auth.Verify(user, pass) {
-		s.noteAuthFailure(ip)
+		s.noteAuthFailure(ip, user)
 		s.logger.Errorf("登录失败：账号 %q 凭据不正确", user)
 		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
 			"message": "用户名或密码不正确",
 		})
 		return
 	}
-	s.noteAuthSuccess(ip)
+	s.noteAuthSuccess(ip, user)
 
 	// 下发会话 cookie。之后浏览器**自己**发起的请求（<video>/<img> 的加载、
 	// <a download> 的下载）会带上它，于是 Range 流式播放与原生下载都可用，

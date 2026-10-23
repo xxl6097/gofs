@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -228,5 +229,21 @@ func TestSearchTrimPattern(t *testing.T) {
 	got := runSearch(t, SearchFuzzy, "  readme  ")
 	if !strings.EqualFold(strings.Join(got, ","), "readme.md") {
 		t.Errorf("带空格的关键字命中 = %v，期望 [readme.md]", got)
+	}
+}
+
+// TestSearchStopsOnCanceledContext 确认客户端断开后遍历会停止，
+// 而不是把整棵大树走完、白占一个重任务名额。
+func TestSearchStopsOnCanceledContext(t *testing.T) {
+	root := searchFixture(t)
+	res, err := NewResolver(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, _, err := Search(res, root, SearchOptions{Pattern: "a", Ctx: ctx}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("错误 = %v，期望 context.Canceled", err)
 	}
 }

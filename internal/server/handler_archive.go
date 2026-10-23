@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"compress/flate"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,19 +177,22 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 	lim := s.newZipLimits()
 	if picked {
 		var tooLarge bool
-		items, skipped, tooLarge = s.resolvePicks(r, urlPath, picks, lim)
+		items, skipped, tooLarge = s.resolvePicks(r, urlPath, picks, s.cfg.Hidden, lim)
 		if tooLarge {
 			s.writeZipErr(w, errZipTooLarge)
 			return
 		}
 		if len(items) == 0 {
-			http.Error(w, "400 Bad Request: 选中的条目都无法打包（不存在、越界或没有读取权限）",
+			http.Error(w, "400 Bad Request: 选中的条目都无法打包（不存在、越界、没有读取权限或已被隐藏）",
 				http.StatusBadRequest)
 			return
 		}
 	} else {
-		items, err = collectTree(dir, lim)
+		items, err = collectTree(r.Context(), dir, s.cfg.Hidden, lim)
 		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			s.writeZipErr(w, err)
 			return
 		}
@@ -246,7 +250,7 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 		if it.info.IsDir() {
 			// 目录以结尾斜杠的条目表示。
 			hdr := &zip.FileHeader{
-				Name:     it.rel + "/",
+				Name:     safeZipName(it.rel) + "/",
 				Method:   zip.Store,
 				Modified: it.info.ModTime(),
 			}
@@ -259,7 +263,7 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 		}
 
 		hdr := &zip.FileHeader{
-			Name:     it.rel,
+			Name:     safeZipName(it.rel),
 			Method:   method,
 			Modified: it.info.ModTime(),
 		}
@@ -286,9 +290,15 @@ func (s *Server) serveZip(w http.ResponseWriter, r *http.Request, dir, urlPath s
 
 // collectTree 递归收集 dir 下的全部条目，rel 相对于 dir。
 // 单个条目不可读时跳过，不阻塞整个打包。
-func collectTree(dir string, lim *zipLimits) ([]zipItem, error) {
+//
+// hidden 与目录列举/搜索共用同一套规则：否则 --hidden 只是让它从列表里
+// 消失，?zip 仍会把 .git、.env 之类的文件整个导出。
+func collectTree(ctx context.Context, dir string, hidden []string, lim *zipLimits) ([]zipItem, error) {
 	var items []zipItem
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
@@ -296,6 +306,12 @@ func collectTree(dir string, lim *zipLimits) ([]zipItem, error) {
 			return nil
 		}
 		if p == dir {
+			return nil
+		}
+		if fsutil.IsHidden(d.Name(), hidden) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		rel, rerr := filepath.Rel(dir, p)
@@ -322,13 +338,16 @@ func collectTree(dir string, lim *zipLimits) ([]zipItem, error) {
 }
 
 // collectOne 收集单个选中条目：文件直接返回，目录则连同其内容一起展开。
-func collectOne(abs, rel string, lim *zipLimits) ([]zipItem, error) {
+func collectOne(ctx context.Context, abs, rel string, hidden []string, lim *zipLimits) ([]zipItem, error) {
 	// 用 Lstat：软链本身不是要打包的对象。
 	info, err := os.Lstat(abs)
 	if err != nil {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil
+	}
+	if fsutil.IsHidden(filepath.Base(abs), hidden) {
 		return nil, nil
 	}
 	if !info.IsDir() {
@@ -346,7 +365,7 @@ func collectOne(abs, rel string, lim *zipLimits) ([]zipItem, error) {
 			return nil, lerr
 		}
 	}
-	children, err := collectTree(abs, lim)
+	children, err := collectTree(ctx, abs, hidden, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +389,8 @@ func collectOne(abs, rel string, lim *zipLimits) ([]zipItem, error) {
 // 依赖这条约束——权限由逐项的 checkPerm 复核（路径级 ACL 照样生效），
 // 根外访问由 Resolve 拦掉。包内路径优先取「相对当前目录」，
 // 不在当前目录下的（搜索命中）则退回「相对服务根」，避免同名互相覆盖。
-func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string, lim *zipLimits) (items []zipItem, skipped []string, tooLarge bool) {
+func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string,
+	hidden []string, lim *zipLimits) (items []zipItem, skipped []string, tooLarge bool) {
 	base := strings.TrimSuffix(fsutil.CleanURLPath(urlPath), "/")
 	if base == "" {
 		base = "/"
@@ -437,7 +457,7 @@ func (s *Server) resolvePicks(r *http.Request, urlPath string, picks []string, l
 		if seen[rel] {
 			continue
 		}
-		got, err := collectOne(abs, rel, lim)
+		got, err := collectOne(r.Context(), abs, rel, hidden, lim)
 		if errors.Is(err, errZipTooLarge) {
 			// 累计值已经超限，后面的选中项也必然失败，直接停下。
 			// 报 413 比「全部跳过 → 400」准确得多。
@@ -466,6 +486,24 @@ func (s *Server) writeZipErr(w http.ResponseWriter, err error) {
 		return
 	}
 	s.writeErr(w, err)
+}
+
+// safeZipName 清洗写入 zip 的条目名。
+//
+// 服务端在 Unix 上可以存在名字含 `\`、`:` 的文件；把这种名字原样写进
+// zip，Windows 解压器可能把它当成目录分隔符或盘符，从而在**客户端**
+// 制造一次 Zip Slip。这里只做最小改写：保留层级（/），但把分隔符
+// 与盘符字符换成下划线，并防御性地消掉 `..` 段。
+func safeZipName(rel string) string {
+	rel = strings.ReplaceAll(rel, "\\", "_")
+	rel = strings.ReplaceAll(rel, ":", "_")
+	segs := strings.Split(rel, "/")
+	for i, seg := range segs {
+		if seg == ".." {
+			segs[i] = "__"
+		}
+	}
+	return strings.TrimPrefix(strings.Join(segs, "/"), "/")
 }
 
 // zipDownloadName 决定下载时呈现的 zip 文件名。

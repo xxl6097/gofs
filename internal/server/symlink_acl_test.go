@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xxl6097/gofs/internal/uploadkey"
 )
@@ -86,5 +87,72 @@ func TestUploadKeyCannotEscapeScopeWithBackslash(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, `uploads\evil.txt`)); err == nil {
 		t.Fatalf("scope 之外出现了 uploads\\evil.txt")
+	}
+}
+
+// TestDatedUploadDoesNotBypassACL 确认日期归档改写目标之后仍按真实路径复核权限。
+//
+// 根目录里 `2026 -> private`，bob 对 /2026 有写权限、对 /private 只有读权限。
+// 修复前 PUT /x.txt 会被归档到 /2026/…/x.txt，跟随软链实际写进 private；
+// 修复后必须 403，且 private 下不能出现文件。
+func TestDatedUploadDoesNotBypassACL(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "private"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("private", filepath.Join(root, "2026")); err != nil {
+		t.Skipf("当前环境不支持创建软链接：%v", err)
+	}
+
+	s := newTestServer(t, testConfigDated(t, root, "2006/01/02",
+		"--allow-upload", "--auth-fail-limit", "0",
+		"-a", "bob:pw@/x.txt:rw,/2026:rw,/private:r"))
+
+	got := do(t, s, http.MethodPut, "/x.txt", strings.NewReader("HACKED"),
+		map[string]string{"Authorization": basicAuth("bob", "pw")})
+	if got.code == http.StatusCreated {
+		t.Fatalf("日期归档绕过了 ACL：%s", got.body)
+	}
+
+	target := filepath.Join(root, "private", time.Now().Format("01/02"), "x.txt")
+	if _, err := os.Stat(target); err == nil {
+		t.Fatalf("ACL 之外的目录里出现了文件：%s", target)
+	}
+}
+
+// TestDatedUploadKeyCannotEscapeScope 确认 ?dated=1 强制归档时，上传密钥也按
+// 真实目标复核 scope。
+//
+// `/2026/2026 -> ../other`，密钥 scope=/2026：
+// 请求 /2026/x.txt?dated=1 会被改写成 /2026/2026/…/x.txt，跟随软链写入 other/。
+func TestDatedUploadKeyCannotEscapeScope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "2026"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../other", filepath.Join(root, "2026", "2026")); err != nil {
+		t.Skipf("当前环境不支持创建软链接：%v", err)
+	}
+
+	s := newTestServer(t, testConfigDated(t, root, "2006/01/02", "--allow-upload"))
+	_, token, err := s.keys.Create(uploadkey.CreateOptions{
+		Name: "scope-test", Scope: "/2026", Kind: uploadkey.KindUpload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := do(t, s, http.MethodPut, "/2026/x.txt?dated=1&key="+token,
+		strings.NewReader("HACKED"), nil)
+	if got.code == http.StatusCreated {
+		t.Fatalf("日期归档让上传密钥越过了 scope：%s", got.body)
+	}
+
+	target := filepath.Join(root, "other", time.Now().Format("01/02"), "x.txt")
+	if _, err := os.Stat(target); err == nil {
+		t.Fatalf("scope 之外的目录里出现了文件：%s", target)
 	}
 }

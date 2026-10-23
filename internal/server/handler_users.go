@@ -100,6 +100,9 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		note := ""
 		if pw != "" {
 			note = "，并重置了密码"
+			// 改密码意味着「旧凭据全部作废」。会话已经由 auth 层断掉，
+			// 但该账号此前签发的上传密钥/分享链接是 bearer 凭据，不会自动失效。
+			s.revokeUserKeys(req.Name, "重置密码")
 		}
 		s.logger.Infof("修改用户 %q%s，规则 %s", req.Name, note, describeRules(req.Rules))
 		s.writeJSON(w, s.buildUsers())
@@ -116,6 +119,9 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			s.userError(w, err)
 			return
 		}
+		// 账号删除后，会话已由 auth 层作废；它签发的密钥/分享必须一起撤销，
+		// 否则删号只是断开了「登录」，并没有收回已经发出去的访问权。
+		s.revokeUserKeys(name, "删除账号")
 		s.logger.Infof("删除用户 %q", name)
 		s.writeJSON(w, s.buildUsers())
 	default:
@@ -189,6 +195,24 @@ func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool 
 // 冲突**，用 400 + 明确文案比 500 合适得多 —— 界面上会把这段文字直接显示出来。
 func (s *Server) userError(w http.ResponseWriter, err error) {
 	http.Error(w, "400 Bad Request: "+err.Error(), http.StatusBadRequest)
+}
+
+// revokeUserKeys 撤销某个账号创建的全部上传密钥与分享链接。
+//
+// 失败只记日志：账号本身已经删除/改密成功，不能因为密钥落盘失败就把
+// 整个操作报成失败；Store 会保留 dirty 标记，Close/Flush 时再尝试。
+func (s *Server) revokeUserKeys(name, why string) {
+	if s.keys == nil || name == "" {
+		return
+	}
+	n, err := s.keys.RevokeByCreator(name)
+	if err != nil {
+		s.logger.Errorf("%s：撤销账号 %q 创建的密钥失败: %v", why, name, err)
+		return
+	}
+	if n > 0 {
+		s.logger.Infof("%s：已撤销账号 %q 创建的 %d 个密钥/分享", why, name, n)
+	}
 }
 
 func toAuthRules(in []userRuleJSON) []auth.Rule {

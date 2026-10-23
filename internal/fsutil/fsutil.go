@@ -2,8 +2,10 @@
 package fsutil
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -406,16 +408,38 @@ func ReadDir(res relator, dir string, hidden []string, maxEntries int) (*Listing
 		return nil, &os.PathError{Op: "readdir", Path: dir, Err: errors.New("不是目录")}
 	}
 
-	items, err := os.ReadDir(dir)
+	// 分批读取，而不是 os.ReadDir 一次性把整个目录读进内存。
+	//
+	// 十万级目录在并发列举下会产生很尖的内存峰值；这里只保留前
+	// maxEntries 个条目，其余只计数（TotalAll 仍然如实）。
+	// 注意：条目的选取顺序是文件系统顺序，最终会统一排序；被截断时
+	// Truncated/TotalAll 会告诉调用方这不是全部。
+	f, err := os.Open(dir)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 
-	// os.ReadDir 已经把整个目录读进内存了，这一步省不掉；
-	// 但可以避免再把它放大成一份同样大的 Entry 切片 + JSON。
-	total := len(items)
-	if maxEntries > 0 && total > maxEntries {
-		items = items[:maxEntries]
+	const readBatch = 256
+	var items []os.DirEntry
+	total := 0
+	for {
+		chunk, rerr := f.ReadDir(readBatch)
+		for _, it := range chunk {
+			total++
+			if maxEntries <= 0 || len(items) < maxEntries {
+				items = append(items, it)
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return nil, rerr
+		}
+		if len(chunk) == 0 {
+			break
+		}
 	}
 
 	list := &Listing{
@@ -500,6 +524,12 @@ func baseName(rel, fallback string) string {
 	return c
 }
 
+// IsHidden 判断文件名是否命中隐藏 glob。
+//
+// 目录列举、搜索与打包都用同一套规则，避免「列表里看不到、?zip 里却
+// 能整个导出」这种不一致。
+func IsHidden(name string, globs []string) bool { return isHidden(name, globs) }
+
 // isHidden 判断文件名是否命中隐藏 glob。
 func isHidden(name string, globs []string) bool {
 	for _, g := range globs {
@@ -562,6 +592,9 @@ type SearchOptions struct {
 	Hidden []string
 	// Limit 为返回上限，0 表示不限制。
 	Limit int
+	// Ctx 可选；取消后遍历会尽快停止。
+	// 客户端断开时仍把整棵树走完只会白占重任务名额。
+	Ctx context.Context
 }
 
 // searchMatcher 把一次搜索的表达式预先编译好。
@@ -649,8 +682,20 @@ func Search(res relator, root string, opt SearchOptions) (entries []Entry, total
 		// 表达式非法：直接返回，连目录都不遍历。
 		return nil, 0, err
 	}
+	if opt.Ctx != nil {
+		if err := opt.Ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+	}
 	out := make([]Entry, 0, 32)
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if opt.Ctx != nil {
+			select {
+			case <-opt.Ctx.Done():
+				return opt.Ctx.Err()
+			default:
+			}
+		}
 		if err != nil {
 			// 单个条目权限不足等情况直接跳过。
 			if d != nil && d.IsDir() {

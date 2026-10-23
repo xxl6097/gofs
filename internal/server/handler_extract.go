@@ -167,10 +167,18 @@ func (s *Server) applyArchiveLimits(rd archive.Reader) {
 	if maxEntry <= 0 || maxEntry > previewMaxEntry {
 		maxEntry = previewMaxEntry
 	}
+	// 列表/预览的扫描预算再单独收紧：tar 的 List/OpenEntry 必须顺序解压，
+	// 不应该为了看一眼清单就把 ExtractMaxTotal（默认 10 GiB）整份扫完。
+	const previewMaxScan int64 = 1 << 30
+	maxScan := s.cfg.ExtractMaxTotal
+	if maxScan <= 0 || maxScan > previewMaxScan {
+		maxScan = previewMaxScan
+	}
 	ls.SetLimits(archive.Limits{
 		MaxFiles:      s.cfg.ExtractMaxFiles,
 		MaxTotalBytes: s.cfg.ExtractMaxTotal,
 		MaxEntryBytes: maxEntry,
+		MaxScanBytes:  maxScan,
 	})
 }
 
@@ -205,6 +213,11 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "413 Payload Too Large: "+err.Error(), http.StatusRequestEntityTooLarge)
 				return
 			}
+			if errors.Is(err, archive.ErrScanTooLarge) {
+				http.Error(w, "413 Payload Too Large: 压缩包扫描量超过上限，请下载后处理",
+					http.StatusRequestEntityTooLarge)
+				return
+			}
 			s.writeErr(w, err)
 			return
 		}
@@ -227,6 +240,11 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := rd.List(r.Context())
 	if err != nil {
+		if errors.Is(err, archive.ErrScanTooLarge) {
+			http.Error(w, "413 Payload Too Large: 压缩包扫描量超过上限，请下载后处理",
+				http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}
@@ -374,6 +392,11 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := rd.List(r.Context())
 	if err != nil {
+		if errors.Is(err, archive.ErrScanTooLarge) {
+			http.Error(w, "413 Payload Too Large: 压缩包扫描量超过上限，请下载后处理",
+				http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.writeErr(w, err)
 		return
 	}

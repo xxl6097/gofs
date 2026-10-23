@@ -21,6 +21,14 @@ import (
 // maxFormMemory 表单上传时内存中保留的上限，超出部分落临时文件。
 const maxFormMemory = 32 << 20
 
+// maxFormBody 是 multipart 表单上传的硬上限。
+//
+// ParseMultipartForm 会把超过 maxFormMemory 的部分写进系统临时目录。
+// 表单接口不能像流式 PUT 一样允许 UploadMaxSize（默认 10 GiB）——
+// 一个请求就能把 /tmp（常见为 tmpfs）写满，进而影响整台机器。
+// 更大的文件请用流式 PUT，它不产生临时文件。
+const maxFormBody int64 = 1 << 30
+
 // applyUploadLayout 依据配置把上传目标重写到日期归档目录下。
 //
 // **归档只在「直接传到服务根目录」时生效**：urlPath="/pic.jpg" 会变成
@@ -115,6 +123,37 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 		return
 	}
 
+	// 最终落点可能已经被日期归档改写（默认布局或 ?dated=1），也可能经软链/
+	// 大小写别名落到另一条规则下。handleRoot 复核的是**改写前**的 URL，
+	// 改写之后必须按真实目标再复核一次 —— 否则根内一条 `2026 -> private`
+	// 的软链就能把写入重定向到没有写权限的目录；上传密钥同理，会越过 scope。
+	if realURL, realPerm, within := s.realPermOf(r, abs); within {
+		if realURL != destPath {
+			if p.UploadKey != nil {
+				if !p.UploadKey.AllowsPath(realURL) {
+					http.Error(w, fmt.Sprintf("403 Forbidden: 该密钥只允许上传到 %s", p.UploadKey.Scope),
+						http.StatusForbidden)
+					return
+				}
+			} else if realPerm < auth.PermReadWrite {
+				http.Error(w, "403 Forbidden: 对目标的真实路径没有写权限", http.StatusForbidden)
+				return
+			}
+		}
+	} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+		http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+		return
+	}
+
+	// 不接受写入到已存在的软链：悬空软链会写到根外，根内软链也可能把内容
+	// 导到另一条 ACL 路径上（与 handlePost 的逐文件检查同一口径）。
+	if !s.cfg.AllowSymlink {
+		if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			http.Error(w, "403 Forbidden: 目标文件是符号链接", http.StatusForbidden)
+			return
+		}
+	}
+
 	appendMode := strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Update-Range")), "append")
 	flags := os.O_CREATE | os.O_WRONLY
 	if appendMode {
@@ -205,7 +244,11 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 	resetRead := withReadProgress(w, r, s.cfg.UploadReadTimeout)
 	defer resetRead()
 	formMax := s.settings.UploadMaxSize()
-	if !requestBody(w, r, formMax, "表单内容") {
+	if formMax <= 0 || formMax > maxFormBody {
+		// 未限制或限制过大时，表单路径仍需一个独立上限。
+		formMax = maxFormBody
+	}
+	if !requestBody(w, r, formMax, "表单内容（大文件请使用 PUT）") {
 		return
 	}
 

@@ -25,10 +25,29 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // TokenPrefix 是所有密钥的公共前缀，便于在日志与配置里一眼识别。
 const TokenPrefix = "gofs_"
+
+// 密钥数量与字段长度上限。
+//
+// 没有配额时，任何有写权限的账号都能无限签发密钥：每次创建都要把整份
+// keys.json 序列化并 fsync，而每次校验都要线性扫描全部密钥 —— 密钥数
+// 一多，服务就会被自己的管理数据拖死。
+const (
+	// MaxKeys 是全局密钥数上限。
+	MaxKeys = 10000
+	// MaxKeysPerCreator 是单个账号可创建的密钥数上限。
+	MaxKeysPerCreator = 1000
+	// MaxKeyNameRunes 是密钥名称的最大字符数。
+	MaxKeyNameRunes = 200
+	// MaxKeyNoteRunes 是备注的最大字符数。
+	MaxKeyNoteRunes = 2000
+	// MaxKeyScopeRunes 是 scope 的最大字符数。
+	MaxKeyScopeRunes = 1024
+)
 
 // 校验失败的原因。
 var (
@@ -38,6 +57,10 @@ var (
 	ErrExpired = errors.New("上传密钥已过期")
 	// ErrEmptyToken 表示调用方没提供密钥。
 	ErrEmptyToken = errors.New("未提供上传密钥")
+	// ErrTooManyKeys 表示密钥数量已达到全局或单账号上限。
+	ErrTooManyKeys = errors.New("密钥数量已达上限")
+	// ErrInvalidOption 表示创建密钥时的字段不合法（长度等）。
+	ErrInvalidOption = errors.New("密钥参数不合法")
 )
 
 // 使用统计的落盘节流间隔，避免每次上传都写一次磁盘。
@@ -147,9 +170,15 @@ type CreateOptions struct {
 
 // Store 保存全部密钥，可选择持久化到磁盘。
 type Store struct {
-	mu        sync.Mutex
-	path      string
-	keys      map[string]*Key
+	mu   sync.Mutex
+	path string
+	keys map[string]*Key
+	// byHash 是 SHA-256 摘要 -> 密钥 ID 的索引。
+	//
+	// 校验不能每次都线性扫描全部密钥：密钥数一多，每个请求都变成 O(N)。
+	// token 本身有 192 位随机熵，按摘要查找不构成可用的时序侧信道；
+	// Verify 里仍保留一次定长比较作为防御。
+	byHash    map[string]string
 	order     []string // 维持创建顺序
 	lastFlush time.Time
 	dirty     bool
@@ -164,8 +193,9 @@ type fileFormat struct {
 // New 创建（或加载）密钥存储。path 为空表示仅保存在内存中，重启即失效。
 func New(path string) (*Store, error) {
 	s := &Store{
-		path: path,
-		keys: make(map[string]*Key),
+		path:   path,
+		keys:   make(map[string]*Key),
+		byHash: make(map[string]string),
 	}
 	if path == "" {
 		return s, nil
@@ -173,6 +203,9 @@ func New(path string) (*Store, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	// 启动时清掉已过期的密钥：它们校验时会被拒绝，留着只会让
+	// keys.json 无限增长（Prune 之前从没被调用过）。
+	s.Prune(0)
 	return s, nil
 }
 
@@ -198,14 +231,15 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(raw, &ff); err != nil {
 		return fmt.Errorf("密钥文件格式错误（%s）: %w", s.path, err)
 	}
-	now := time.Now()
 	for _, k := range ff.Keys {
 		if k == nil || k.ID == "" || k.Hash == "" {
 			continue
 		}
+		// 摘要统一小写，兼容手工编辑过（或旧版本）的文件。
+		k.Hash = strings.ToLower(strings.TrimSpace(k.Hash))
 		s.keys[k.ID] = k
+		s.byHash[k.Hash] = k.ID
 		s.order = append(s.order, k.ID)
-		_ = now
 	}
 	return nil
 }
@@ -301,6 +335,16 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 	if name == "未命名密钥" && IsShareKind(kind) {
 		name = "分享链接"
 	}
+	if utf8.RuneCountInString(name) > MaxKeyNameRunes {
+		return nil, "", fmt.Errorf("%w：名称最多 %d 个字符", ErrInvalidOption, MaxKeyNameRunes)
+	}
+	note := strings.TrimSpace(opts.Note)
+	if utf8.RuneCountInString(note) > MaxKeyNoteRunes {
+		return nil, "", fmt.Errorf("%w：备注最多 %d 个字符", ErrInvalidOption, MaxKeyNoteRunes)
+	}
+	if utf8.RuneCountInString(scope) > MaxKeyScopeRunes {
+		return nil, "", fmt.Errorf("%w：scope 最多 %d 个字符", ErrInvalidOption, MaxKeyScopeRunes)
+	}
 
 	now := time.Now()
 	k := &Key{
@@ -312,19 +356,33 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 		Kind:      kind,
 		Creator:   opts.Creator,
 		CreatedAt: now,
-		Note:      strings.TrimSpace(opts.Note),
+		Note:      note,
 	}
 	if opts.TTL > 0 {
 		k.ExpiresAt = now.Add(opts.TTL)
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 先清掉过期密钥，让配额统计的是「仍可能被使用的」数量。
+	s.pruneLocked(now, 0)
+	if len(s.keys) >= MaxKeys {
+		return nil, "", fmt.Errorf("%w（全局最多 %d 个）", ErrTooManyKeys, MaxKeys)
+	}
+	if k.Creator != "" && s.countByCreatorLocked(k.Creator) >= MaxKeysPerCreator {
+		return nil, "", fmt.Errorf("%w（每个账号最多 %d 个）", ErrTooManyKeys, MaxKeysPerCreator)
+	}
+
 	s.keys[k.ID] = k
+	s.byHash[k.Hash] = k.ID
 	s.order = append(s.order, k.ID)
 	s.dirty = true
-	err = s.save()
-	s.mu.Unlock()
-	if err != nil {
+	if err := s.save(); err != nil {
+		// 落盘失败就回滚内存，避免「界面上有、重启就没了」。
+		delete(s.keys, k.ID)
+		delete(s.byHash, k.Hash)
+		s.order = s.order[:len(s.order)-1]
 		return nil, "", err
 	}
 	return k, token, nil
@@ -338,27 +396,24 @@ func (s *Store) Verify(token string) (*Key, error) {
 		return nil, ErrEmptyToken
 	}
 	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
 	now := time.Now()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var found *Key
-	for _, id := range s.order {
-		k, ok := s.keys[id]
-		if !ok {
-			continue
-		}
-		kh, err := hex.DecodeString(k.Hash)
-		if err != nil || len(kh) != len(sum) {
-			continue
-		}
-		if subtle.ConstantTimeCompare(kh, sum[:]) == 1 {
-			found = k
-			break
-		}
+	// O(1) 摘要索引。token 有 192 位随机熵，按摘要查找不构成可用的
+	// 时序侧信道；下面仍保留一次定长比较，避免索引被意外写脏时放行。
+	id, ok := s.byHash[hash]
+	if !ok {
+		return nil, ErrNotFound
 	}
-	if found == nil {
+	found, ok := s.keys[id]
+	if !ok {
+		delete(s.byHash, hash)
+		return nil, ErrNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(found.Hash), []byte(hash)) != 1 {
 		return nil, ErrNotFound
 	}
 	if found.Expired(now) {
@@ -406,10 +461,12 @@ func (s *Store) Get(id string) (*Key, bool) {
 func (s *Store) Revoke(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.keys[id]; !ok {
+	k, ok := s.keys[id]
+	if !ok {
 		return ErrNotFound
 	}
 	delete(s.keys, id)
+	delete(s.byHash, k.Hash)
 	for i, v := range s.order {
 		if v == id {
 			s.order = append(s.order[:i], s.order[i+1:]...)
@@ -420,9 +477,19 @@ func (s *Store) Revoke(id string) error {
 	return s.save()
 }
 
-// Prune 删除已过期超过 grace 的密钥，返回删除数量。
-func (s *Store) Prune(grace time.Duration) int {
-	now := time.Now()
+// RevokeByCreator 撤销某个账号创建的全部密钥（含分享链接）。
+//
+// 账号被删除或密码被重置时调用：会话会被 dropUserSessions 断掉，但这些
+// bearer 凭据不会自动失效。不撤销的话，删除一个被入侵的账号之后，攻击者
+// 仍能用它此前签发的密钥/分享继续访问。
+//
+// creator 为空串时不做任何事（避免误删匿名创建的密钥）。
+func (s *Store) RevokeByCreator(creator string) (int, error) {
+	creator = strings.TrimSpace(creator)
+	if creator == "" {
+		return 0, nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -433,8 +500,49 @@ func (s *Store) Prune(grace time.Duration) int {
 		if !ok {
 			continue
 		}
+		if k.Creator == creator {
+			delete(s.keys, id)
+			delete(s.byHash, k.Hash)
+			removed++
+			continue
+		}
+		kept = append(kept, id)
+	}
+	s.order = kept
+	if removed == 0 {
+		return 0, nil
+	}
+	s.dirty = true
+	if err := s.save(); err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
+// Prune 删除已过期超过 grace 的密钥，返回删除数量。
+func (s *Store) Prune(grace time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := s.pruneLocked(time.Now(), grace)
+	if removed > 0 {
+		_ = s.save()
+	}
+	return removed
+}
+
+// pruneLocked 是 Prune 的无锁版本（调用方需持有写锁）。返回删除数量。
+func (s *Store) pruneLocked(now time.Time, grace time.Duration) int {
+	removed := 0
+	kept := s.order[:0]
+	for _, id := range s.order {
+		k, ok := s.keys[id]
+		if !ok {
+			continue
+		}
 		if !k.ExpiresAt.IsZero() && now.After(k.ExpiresAt.Add(grace)) {
 			delete(s.keys, id)
+			delete(s.byHash, k.Hash)
 			removed++
 			continue
 		}
@@ -443,9 +551,19 @@ func (s *Store) Prune(grace time.Duration) int {
 	s.order = kept
 	if removed > 0 {
 		s.dirty = true
-		_ = s.save()
 	}
 	return removed
+}
+
+// countByCreatorLocked 统计某个创建者名下的密钥数。调用方需持有写锁。
+func (s *Store) countByCreatorLocked(creator string) int {
+	n := 0
+	for _, k := range s.keys {
+		if k.Creator == creator {
+			n++
+		}
+	}
+	return n
 }
 
 // Count 返回密钥总数。

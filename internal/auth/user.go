@@ -194,6 +194,46 @@ func ValidateRules(rules []Rule) ([]Rule, error) {
 	return out, nil
 }
 
+// RulePathsUnder 返回落在 prefix 之下（含自身）的 ACL 规则路径。
+//
+// 供「新增站点」时做冲突提示：ACL 是按 URL 前缀匹配的，一条原本针对主目录
+// `/backup` 的规则，在标签同为 backup 的站点挂上之后会静默地作用于新站点。
+// 这里只收集**具体落在该前缀下**的规则；`/` 这类全局规则不在此列。
+func (a *Authenticator) RulePathsUnder(prefix string) []string {
+	if a == nil {
+		return nil
+	}
+	prefix = normalizePath(prefix)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	seen := map[string]bool{}
+	var out []string
+	add := func(acc *account) {
+		if acc == nil {
+			return
+		}
+		for _, r := range acc.Rules {
+			if r.Path != prefix && !strings.HasPrefix(r.Path, prefix+"/") {
+				continue
+			}
+			if !seen[r.Path] {
+				seen[r.Path] = true
+				out = append(out, r.Path)
+			}
+		}
+	}
+	add(a.anonAcc)
+	for _, acc := range a.static {
+		add(acc)
+	}
+	for _, acc := range a.users {
+		add(acc)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // UserFile 返回用户表的落盘路径（空串表示仅内存）。
 func (a *Authenticator) UserFile() string {
 	if a == nil {
@@ -512,18 +552,44 @@ func (a *Authenticator) commit() error {
 	data = append(data, '\n')
 
 	dir := filepath.Dir(a.userFile)
-	if dir != "" && dir != "." {
+	if dir == "" {
+		dir = "."
+	}
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("创建用户表目录失败: %w", err)
 		}
 	}
-	tmp := a.userFile + ".tmp"
-	// 0600：文件里是密码摘要，虽然不能用它直接登录，也没必要让同机其他用户读到。
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// 用随机临时名，而不是固定的 users.json.tmp：
+	// 固定名字可被本地攻击者预先放一条软链，让服务以自身权限覆盖任意文件。
+	tmp, err := os.CreateTemp(dir, ".users-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建用户表临时文件失败: %w", err)
+	}
+	tmpName := tmp.Name()
+	abort := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		abort()
 		return fmt.Errorf("写入用户表失败: %w", err)
 	}
-	if err := os.Rename(tmp, a.userFile); err != nil {
-		_ = os.Remove(tmp)
+	// 0600：文件里是密码摘要，虽然不能用它直接登录，也没必要让同机其他用户读到。
+	if err := tmp.Chmod(0o600); err != nil {
+		abort()
+		return fmt.Errorf("设置用户表权限失败: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		abort()
+		return fmt.Errorf("同步用户表失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("关闭用户表临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpName, a.userFile); err != nil {
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("替换用户表失败: %w", err)
 	}
 	return nil

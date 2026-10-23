@@ -190,8 +190,13 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 		Mode:    fsutil.ParseSearchMode(r.URL.Query().Get("mode")),
 		Hidden:  s.cfg.Hidden,
 		Limit:   searchMaxEntries,
+		Ctx:     r.Context(),
 	})
 	if err != nil {
+		// 客户端已经断开：遍历是被 context 停下来的，不必再写响应/记错误日志。
+		if r.Context().Err() != nil {
+			return
+		}
 		// 表达式非法（坏正则 / 坏通配符）是调用方的输入错误，回 400。
 		// 不能交给 writeErr —— 它把未知错误一律当 500。
 		if errors.Is(err, fsutil.ErrBadSearchPattern) {

@@ -3,6 +3,7 @@ package office
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -77,9 +78,13 @@ func (p *pptxParser) slide(data []byte) []Block {
 		runs = nil
 	}
 
+	guard := &xmlGuard{}
 	for {
-		tok, err := dec.Token()
+		tok, err := guard.token(dec)
 		if err != nil {
+			if errors.Is(err, ErrNotOffice) {
+				p.rd.truncated = true
+			}
 			break
 		}
 		switch t := tok.(type) {
@@ -102,7 +107,11 @@ func (p *pptxParser) slide(data []byte) []Block {
 			case "t":
 				if inT {
 					if txt := clipRun(sb.String()); txt != "" {
-						runs = append(runs, Run{Text: txt})
+						if len(runs) < maxRunsPerBlock {
+							runs = append(runs, Run{Text: txt})
+						} else {
+							p.rd.truncated = true
+						}
 					}
 					inT = false
 				}

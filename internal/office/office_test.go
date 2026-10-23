@@ -3,6 +3,7 @@ package office
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -472,5 +473,40 @@ func TestMaxPartsOption(t *testing.T) {
 	}
 	if !doc.Truncated {
 		t.Error("被上限截断时应当置 Truncated")
+	}
+}
+
+// TestDocxRejectsDeepXMLNesting 确认深层嵌套的 XML 会在超过深度上限时被拒绝。
+//
+// encoding/xml 的解析栈按元素深度增长，4 MiB 的 `<a>` 嵌套实测可占约
+// 139 MiB 堆内存；只限制字节数挡不住这种放大。这里固化的就是那条硬上限。
+func TestDocxRejectsDeepXMLNesting(t *testing.T) {
+	const depth = maxXMLDepth + 10
+	body := strings.Repeat("<w:p>", depth) +
+		`<w:r><w:t>x</w:t></w:r>` +
+		strings.Repeat("</w:p>", depth)
+
+	zr := buildZip(t, map[string]string{"word/document.xml": docxXML(body)})
+	if _, err := Extract(zr, "docx", Options{}); !errors.Is(err, ErrNotOffice) {
+		t.Fatalf("深层嵌套 XML 未被拒绝，err = %v", err)
+	}
+}
+
+// TestXlsxDeepXMLNestingIsTruncated 确认表格解析同样受深度上限保护。
+// 它不返回错误（函数签名为 []Block），但必须停止解析并标记截断。
+func TestXlsxDeepXMLNestingIsTruncated(t *testing.T) {
+	const depth = maxXMLDepth + 10
+	sheet := `<?xml version="1.0"?><worksheet><sheetData>` +
+		strings.Repeat("<row>", depth) +
+		strings.Repeat("</row>", depth) +
+		`</sheetData></worksheet>`
+
+	zr := buildZip(t, map[string]string{"xl/worksheets/sheet1.xml": sheet})
+	doc, err := Extract(zr, "xlsx", Options{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !doc.Truncated {
+		t.Fatalf("深层嵌套的 xlsx 未被标记截断：%+v", doc)
 	}
 }
