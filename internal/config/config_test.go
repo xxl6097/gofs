@@ -105,3 +105,39 @@ func TestUploadDateLayoutFromEnv(t *testing.T) {
 		t.Errorf("环境变量布局未生效，得到 %q", got)
 	}
 }
+
+// TestEnvExplicitDisableNotOverriddenByUpload 钉住环境变量的显式优先级：
+// GOFS_ALLOW_EDIT/KEYS=false 不能被 GOFS_ALLOW_UPLOAD=true 的推断覆盖。
+func TestEnvExplicitDisableNotOverriddenByUpload(t *testing.T) {
+	t.Setenv("GOFS_ALLOW_UPLOAD", "true")
+	t.Setenv("GOFS_ALLOW_EDIT", "false")
+	t.Setenv("GOFS_ALLOW_KEYS", "false")
+	cfg, err := parse(t, "-log-format", "none", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AllowEdit {
+		t.Error("GOFS_ALLOW_EDIT=false 被上传推断覆盖了")
+	}
+	if cfg.AllowKeys {
+		t.Error("GOFS_ALLOW_KEYS=false 被上传推断覆盖了")
+	}
+}
+
+// TestSafeDefaults 钉住收紧后的默认值：回环监听、禁止任意站点、assets
+// 不得位于服务根内。
+func TestSafeDefaults(t *testing.T) {
+	cfg, err := parse(t, "-log-format", "none", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bind != "127.0.0.1" {
+		t.Errorf("默认 bind = %q，期望 127.0.0.1", cfg.Bind)
+	}
+	if cfg.AllowAnySite {
+		t.Error("默认不应允许挂载任意站点")
+	}
+	if cfg.UnsafeAssetsInRoot {
+		t.Error("默认不应允许 assets 位于服务根内")
+	}
+}

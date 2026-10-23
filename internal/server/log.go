@@ -5,11 +5,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xxl6097/gofs/internal/uploadkey"
 )
 
 // defaultLogFormat 为未指定 --log-format 时使用的格式。
@@ -100,17 +103,63 @@ func (l *Logger) render(r *http.Request, status int, user string, start time.Tim
 	return sanitizeLogLine(out)
 }
 
-// sensitiveQueryRe 匹配查询串里的敏感参数值。
-//
-// 覆盖 gofs 自己支持的所有凭据入口：?pass= 登录、?key= 上传密钥、
-// ?share= 分享令牌，以及第三方客户端常用的 token/api_key 等写法。
+// sensitiveQueryRe 是解析失败时的兜底：直接在原始 URI 上匹配敏感参数名。
 var sensitiveQueryRe = regexp.MustCompile(
 	`(?i)([?&](?:pass|password|pwd|key|token|access_token|share|secret|api_?key)=)[^&#]*`,
 )
 
+// sensitiveQueryKey 判断解码后的查询参数名是否承载凭据。
+//
+// 必须在**解码后**判断：`?pa%73s=secret` 与 `?pass=secret` 在服务端
+// 解析结果相同，但原始字符串上的正则会漏掉前者，导致密码进日志。
+func sensitiveQueryKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "pass", "password", "pwd", "key", "token", "access_token",
+		"share", "secret", "api_key", "apikey", "api-key":
+		return true
+	}
+	return false
+}
+
 // redactURI 把 URI 查询串中的敏感值替换为 ***。
+//
+// 同时处理两类容易漏掉的凭据：
+//   - 百分号编码的参数名（按解码后的键名判断）；
+//   - 路径形式的分享令牌 `/s/<token>/…`（分享按钮生成的就是这种地址）。
 func redactURI(uri string) string {
-	return sensitiveQueryRe.ReplaceAllString(uri, "${1}***")
+	u, err := url.ParseRequestURI(uri)
+	if err != nil {
+		out := sensitiveQueryRe.ReplaceAllString(uri, "${1}***")
+		return redactSharePath(out)
+	}
+	q := u.Query()
+	changed := false
+	for k := range q {
+		if sensitiveQueryKey(k) {
+			q.Set(k, "***")
+			changed = true
+		}
+	}
+	if changed {
+		u.RawQuery = q.Encode()
+	}
+	u.Path = redactSharePath(u.Path)
+	u.RawPath = ""
+	return u.String()
+}
+
+// redactSharePath 把 `/s/<gofs_xxx>/…` 中的令牌替换为 ***。
+//
+// 路径形式分享是前端默认生成的地址；不脱敏的话，任何能读访问日志的人
+// 都能拿到一条仍然有效的 bearer 凭据。
+func redactSharePath(p string) string {
+	segs := strings.Split(p, "/")
+	for i := 0; i+1 < len(segs); i++ {
+		if segs[i] == "s" && strings.HasPrefix(segs[i+1], uploadkey.TokenPrefix) {
+			segs[i+1] = "***"
+		}
+	}
+	return strings.Join(segs, "/")
 }
 
 // sanitizeLogLine 清理日志行里的控制字符。

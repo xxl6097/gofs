@@ -90,7 +90,7 @@ func TestUpgradeLockReleasedAfterRun(t *testing.T) {
 
 	// 第二次：锁应该已经还回来了。用一个立刻返回的实现，避免又卡住。
 	cfg := testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw")
-	cfg.Upgrader = &fakeUpgrader{}
+	cfg.Upgrader = &fakeUpgrader{rel: &config.Release{Version: "9.9.9"}}
 	s2 := newTestServer(t, cfg)
 	got := do(t, s2, "POST", "/fs/upgrade", strings.NewReader(body), adminHdr())
 	if got.code == 409 {
@@ -103,7 +103,7 @@ func TestUpgradeLockReleasedAfterRun(t *testing.T) {
 func TestUpgradeErrorSurfacedToAdmin(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(t, root, "-A", "-a", "boss:pw@/:rw")
-	cfg.Upgrader = &fakeUpgrader{uerr: errNotFound}
+	cfg.Upgrader = &fakeUpgrader{rel: &config.Release{Version: "9.9.9"}, uerr: errNotFound}
 	s := newTestServer(t, cfg)
 
 	got := do(t, s, "POST", "/fs/upgrade",

@@ -106,7 +106,7 @@ func (p *pptxParser) slide(data []byte) []Block {
 			switch t.Name.Local {
 			case "t":
 				if inT {
-					if txt := clipRun(sb.String()); txt != "" {
+					if txt := p.rd.chargeText(sb.String()); txt != "" {
 						if len(runs) < maxRunsPerBlock {
 							runs = append(runs, Run{Text: txt})
 						} else {

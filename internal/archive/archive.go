@@ -24,6 +24,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -111,6 +112,34 @@ func authorizeWrite(opts Options, target string) error {
 		return nil
 	}
 	return opts.Authorize(filepath.ToSlash(rel))
+}
+
+// authorizeParents 在创建目录之前，逐级校验目标路径上的每一级父目录。
+//
+// 只授权叶子文件是不够的：`/docs:r,/docs/sub/leaf.txt:rw` 的账号
+// 可以写 leaf，但不应因此获得在 /docs 下创建目录的权力。MkdirAll 会
+// 顺带创建缺失的祖先目录，所以必须在调用它之前逐级过一遍 Authorize。
+func authorizeParents(opts Options, target string) error {
+	if opts.Authorize == nil {
+		return nil
+	}
+	rel, err := filepath.Rel(opts.Dest, filepath.Dir(target))
+	if err != nil {
+		return fmt.Errorf("条目路径非法: %w", err)
+	}
+	if rel == "." || rel == "" {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("条目路径试图逃逸出目标目录")
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	for i := 1; i <= len(parts); i++ {
+		if err := opts.Authorize(strings.Join(parts[:i], "/")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Progress 描述解压进度。
@@ -307,6 +336,9 @@ func secureJoin(dest, name string) (string, error) {
 		if seg == ".." {
 			return "", fmt.Errorf("条目 %q 使用了 .. 路径段，已拒绝", name)
 		}
+		if unsafeWindowsSegment(seg) {
+			return "", fmt.Errorf("条目 %q 含有 Windows 不安全的路径段 %q", name, seg)
+		}
 	}
 	cleaned := strings.TrimPrefix(path.Clean("/"+name), "/")
 	if cleaned == "" || cleaned == "." {
@@ -321,6 +353,41 @@ func secureJoin(dest, name string) (string, error) {
 		return "", fmt.Errorf("条目 %q 试图逃逸出目标目录", name)
 	}
 	return target, nil
+}
+
+// unsafeWindowsSegment 识别 Win32 会“改写语义”的路径段。
+//
+// Windows 会去掉段尾的空格/点（`".. "` 等价于 `".."`），并把 `:` 解释为
+// NTFS 备用数据流；这些字符在 Linux/macOS 上合法，词法检查也看不出来，
+// 但落盘时由 Win32 解析，可能越出目标目录或写到只读 ACL 覆盖不到的 ADS。
+func unsafeWindowsSegment(seg string) bool {
+	if runtime.GOOS != "windows" || seg == "" || seg == "." {
+		return false
+	}
+	if strings.ContainsRune(seg, ':') {
+		return true
+	}
+	trimmed := strings.TrimRight(seg, " .")
+	if trimmed == "" || trimmed != seg {
+		return true
+	}
+	if trimmed == ".." {
+		return true
+	}
+	base := strings.ToUpper(strings.SplitN(trimmed, ".", 2)[0])
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(base) == 4 {
+		switch base[:3] {
+		case "COM", "LPT":
+			if base[3] >= '1' && base[3] <= '9' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // limiter 累计并校验解压规模，防止解压炸弹。
@@ -427,6 +494,9 @@ func writeFile(target string, src io.Reader, opts Options, limit *limiter, compr
 		if _, err := os.Stat(target); err == nil {
 			return 0, fs.ErrExist
 		}
+	}
+	if err := authorizeParents(opts, target); err != nil {
+		return 0, err
 	}
 	if dir := filepath.Dir(target); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -20,7 +20,13 @@ func (s *Server) walkTree(abs string, fn func(p, rel string) string) (string, bo
 	var reason string
 	err := filepath.WalkDir(abs, func(p string, _ fs.DirEntry, werr error) error {
 		if werr != nil {
-			reason = fmt.Sprintf("%s: %v", p, werr)
+			// 只把服务内相对路径回给客户端；绝对路径与系统错误细节
+			// 只属于服务端日志（writeErr 也是这个口径）。
+			if rel, rerr := s.res.Rel(p); rerr == nil {
+				reason = rel
+			} else {
+				reason = filepath.Base(p)
+			}
 			return werr
 		}
 		if p == abs {

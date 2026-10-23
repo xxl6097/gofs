@@ -50,7 +50,7 @@ var ErrHelp = config.ErrHelp
 // Default 返回一份只含内置默认值的配置，不读取环境变量。
 //
 // 默认是**只读**服务：上传、删除、编辑、打包、解压全部关闭，
-// 监听 0.0.0.0:5000，服务当前目录。
+// 监听 127.0.0.1:5000，服务当前目录。对外提供服务请显式 WithBind。
 func Default() *Config { return config.Defaults() }
 
 func DefaultKeyDir() string { return config.DefaultKeyDir() }

@@ -510,3 +510,29 @@ func TestXlsxDeepXMLNestingIsTruncated(t *testing.T) {
 		t.Fatalf("深层嵌套的 xlsx 未被标记截断：%+v", doc)
 	}
 }
+
+// TestOutputBudgetStopsAmplification 钉住输出预算：共享字符串被大量单元格
+// 引用时，不能把整份文档的文本总量无限放大。
+func TestOutputBudgetStopsAmplification(t *testing.T) {
+	r := &reader{textBudget: 16}
+	if got := r.chargeText(strings.Repeat("a", 10)); got == "" {
+		t.Fatal("预算内文本不应被丢弃")
+	}
+	if got := r.chargeText(strings.Repeat("b", 10)); got != "" {
+		t.Fatal("超出预算的文本应被丢弃")
+	}
+	if !r.truncated {
+		t.Fatal("超预算后应标记 truncated")
+	}
+}
+
+// TestCellBudget 确认单元格数量也有硬上限。
+func TestCellBudget(t *testing.T) {
+	r := &reader{cells: maxCells}
+	if r.chargeCell() {
+		t.Fatal("超过 maxCells 后不应继续接受单元格")
+	}
+	if !r.truncated {
+		t.Fatal("超单元格上限后应标记 truncated")
+	}
+}

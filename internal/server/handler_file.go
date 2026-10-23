@@ -201,7 +201,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 		}
 		// 其它中断（网络断开等）：已写入部分保留，便于客户端续传。
 		s.logger.Errorf("写入 %s 中断: %v", abs, err)
-		http.Error(w, "500 写入失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "500 写入失败，请查看服务端日志", http.StatusInternalServerError)
 		return
 	}
 
@@ -268,6 +268,14 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		}
 	}()
 
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		// 必须在任何 MkdirAll 之前拒绝：否则一个不带文件的请求
+		// 也能借 path= 参数在服务端创建目录（包括穿过软链建到别处）。
+		http.Error(w, "400 Bad Request: 未收到任何文件", http.StatusBadRequest)
+		return
+	}
+
 	// 目标目录 = 当前目录 [+ 表单指定的子路径] [+ 年/月/日 归档目录]。
 	destDir := fsutil.CleanURLPath(urlPath)
 	if sub := strings.TrimSpace(r.FormValue("path")); sub != "" {
@@ -308,14 +316,24 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		http.Error(w, "403 Forbidden: 目标目录非法", http.StatusForbidden)
 		return
 	}
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		s.writeErr(w, err)
-		return
-	}
-
-	files := r.MultipartForm.File["file"]
-	if len(files) == 0 {
-		http.Error(w, "400 Bad Request: 未收到任何文件", http.StatusBadRequest)
+	// 目标目录可能是软链/大小写别名：先按真实路径复核，再允许创建。
+	// 这一步必须发生在 MkdirAll 之前 —— 否则 `docs/link -> ../private`
+	// 会让一次表单上传在 alice 只有读权限的 /private 下建目录。
+	if realURL, within := s.realURLOf(base); within {
+		if realURL != destDir {
+			if p.UploadKey != nil {
+				if !s.uploadKeyAllowed(r, p.UploadKey, realURL) {
+					http.Error(w, "403 Forbidden: 目标目录超出该密钥允许的范围，或创建者已无对应权限",
+						http.StatusForbidden)
+					return
+				}
+			} else if s.checkPerm(r, realURL) != auth.PermReadWrite {
+				http.Error(w, "403 Forbidden: 对目标目录的真实路径没有写权限", http.StatusForbidden)
+				return
+			}
+		}
+	} else if p.UploadKey != nil || shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+		http.Error(w, "403 Forbidden: 目标目录超出服务范围", http.StatusForbidden)
 		return
 	}
 
@@ -382,6 +400,15 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 			}
 		}
 		targets = append(targets, uploadTarget{fh: fh, dst: dst})
+	}
+
+	// 整批校验全部通过后才创建目标目录，避免“前几个文件越权、目录却已建好”
+	// 的半完成状态。目录本身已在上方按真实路径复核过权限。
+	if len(targets) > 0 {
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			s.writeErr(w, err)
+			return
+		}
 	}
 
 	saved := make([]string, 0, len(targets))
@@ -556,7 +583,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 		}
 	}
 	// 与源路径一样，按磁盘真实名字对齐（大小写/规范化/短名）。
-	destPath = s.canonicalPath(r, destPath)
+	canon, ok := s.canonicalPath(r, destPath)
+	if !ok {
+		http.Error(w, "403 Forbidden: 目标路径超出服务范围或无法安全规范化", http.StatusForbidden)
+		return
+	}
+	destPath = canon
 
 	// 目标名的长度也要挡：不挡的话，一个超长名会被文件系统拒成 ENAMETOOLONG，
 	// 透出去就是 500 —— 看起来像服务端故障，实际是请求本身不合法，而上传同一个

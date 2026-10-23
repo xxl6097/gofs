@@ -34,6 +34,7 @@ func (s *Server) renderLinkIndex(w http.ResponseWriter, r *http.Request,
 	defer reset()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	s.setUserContentCache(w)
 
 	// 链接上要不要挂 ?share=：
 	//   - 路径形式下不用（前缀已经带着令牌了）；

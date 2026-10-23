@@ -47,7 +47,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -120,6 +122,15 @@ type Upgrader struct {
 }
 
 // defaultAssetName 返回 <prefix>-<goos>-<goarch>[.exe] 的拼装函数。
+// isLoopbackHost 判断主机名是否是本机回环（允许本地 HTTP 更新镜像）。
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func defaultAssetName(prefix string) func(string, string) string {
 	return func(goos, goarch string) string {
 		n := prefix + "-" + goos + "-" + goarch
@@ -148,6 +159,15 @@ func New(opts Options) (*Upgrader, error) {
 	base := strings.TrimSuffix(opts.APIBase, "/")
 	if base == "" {
 		base = DefaultAPIBase
+	}
+	// 升级会下载并替换正在运行的二进制，API 地址必须是 HTTPS（本机回环
+	// 镜像除外）。否则中间人可以同时替换资产和校验和，SHA-256 校验形同虚设。
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("githubupgrade: APIBase %q 不是合法 URL", base)
+	}
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf("githubupgrade: APIBase 必须使用 HTTPS（仅本机回环允许 HTTP）")
 	}
 	sums := opts.ChecksumsName
 	if sums == "" {

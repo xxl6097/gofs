@@ -118,7 +118,7 @@ func TestUpgradeCheckSurfacesError(t *testing.T) {
 
 // TestUpgradeRunStreamsProgress 覆盖升级：进度要经 SSE 推给前端。
 func TestUpgradeRunStreamsProgress(t *testing.T) {
-	u := &fakeUpgrader{progress: []config.UpgradeProgress{
+	u := &fakeUpgrader{rel: &config.Release{Version: "9.9.9"}, progress: []config.UpgradeProgress{
 		{Stage: config.StageDownloading, Loaded: 50, Total: 100},
 		{Stage: config.StageReplacing, Message: "写入文件"},
 	}}
@@ -148,7 +148,7 @@ func TestUpgradeRunStreamsProgress(t *testing.T) {
 // TestUpgradeRunReportsFailure 确认实现返回错误时通过 SSE 报给前端，
 // 而不是静默地结束流。
 func TestUpgradeRunReportsFailure(t *testing.T) {
-	u := &fakeUpgrader{uerr: errors.New("校验失败：摘要对不上")}
+	u := &fakeUpgrader{rel: &config.Release{Version: "9.9.9"}, uerr: errors.New("校验失败：摘要对不上")}
 	s := upgradeServer(t, u)
 
 	body, _ := json.Marshal(map[string]any{"release": map[string]any{"version": "9.9.9"}})

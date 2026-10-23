@@ -81,18 +81,18 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	//
 	// 这里刻意不用 authorize("/")：完全不相关的路径级权限不应成为
 	// 管理密钥的门槛。先验凭据，再看是否在任一目录上有写权限。
-	user, pass, hasCred := credentials(r)
+	user, pass, hasCred, class := credentialsWithSource(r)
 	admin := !s.auth.Enabled()
 	if s.auth.Enabled() {
 		// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
 		// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
-		ip, ok := s.checkAuthLimit(w, r, user)
+		ip, ok := s.checkAuthLimit(w, r, class, user)
 		if !ok {
 			return
 		}
 		if !hasCred || !s.auth.Verify(user, pass) {
 			if hasCred {
-				s.noteAuthFailure(ip, user)
+				s.noteAuthFailure(ip, class, user)
 			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
@@ -100,7 +100,8 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		s.noteAuthSuccess(ip, user)
+		s.noteVerifiedUser(r, user)
+		s.noteAuthSuccess(ip, class, user)
 		admin = s.auth.Lookup("/", user, pass, true) == auth.PermReadWrite
 	}
 	if !s.auth.HasAnyWrite(user, pass, hasCred) {
@@ -214,8 +215,13 @@ func (s *Server) keyCreate(w http.ResponseWriter, r *http.Request, creator, pass
 	// 分享链接会把内容**公开**出去（拿到链接的人不需要登录），
 	// 所以额外要求服务开启了上传/共享能力，避免在一个只读实例上
 	// 悄悄开出一条公开通道。两种分享都算。
-	if uploadkey.IsShareKind(kind) && !s.cfg.AllowUpload && !s.cfg.AllowKeys {
-		http.Error(w, "403 Forbidden: 本服务未开启任何可写的功能，无法创建分享链接",
+	// 只读实例（没有上传/编辑/解压）不应仅凭 --allow-keys 就悄悄
+	// 开出一条公开只读通道。原来的条件里带了 !AllowKeys，但函数开头
+	// 已经要求 AllowKeys，等于永不生效。
+	if uploadkey.IsShareKind(kind) && !s.cfg.AllowShare &&
+		!s.cfg.AllowUpload && !s.cfg.AllowEdit && !s.cfg.AllowExtract {
+		http.Error(w, "403 Forbidden: 本服务未开启上传/编辑/解压，无法创建分享链接"+
+			"（只读实例确实需要分享时显式使用 --allow-share）",
 			http.StatusForbidden)
 		return
 	}

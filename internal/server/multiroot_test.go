@@ -494,8 +494,8 @@ func TestAddSiteUnrestrictedByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 注意：**不给** --root-allow。
-	cfg := testConfigRoots(t, []string{mainDir}, "-A", "-a", "boss:pw@/:rw")
+	// 显式 --allow-any-site：恢复“管理员可挂载主机任意已存在目录”的旧行为。
+	cfg := testConfigRoots(t, []string{mainDir}, "-A", "-a", "boss:pw@/:rw", "--allow-any-site")
 	s := newTestServer(t, cfg)
 
 	got := do(t, s, http.MethodPut, "/fs/settings",
@@ -514,6 +514,38 @@ func TestAddSiteUnrestrictedByDefault(t *testing.T) {
 		strings.NewReader(`{"root":"`+far+`"}`), adminSettingsHdr())
 	if put.code != http.StatusBadRequest {
 		t.Errorf("换根不该跟着放宽：%d %s", put.code, put.body)
+	}
+}
+
+// TestAddSiteRestrictedByDefault 钉住新的安全默认值：没有 --allow-any-site
+// 时，站点只能落在启动根的同级目录内，不能把 /etc 之类挂进来。
+func TestAddSiteRestrictedByDefault(t *testing.T) {
+	base := t.TempDir()
+	mainDir := filepath.Join(base, "main")
+	if err := os.MkdirAll(mainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	far := filepath.Join(t.TempDir(), "far")
+	if err := os.MkdirAll(far, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfigRoots(t, []string{mainDir}, "-A", "-a", "boss:pw@/:rw")
+	s := newTestServer(t, cfg)
+
+	got := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"add_site":{"path":"`+far+`"}}`), adminSettingsHdr())
+	if got.code != http.StatusBadRequest || !strings.Contains(got.body, "超出白名单") {
+		t.Fatalf("默认应限制在启动根同级目录，实际 %d：%s", got.code, got.body)
+	}
+	// 同级目录仍然允许。
+	sibling := filepath.Join(base, "sibling")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok := do(t, s, http.MethodPut, "/fs/settings",
+		strings.NewReader(`{"add_site":{"path":"`+sibling+`"}}`), adminSettingsHdr())
+	if ok.code != http.StatusOK {
+		t.Fatalf("同级目录应可新增，实际 %d：%s", ok.code, ok.body)
 	}
 }
 

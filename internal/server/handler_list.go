@@ -317,6 +317,7 @@ func (s *Server) tryServeIndex(w http.ResponseWriter, r *http.Request, dir strin
 	defer f.Close()
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	s.hardenIndex(w)
+	s.setUserContentCache(w)
 	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
 	defer reset()
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
@@ -355,6 +356,7 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	s.hardenIndex(w)
+	s.setUserContentCache(w)
 	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
 	defer reset()
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)

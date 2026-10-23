@@ -148,13 +148,23 @@ func MigrateLegacyDefaults(cfg *Config) error {
 // 一是不会污染被服务的文件树（否则密钥文件会出现在目录列表里），
 // 二是不会因为换一个服务目录就丢掉已有密钥。
 func DefaultKeyFile() string {
-	return filepath.Join(DefaultKeyDir(), "keys.json")
+	dir := DefaultKeyDir()
+	if dir == "" {
+		// 拿不到绝对配置目录时宁可不落盘（banner 会显示“仅内存”），
+		// 也不要把 keys.json 静默写进当前工作目录 —— 那可能就是被服务的根。
+		return ""
+	}
+	return filepath.Join(dir, "keys.json")
 }
 
 // DefaultUserFile 的返回值是用户表的默认持久化路径。
 // 与密钥文件同理放在用户配置目录：不污染被服务的文件树，也不会因为换服务目录而丢。
 func DefaultUserFile() string {
-	return filepath.Join(DefaultKeyDir(), "users.json")
+	dir := DefaultKeyDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "users.json")
 }
 
 // DefaultSettingsFile 的返回值是「运行期设置」的默认持久化路径。
@@ -162,7 +172,11 @@ func DefaultUserFile() string {
 // 目前只存一项：站点标题。它属于标识/品牌，重启后应该还在 ——
 // 不像上传上限那种「临时放宽」，重启回到启动参数声明的值才是对的。
 func DefaultSettingsFile() string {
-	return filepath.Join(DefaultKeyDir(), "settings.json")
+	dir := DefaultKeyDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "settings.json")
 }
 
 // DefaultTitle 是未指定时的站点标题。
@@ -277,6 +291,11 @@ type Config struct {
 
 	// AllowKeys 表示允许在页面上管理上传密钥。
 	AllowKeys bool
+	// AllowShare 允许在没有任何写能力（上传/编辑/解压）的实例上创建分享链接。
+	//
+	// 默认关闭：只读实例不应仅凭 --allow-keys 就悄悄开出一条公开只读通道。
+	// 确实需要“只读但可分享”时显式打开。
+	AllowShare bool
 	// KeyFile 为上传密钥的持久化路径；为空表示只保存在内存中，重启即失效。
 	KeyFile string
 	// AllowUserManage 表示允许在页面上增删改用户（默认开启，需已有鉴权规则）。
@@ -307,6 +326,13 @@ type Config struct {
 
 	// AssetsDir 为自定义前端资源目录，为空时使用内嵌资源。
 	AssetsDir string
+	// UnsafeAssetsInRoot 允许自定义前端资源目录位于服务根之内。
+	//
+	// 默认禁止：`/fs/assets/` 是不经鉴权、直接 ServeContent 的，若该目录
+	// 同时能被上传写入，任何能上传的人都可以放一个同源 HTML/JS 进去，
+	// 在管理员浏览器里执行并读取登录凭据。开发时确实需要把 assets 放在
+	// 服务目录下时，显式打开本开关并自行承担风险。
+	UnsafeAssetsInRoot bool
 
 	// 日志。
 	LogFormat string
@@ -323,6 +349,12 @@ type Config struct {
 	// TLS。
 	TLSCert string
 	TLSKey  string
+	// CookieSecure 强制给会话/分享 Cookie 加 Secure。
+	//
+	// TLS 终止在反向代理、且没有配置可信代理/转发头时，服务端无法自动
+	// 判断外部协议；纯 HTTP 部署又不能默认加 Secure（浏览器会拒收 Cookie）。
+	// 这类部署显式打开本开关即可。
+	CookieSecure bool
 
 	// 在线解压的安全上限。
 	ExtractMaxTotal int64
@@ -387,6 +419,12 @@ type Config struct {
 	// RootAllow 为允许切换到的额外路径前缀。
 	RootAllow []string
 
+	// AllowAnySite 允许把主机上任意已存在目录新增为附加站点。
+	//
+	// 默认关闭：新增站点会把服务根之外的目录暴露给对 / 有读写权限的账号。
+	// 默认只允许启动根的同级目录（与运行期换根一致）；确实需要任意目录时
+	// 显式打开本开关。
+	AllowAnySite bool
 	// AllowAnonymousAdmin 允许在**未启用鉴权**时把 HTTP 管理接口的调用者
 	// 当作管理员。
 	//
@@ -565,40 +603,46 @@ const DefaultPort = 5000
 // 命令行入口走 Parse —— 它在本函数之上叠加环境变量与命令行参数。
 func Defaults() *Config {
 	return &Config{
-		ServePath:        ".",
-		Bind:             "",
-		Port:             DefaultPort,
-		PathPrefix:       "",
-		Hidden:           nil,
-		AuthRules:        nil,
-		AllowAll:         false,
-		AllowEdit:        false,
-		EditMaxSize:      DefaultEditMaxSize,
-		AllowKeys:        false,
-		KeyFile:          DefaultKeyFile(),
-		AllowUserManage:  true,
-		UserFile:         DefaultUserFile(),
-		AllowUpload:      false,
-		AllowDelete:      false,
-		AllowSearch:      false,
-		AllowArchive:     false,
-		AllowExtract:     false,
-		AllowSymlink:     false,
-		EnableCORS:       false,
-		RenderIndex:      false,
-		RenderTryIndex:   false,
-		RenderSPA:        false,
-		UnsafeIndexHTML:  false,
-		AssetsDir:        "",
-		LogFormat:        "",
-		LogFile:          "",
-		Compress:         "low",
-		UploadDateLayout: DefaultUploadDateLayout,
-		TLSCert:          "",
-		TLSKey:           "",
-		ExtractMaxTotal:  DefaultExtractMaxTotal,
-		ExtractMaxFiles:  DefaultExtractMaxFiles,
-		ExtractMaxRatio:  DefaultExtractMaxRatio,
+		ServePath: ".",
+		// 默认只监听回环。历史上默认是空串（所有网卡），但那会让
+		// `gofs` 不加任何参数就把当前目录暴露给整个局域网；对外部署应
+		// 显式 `--bind 0.0.0.0`（或 `--bind <IP>`）。
+		Bind:               "127.0.0.1",
+		Port:               DefaultPort,
+		PathPrefix:         "",
+		Hidden:             nil,
+		AuthRules:          nil,
+		AllowAll:           false,
+		AllowEdit:          false,
+		EditMaxSize:        DefaultEditMaxSize,
+		AllowKeys:          false,
+		AllowShare:         false,
+		KeyFile:            DefaultKeyFile(),
+		AllowUserManage:    true,
+		UserFile:           DefaultUserFile(),
+		AllowUpload:        false,
+		AllowDelete:        false,
+		AllowSearch:        false,
+		AllowArchive:       false,
+		AllowExtract:       false,
+		AllowSymlink:       false,
+		EnableCORS:         false,
+		RenderIndex:        false,
+		RenderTryIndex:     false,
+		RenderSPA:          false,
+		UnsafeIndexHTML:    false,
+		AssetsDir:          "",
+		UnsafeAssetsInRoot: false,
+		LogFormat:          "",
+		LogFile:            "",
+		Compress:           "low",
+		UploadDateLayout:   DefaultUploadDateLayout,
+		TLSCert:            "",
+		TLSKey:             "",
+		CookieSecure:       false,
+		ExtractMaxTotal:    DefaultExtractMaxTotal,
+		ExtractMaxFiles:    DefaultExtractMaxFiles,
+		ExtractMaxRatio:    DefaultExtractMaxRatio,
 
 		UploadMaxSize:      DefaultUploadMaxSize,
 		UploadReadTimeout:  DefaultUploadReadTimeout,
@@ -619,6 +663,7 @@ func Defaults() *Config {
 		RootAllow:          nil,
 		// 未启用鉴权时管理接口默认关闭：无鉴权只读/上传仍是常见用法，
 		// 但不该顺带把「挂载任意目录、改监听、换根」交给所有人。
+		AllowAnySite:        false,
 		AllowAnonymousAdmin: false,
 
 		Version:      DefaultVersion,
@@ -651,6 +696,7 @@ func (c *Config) ApplyEnv() {
 	c.AllowEdit = envBool("GOFS_ALLOW_EDIT", c.AllowEdit)
 	c.EditMaxSize = envInt64("GOFS_EDIT_MAX_SIZE", c.EditMaxSize)
 	c.AllowKeys = envBool("GOFS_ALLOW_KEYS", c.AllowKeys)
+	c.AllowShare = envBool("GOFS_ALLOW_SHARE", c.AllowShare)
 	c.KeyFile = envStr("GOFS_KEY_FILE", c.KeyFile)
 	c.AllowUserManage = envBool("GOFS_ALLOW_USER_MANAGE", c.AllowUserManage)
 	c.UserFile = envStr("GOFS_USER_FILE", c.UserFile)
@@ -666,12 +712,14 @@ func (c *Config) ApplyEnv() {
 	c.RenderSPA = envBool("GOFS_RENDER_SPA", c.RenderSPA)
 	c.UnsafeIndexHTML = envBool("GOFS_UNSAFE_INDEX_HTML", c.UnsafeIndexHTML)
 	c.AssetsDir = envStr("GOFS_ASSETS", c.AssetsDir)
+	c.UnsafeAssetsInRoot = envBool("GOFS_UNSAFE_ASSETS_IN_ROOT", c.UnsafeAssetsInRoot)
 	c.LogFormat = envStr("GOFS_LOG_FORMAT", c.LogFormat)
 	c.LogFile = envStr("GOFS_LOG_FILE", c.LogFile)
 	c.Compress = envStr("GOFS_COMPRESS", c.Compress)
 	c.UploadDateLayout = envStr("GOFS_UPLOAD_DATE_LAYOUT", c.UploadDateLayout)
 	c.TLSCert = envStr("GOFS_TLS_CERT", c.TLSCert)
 	c.TLSKey = envStr("GOFS_TLS_KEY", c.TLSKey)
+	c.CookieSecure = envBool("GOFS_COOKIE_SECURE", c.CookieSecure)
 	c.ExtractMaxTotal = envInt64("GOFS_EXTRACT_MAX_TOTAL", c.ExtractMaxTotal)
 	c.ExtractMaxFiles = envInt("GOFS_EXTRACT_MAX_FILES", c.ExtractMaxFiles)
 	c.ExtractMaxRatio = envInt("GOFS_EXTRACT_MAX_RATIO", c.ExtractMaxRatio)
@@ -694,6 +742,7 @@ func (c *Config) ApplyEnv() {
 	c.DisableHTMLSandbox = envBool("GOFS_DISABLE_HTML_SANDBOX", c.DisableHTMLSandbox)
 	c.AllowRootSwitch = envBool("GOFS_ALLOW_ROOT_SWITCH", c.AllowRootSwitch)
 	c.RootAllow = envList("GOFS_ROOT_ALLOW", c.RootAllow)
+	c.AllowAnySite = envBool("GOFS_ALLOW_ANY_SITE", c.AllowAnySite)
 	c.AllowAnonymousAdmin = envBool("GOFS_ALLOW_ANONYMOUS_ADMIN", c.AllowAnonymousAdmin)
 }
 
@@ -738,6 +787,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.Int64Var(&cfg.EditMaxSize, "edit-max-size", cfg.EditMaxSize,
 		"在线编辑允许打开的最大文件尺寸（字节），必须为正整数")
 	fs.BoolVar(&cfg.AllowKeys, "allow-keys", cfg.AllowKeys, "允许管理上传密钥（未指定时跟随 --allow-upload）")
+	fs.BoolVar(&cfg.AllowShare, "allow-share", cfg.AllowShare,
+		"允许在没有任何写能力（上传/编辑/解压）的实例上创建只读分享链接")
 	fs.StringVar(&cfg.KeyFile, "key-file", cfg.KeyFile, "上传密钥存储路径，置空则只保存在内存中")
 	fs.BoolVar(&noUserManage, "no-user-manage", false, "禁止在页面上增删改用户")
 	fs.StringVar(&cfg.UserFile, "user-file", cfg.UserFile, "用户表存储路径，置空则只保存在内存中")
@@ -756,6 +807,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.BoolVar(&cfg.UnsafeIndexHTML, "unsafe-index-html", cfg.UnsafeIndexHTML,
 		"允许可写部署中的 index.html 以同源方式执行（默认加 CSP sandbox）")
 	fs.StringVar(&cfg.AssetsDir, "assets", cfg.AssetsDir, "自定义前端资源目录")
+	fs.BoolVar(&cfg.UnsafeAssetsInRoot, "unsafe-assets-in-root", cfg.UnsafeAssetsInRoot,
+		"允许自定义前端资源目录位于服务根内（默认拒绝，可能导致同源 XSS）")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "自定义 HTTP 日志格式，置空可关闭")
 	fs.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "日志输出文件，默认 stdout")
 	fs.StringVar(&cfg.Compress, "compress", cfg.Compress, "打包压缩级别：none/low/medium/high")
@@ -764,6 +817,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.BoolVar(&noUploadDated, "no-upload-dated", false, "关闭上传按日期自动归档（等同于 --upload-date-layout=''）")
 	fs.StringVar(&cfg.TLSCert, "tls-cert", cfg.TLSCert, "HTTPS 证书路径")
 	fs.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "HTTPS 私钥路径")
+	fs.BoolVar(&cfg.CookieSecure, "cookie-secure", cfg.CookieSecure,
+		"强制会话/分享 Cookie 带 Secure（TLS 在反向代理终止且未配置可信代理时使用）")
 	fs.Int64Var(&cfg.ExtractMaxTotal, "extract-max-total", cfg.ExtractMaxTotal, "单次解压写出字节上限")
 	fs.IntVar(&cfg.ExtractMaxFiles, "extract-max-files", cfg.ExtractMaxFiles, "单次解压文件数上限")
 	fs.IntVar(&cfg.ExtractMaxRatio, "extract-max-ratio", cfg.ExtractMaxRatio, "单文件压缩比上限（防解压炸弹）")
@@ -771,6 +826,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		"单次上传的最大字节数，0 表示不限制")
 	fs.BoolVar(&noRootSwitch, "no-root-switch", false,
 		"禁止登录后在页面上切换服务根目录")
+	fs.BoolVar(&cfg.AllowAnySite, "allow-any-site", cfg.AllowAnySite,
+		"允许把主机上任意已存在目录新增为附加站点（默认只允许启动根的同级目录）")
 	fs.BoolVar(&cfg.AllowAnonymousAdmin, "allow-anonymous-admin", cfg.AllowAnonymousAdmin,
 		"未启用鉴权时仍允许通过 HTTP 管理接口修改服务设置（默认关闭，风险自负）")
 	fs.Func("root-allow", "允许把服务根目录切换到的路径前缀（可重复指定）", func(v string) error {
@@ -851,6 +908,14 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	// --no-upload-dated 与显式的 --upload-date-layout 互斥，避免意图含糊。
 	specified := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { specified[f.Name] = true })
+	// 环境变量也是“显式指定”。不登记的话，下面的「未指定时跟随上传」
+	// 会把 GOFS_ALLOW_EDIT=false / GOFS_ALLOW_KEYS=false 静默覆盖成 true。
+	if _, ok := os.LookupEnv("GOFS_ALLOW_EDIT"); ok {
+		specified["allow-edit"] = true
+	}
+	if _, ok := os.LookupEnv("GOFS_ALLOW_KEYS"); ok {
+		specified["allow-keys"] = true
+	}
 	if noUploadDated {
 		if specified["upload-date-layout"] {
 			return nil, errors.New("--no-upload-dated 与 --upload-date-layout 不能同时使用")
@@ -1192,7 +1257,8 @@ func usageText() string {
                              加后缀，互相嵌套的目录会被拒绝（启动即报错）
 
 选项:
-  -b, --bind <addrs>         监听地址或 unix socket
+  -b, --bind <addrs>         监听地址或 unix socket（默认 127.0.0.1；
+                             对外提供服务需显式 --bind 0.0.0.0 或具体网卡 IP）
   -p, --port <port>          监听端口，默认 5000
                              （这两项也能在页面的「设置 → 常规」里改，立即重绑；
                                此处显式给过的值优先，重启后回到参数值）
@@ -1207,6 +1273,7 @@ func usageText() string {
       --edit-max-size <n>    在线编辑允许打开的最大文件尺寸，默认 2MiB，必须为正整数
                              （登录后也可以在页面的「服务设置」里改，改完立刻生效）
       --allow-keys           允许管理上传密钥（未指定时跟随 --allow-upload）
+      --allow-share          允许只读实例（无上传/编辑/解压）创建分享链接
       --key-file <path>      上传密钥存储路径，默认 <用户配置目录>/gofs/keys.json；
                              置空则只保存在内存中，重启即失效
       --user-file <path>     用户表存储路径，默认 <用户配置目录>/gofs/users.json；
@@ -1227,7 +1294,10 @@ func usageText() string {
       --render-spa           SPA 模式，未命中回退 index.html
       --unsafe-index-html    可写部署（上传/编辑/解压）中的 index.html
                              默认加 CSP sandbox；加此项才允许它以同源方式执行
-      --assets <path>        自定义前端资源目录
+      --assets <path>        自定义前端资源目录（默认禁止位于服务根内）
+      --unsafe-assets-in-root
+                             允许 assets 位于服务根内（开发用；可能导致同源 XSS）
+      --cookie-secure        强制会话/分享 Cookie 带 Secure（反向代理终止 TLS 时用）
       --log-format <format>  自定义 HTTP 日志格式
       --log-file <file>      日志文件
       --compress <level>     打包压缩级别：none/low/medium/high，默认 low
@@ -1279,6 +1349,8 @@ func usageText() string {
                               脚本读不到本站数据，堵住存储型 XSS）
       --no-root-switch       禁止登录后在页面上切换服务根目录
       --root-allow <prefix>  允许把服务根目录切换到的路径前缀，可重复指定
+      --allow-any-site       允许把主机上任意已存在目录新增为站点
+                             （默认只允许启动根的同级目录）
                              （默认可切换范围 = 启动根目录的父目录，
                                比如启动根是 /srv/data 时可切到 /srv/*）
       --allow-anonymous-admin

@@ -1,1 +1,3 @@
-更新@README.md，后git提交代码添加commit(提炼新功能和修复的bug)、打新tag并push
+按照一下顺序执行：
+1、更新@README.md后，使用git提交代码添加commit(提炼新功能和修复的bug)、打新tag并push
+2、更新/Users/uuxia/Desktop/work/code/github/golang/go-fs/Release.md，只更新在当前版本上修改了什么bug，新增了什么功能

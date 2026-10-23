@@ -452,7 +452,8 @@
       });
 
       form.hidden = !editable;
-      // 可挂范围：没配白名单就是不限制（门槛是管理员），配了才显示出来。
+      // 可挂范围：默认只允许启动根的同级目录；--root-allow / --allow-any-site
+      // 决定最终范围。返回空数组表示不限制（allow-any-site）。
       var roots = data.site_roots || [];
       G.setRichText(siteHint, editable
         ? '新增的目录挂在 /<标签>/ 下，**立即生效**（不必点保存）。' +
@@ -1079,10 +1080,13 @@
       actions.className = 'row';
       actions.style.marginTop = '8px';
 
-      if (rel.page_url) {
+      // 发布页链接来自更新源，属于外部数据。只接受 https，避免自定义
+      // Upgrader 返回 javascript:/data: 时变成一个可执行链接。
+      var pageURL = String(rel.page_url || '');
+      if (/^https:\/\//i.test(pageURL)) {
         var a = document.createElement('a');
         a.className = 'btn btn-sm';
-        a.href = rel.page_url;
+        a.href = pageURL;
         a.target = '_blank';
         a.rel = 'noopener noreferrer';
         a.textContent = '查看发布页';

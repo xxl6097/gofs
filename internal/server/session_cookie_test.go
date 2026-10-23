@@ -70,6 +70,7 @@ func TestLoginSetsSessionCookie(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/fs/auth", nil)
 	r.SetBasicAuth("admin", "secret")
+	r.Header.Set("X-Gofs-Ajax", "1")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	res := w.Result()
@@ -221,6 +222,7 @@ func TestSessionCookiePathFollowsPrefix(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "/files/fs/auth", nil)
 	r.SetBasicAuth("admin", "secret")
+	r.Header.Set("X-Gofs-Ajax", "1")
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	res := w.Result()

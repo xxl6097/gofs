@@ -404,13 +404,24 @@ func (a *Authenticator) verifyDummy(password string) {
 // 缓存键是「用户名 + 密码」的摘要，命中就完全跳过计算；
 // 任何一次用户表改动都会清空缓存（见 invalidate()）。
 func (a *Authenticator) passwordMatches(acc *account, password string) bool {
-	if acc.hash == nil {
-		return subtleEqual(acc.password, password)
-	}
 	key := pwCacheKey(acc.Username, password)
 	if ok, hit := a.pwCache.get(key); hit {
 		return ok
 	}
+
+	if acc.hash == nil {
+		ok := subtleEqual(acc.password, password)
+		// 启动参数里的明文账号如果只做定长比较，耗时会比未知用户名/用户表
+		// 账号的 PBKDF2 低几个数量级，攻击者可以据此枚举启动账号名。
+		// 这里补一次等成本的 PBKDF2，并和用户表账号共用结果缓存。
+		a.withVerifySlot(func() bool {
+			_, _ = pbkdf2.Key(sha256.New, password, dummySalt, pwIterations, pwKeyLen)
+			return false
+		})
+		a.pwCache.put(key, ok)
+		return ok
+	}
+
 	ok, ran := a.withVerifySlot(func() bool { return acc.hash.verify(password) })
 	if ran {
 		a.pwCache.put(key, ok)
@@ -467,23 +478,45 @@ func (a *Authenticator) accountFor(username, password string, authenticated bool
 // Lookup 在提供的凭据下计算 urlPath 的权限。
 // 若未配置鉴权，返回 PermReadWrite（由全局开关再收敛）。
 func (a *Authenticator) Lookup(urlPath, username, password string, authenticated bool) Permission {
+	perm, _ := a.LookupChecked(urlPath, username, password, authenticated)
+	return perm
+}
+
+// LookupChecked 与 Lookup 相同，但额外报告**具名凭据是否真的匹配**。
+//
+// 调用方需要区分两种「权限为 None」：
+//   - 密码/账号错误 —— 应当计入认证失败限速；
+//   - 密码正确、但该账号对这条路径没有权限 —— 不是认证失败，不能锁账号。
+//
+// 返回的 valid 对匿名查询表示“是否存在匿名规则”，对具名查询表示密码是否匹配。
+func (a *Authenticator) LookupChecked(urlPath, username, password string, authenticated bool) (Permission, bool) {
 	if !a.Enabled() {
-		return PermReadWrite
+		return PermReadWrite, true
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	// 先尝试具名账号，再回落到匿名规则。
-	acc := a.accountFor(username, password, authenticated)
-	if acc != nil {
-		return acc.match(urlPath)
+	if !authenticated {
+		if a.anonAcc == nil {
+			return PermNone, false
+		}
+		return a.anonAcc.match(urlPath), true
 	}
-	// 未知用户名也执行一次等成本的 PBKDF2，避免通过响应时间枚举账号。
-	// 已知账号密码错误时 accountFor 已经算过，不应重复。
-	if authenticated && username != "" && a.lookupAccount(username) == nil {
-		a.verifyDummy(password)
+
+	acc := a.lookupAccount(username)
+	if acc == nil {
+		// 未知用户名也执行一次等成本的 PBKDF2，避免通过响应时间枚举账号。
+		// 空用户名（Basic base64(":pass")）不值得跑慢哈希：它不可能是
+		// 合法账号，也没有枚举价值。
+		if username != "" {
+			a.verifyDummy(password)
+		}
+		return PermNone, false
 	}
-	return PermNone
+	if !a.passwordMatches(acc, password) {
+		return PermNone, false
+	}
+	return acc.match(urlPath), true
 }
 
 // HomePath 返回账号登录后应当落地的目录：它有权限的、最靠上的那一层。

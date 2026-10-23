@@ -95,6 +95,24 @@ func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 不信任客户端传上来的 Release 对象：重新向更新源确认版本，
+	// 并把服务端拿到的对象交给实现方。否则一个信任 FullURL/PatchURL
+	// 的自定义 Upgrader 会被请求体里的 URL 直接指向任意地址。
+	checked, cerr := s.cfg.Upgrader.Check(r.Context())
+	if cerr != nil {
+		s.logger.Errorf("升级前重新检查版本失败: %v", cerr)
+		http.Error(w, "502 Bad Gateway: 无法向更新源确认版本", http.StatusBadGateway)
+		return
+	}
+	if checked == nil {
+		http.Error(w, "409 Conflict: 当前已是最新版本", http.StatusConflict)
+		return
+	}
+	if checked.Version != req.Release.Version {
+		http.Error(w, "409 Conflict: 版本已变化，请重新检查更新", http.StatusConflict)
+		return
+	}
+
 	// 连上 SSE 之后才开始干活，这样进度不会丢。
 	tw, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
 	defer resetWrite()
@@ -115,19 +133,19 @@ func (s *Server) upgradeRun(w http.ResponseWriter, r *http.Request) {
 		sse.event("progress", p)
 	}
 
-	s.logger.Infof("开始升级到 %s（当前 %s）", req.Release.Version, s.cfg.Version)
-	err = s.cfg.Upgrader.Upgrade(r.Context(), req.Release, onProgress)
+	s.logger.Infof("开始升级到 %s（当前 %s）", checked.Version, s.cfg.Version)
+	err = s.cfg.Upgrader.Upgrade(r.Context(), checked, onProgress)
 	if err != nil {
-		s.logger.Errorf("升级到 %s 失败: %v", req.Release.Version, err)
+		s.logger.Errorf("升级到 %s 失败: %v", checked.Version, err)
 		sse.event("error", map[string]any{
 			"message": err.Error(),
 		})
 		return
 	}
 
-	s.logger.Infof("升级到 %s 完成，等待重启生效", req.Release.Version)
+	s.logger.Infof("升级到 %s 完成，等待重启生效", checked.Version)
 	sse.event("done", map[string]any{
-		"version": req.Release.Version,
+		"version": checked.Version,
 		"message": "升级完成，重启服务后生效",
 	})
 }

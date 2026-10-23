@@ -66,6 +66,16 @@ const (
 	maxRunsPerBlock = 10_000
 	// maxNotes 是给用户看的解析提示上限（图片、特殊条目等）。
 	maxNotes = 16
+	// maxTotalText 是整份文档输出文本的总预算。
+	//
+	// 单看 maxRunLen 不够：XLSX 的共享字符串会被成千上万个单元格引用，
+	// 2000×200 个单元格各引用一个 100 KB 字符串，就可能在序列化时
+	// 产生几十 GB JSON（json.Encoder 会先完整缓冲）。这里按**输出**
+	// 计费，超限后置 truncated 并停止继续填充文本。
+	maxTotalText = 8 << 20
+	// maxCells 是整份文档处理的最大单元格数。
+	// 防止“每个单元格文本都很短、但数量极多”把 JSON 体积撑爆。
+	maxCells = 200_000
 )
 
 // xmlGuard 给 XML token 流加上深度与总量上限。
@@ -172,7 +182,7 @@ func Extract(zr *zip.Reader, format string, opts Options) (*Doc, error) {
 	if len(zr.File) > maxEntries {
 		return nil, fmt.Errorf("%w：条目数 %d 超过上限 %d", ErrNotOffice, len(zr.File), maxEntries)
 	}
-	rd := &reader{zr: zr, budget: maxTotalBytes}
+	rd := &reader{zr: zr, budget: maxTotalBytes, textBudget: maxTotalText}
 	if opts.MaxParts > 0 {
 		rd.maxParts = opts.MaxParts
 	} else {
@@ -205,10 +215,37 @@ func Extract(zr *zip.Reader, format string, opts Options) (*Doc, error) {
 
 // reader 负责按条目读取 XML，并守住总量上限。
 type reader struct {
-	zr        *zip.Reader
-	budget    int64 // 剩余可读字节数
-	truncated bool
-	maxParts  int
+	zr         *zip.Reader
+	budget     int64 // 剩余可读字节数
+	textBudget int64 // 剩余输出文本字节数
+	cells      int   // 已处理的单元格数
+	truncated  bool
+	maxParts   int
+}
+
+// chargeText 把一段要输出的文本计入总预算，并做单段截断。
+// 预算耗尽后返回空串并置 truncated，调用方继续解析也不会再放大输出。
+func (r *reader) chargeText(s string) string {
+	s = clipRun(s)
+	if s == "" {
+		return ""
+	}
+	if int64(len(s)) > r.textBudget {
+		r.truncated = true
+		return ""
+	}
+	r.textBudget -= int64(len(s))
+	return s
+}
+
+// chargeCell 统计单元格数量；超出上限后置 truncated。
+func (r *reader) chargeCell() bool {
+	if r.cells >= maxCells {
+		r.truncated = true
+		return false
+	}
+	r.cells++
+	return true
 }
 
 // readEntry 读出包内某个条目的全部内容。

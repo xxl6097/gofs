@@ -89,6 +89,24 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		if !info.IsDir() {
 			return nil, fmt.Errorf("前端资源路径 %q 不是目录", cfg.AssetsDir)
 		}
+		// /fs/assets/ 不经鉴权、直接 ServeContent。若资源目录同时落在
+		// 可写服务根内，任何能上传的人都能放一个同源 HTML/JS 进去，
+		// 在管理员浏览器里执行并读取登录凭据。默认拒绝这种布局；
+		// 开发场景确实需要时用 --unsafe-assets-in-root 显式承担风险。
+		assetsAbs, nerr := fsutil.NormalizePath(cfg.AssetsDir)
+		if nerr != nil {
+			return nil, fmt.Errorf("无法规范化前端资源目录 %q: %w", cfg.AssetsDir, nerr)
+		}
+		if !cfg.UnsafeAssetsInRoot {
+			for _, m := range roots.Mounts() {
+				if fsutil.IsWithin(m.Res.Root(), assetsAbs) {
+					return nil, fmt.Errorf(
+						"前端资源目录 %q 位于服务根 %q 之内，上传者可能写入同源脚本；"+
+							"请把 --assets 移到服务根之外，或显式使用 --unsafe-assets-in-root",
+						cfg.AssetsDir, m.Res.Root())
+				}
+			}
+		}
 		assetsFS = os.DirFS(cfg.AssetsDir)
 	}
 
@@ -102,6 +120,11 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	logger, err := NewLogger(cfg.LogFormat, cfg.LogFile, trustedProxies)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.AssetsDir != "" && cfg.UnsafeAssetsInRoot {
+		logger.Errorf("安全提示：--unsafe-assets-in-root 已开启。" +
+			"自定义前端资源目录若位于可写服务根内，上传者可在 /fs/assets/ 下" +
+			"放置同源脚本并读取登录凭据")
 	}
 	writable := cfg.AllowUpload || cfg.AllowEdit || cfg.AllowExtract
 	if writable && (cfg.RenderIndex || cfg.RenderTryIndex || cfg.RenderSPA) {
@@ -164,9 +187,14 @@ func (s *Server) restoreSites() {
 		// 边界启动时也要再算一遍：设置文件可能被手工改过，也可能是靠
 		// 上次更宽的白名单加进来的。用的是**站点**的那套判定，别跟
 		// 「换根」的默认范围混了。
+		//
+		// 对**已经落盘**的站点采取“祖父条款”：升级前的部署可能一直用着
+		// 范围外的目录，直接跳过会让站点在升级后凭空消失。这里恢复它，
+		// 但明确记一条安全提示；通过 /fs/settings **新增**站点仍按新默认
+		// 收紧。运维确认不需要时应移除该站点，或补上 --root-allow。
 		if !s.settings.AllowsSite(abs) {
-			s.logger.Errorf("站点 %q 不在允许范围内，已跳过（可用 --root-allow 放开）", rec.Path)
-			continue
+			s.logger.Errorf("安全提示：站点 %q 超出当前可挂载范围，已按升级前的历史配置恢复；"+
+				"新增站点仍受限制。不需要它请移除，或显式配置 --root-allow / --allow-any-site", rec.Path)
 		}
 		m, err := s.res.AddSite(abs, rec.Label)
 		if err != nil {
@@ -357,18 +385,17 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		// 用 defer 保证 panic 场景下也能留下访问记录。
 		defer func() {
-			user, _, _ := r.BasicAuth()
-			// ⚠️ 查询串里的 user 不能直接写进日志：它由客户端提供、没有经过
-			// 任何校验，任何匿名请求都能用 `?user=admin` 伪造审计身份。
-			// 需要查询串凭据的客户端应改用 Authorization 头或会话。
-			//
-			// 会话身份也要记上，否则登录之后的媒体请求在日志里全是空用户 ——
-			// 而「谁在读这个大文件」正是访问日志最该回答的问题。
+			// ⚠️ 不能直接信 Authorization 头里的用户名：它由客户端提供、
+			// 可以随便写，任何匿名请求都能用 `Basic base64("admin:wrong")`
+			// 伪造审计身份。只记录本次请求真正验过密码的账号（由
+			// identityPermOf/requireAdmin 等路径写入）；没有就退回会话身份。
+			user := s.verifiedUser(r)
 			if user == "" {
 				if u, ok := s.auth.ResolveSession(sessionToken(r)); ok {
 					user = u
 				}
 			}
+			user = truncateAuthUser(user)
 			if !rec.wrote {
 				rec.status = http.StatusOK
 			}
@@ -461,15 +488,52 @@ func sharePerm(k *uploadkey.Key) auth.Permission {
 	return auth.PermRead
 }
 
-// credentials 从请求中提取凭据，优先 Basic 头，其次查询参数。
-func credentials(r *http.Request) (user, pass string, ok bool) {
+// credentialsWithSource 从请求中提取凭据，并报告凭据来源。
+//
+// 来源用于认证失败限速分桶：Basic 与查询串是两种可独立尝试的口令入口，
+// 会话 Cookie/匿名访问不能被它们的封禁记录连坐。
+//
+// 查询串凭据是跨站 <img> 唯一能带上的形式，因此只在**非跨站**请求上采信：
+// 否则攻击页面可以用 `<img src="...?user=admin&pass=wrong">` ×10
+// 把受害者来源 IP 上的 admin 账号打进封禁名单（账号锁定 DoS）。
+// 浏览器会带 Sec-Fetch-Site；旧客户端没有该头时退回 Origin/Referer 判断，
+// 两者都没有的非浏览器客户端（curl 等）不受影响。
+func credentialsWithSource(r *http.Request) (user, pass string, ok bool, source string) {
 	if user, pass, ok = r.BasicAuth(); ok {
-		return user, pass, true
+		return user, pass, true, authClassBasic
+	}
+	if queryAuthCrossSite(r) {
+		return "", "", false, ""
 	}
 	if u := r.URL.Query().Get("user"); u != "" {
-		return u, r.URL.Query().Get("pass"), true
+		return u, r.URL.Query().Get("pass"), true, authClassQuery
 	}
-	return "", "", false
+	return "", "", false, ""
+}
+
+// credentials 从请求中提取凭据，优先 Basic 头，其次查询参数。
+func credentials(r *http.Request) (user, pass string, ok bool) {
+	user, pass, ok, _ = credentialsWithSource(r)
+	return user, pass, ok
+}
+
+// queryAuthCrossSite 判断当前请求是否来自其他站点。
+//
+// 只用于决定是否采信查询串凭据，不影响非浏览器客户端：没有来源信息时
+// 返回 false（与 CSRF 校验“没有来源信息就放行”的口径一致）。
+func queryAuthCrossSite(r *http.Request) bool {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return true
+	}
+	raw := originOf(r)
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return true
+	}
+	return !strings.EqualFold(u.Host, r.Host)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +627,7 @@ func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, token, s
 // 直接跑 HTTPS，或请求来自可信代理且代理声明外部协议是 HTTPS 时都要加；
 // 只判断本地是否配置证书会在 TLS 终止于反向代理的常见部署里漏掉 Secure。
 func (s *Server) cookieSecure(r *http.Request) bool {
-	return s.cfg.TLSCert != "" || s.externalScheme(r) == "https"
+	return s.cfg.CookieSecure || s.cfg.TLSCert != "" || s.externalScheme(r) == "https"
 }
 
 // sessionCookiePath 返回 cookie 的作用路径。
@@ -661,8 +725,12 @@ func (s *Server) credsOf(r *http.Request) (user, pass string, hasCred bool, cook
 // permOf 按请求身份计算对 urlPath 的权限。
 func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
 	// 与 authorize 使用同一套规范化：否则页面数据里的 perms 会与实际
-	// 文件操作看到的路径不一致。
-	return s.permOfExact(r, s.canonicalPath(r, urlPath))
+	// 文件操作看到的路径不一致。规范化失败时按无权限处理（fail-closed）。
+	canon, ok := s.canonicalPath(r, urlPath)
+	if !ok {
+		return auth.PermNone, "", false
+	}
+	return s.permOfExact(r, canon)
 }
 
 // permOfExact 与 permOf 相同，但假定调用方给出的已经是磁盘上的真实名字。
@@ -671,6 +739,8 @@ func (s *Server) permOf(r *http.Request, urlPath string) (perm auth.Permission, 
 // 再对每个后代做一次「逐段 ReadDir 找真实大小写」会把递归删除/移动
 // 放大成 O(n²)。
 func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
+	idPerm, idUser, idAuthenticated := s.identityPermOf(r, urlPath)
+
 	// 分享令牌：换来的只是「不用登录」，权限级别由令牌自己定（只读 / 可读写），
 	// 且严格限制在令牌范围内。
 	//
@@ -678,17 +748,43 @@ func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permiss
 	// checkPerm 走的就是 permOf，而它决定了**页面数据**里的 perms 与
 	// auth_required。只在 authorize 里认令牌的话，分享访客拿到的页面是
 	// 「需要登录、权限全无」的空壳 —— 前端会弹登录框，正好是分享要避免的事。
+	//
+	// 分享令牌与显式身份**取较高权限**，而不是无条件优先分享：
+	// 一条只读分享的 Cookie 会随浏览器带到同路径的后续请求上，若无条件
+	// 优先，管理员打开一次分享链接就会被降级成只读，连服务设置都进不去
+	// （实测可稳定复现）。反过来，显式身份权限更低时仍可借分享读到内容，
+	// 不会因为“身份优先”把已登录用户挡在分享之外。
 	if tok := shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
-			return sharePerm(k), "share:" + k.Prefix, true
+			if sp := sharePerm(k); sp > idPerm {
+				return sp, "share:" + k.Prefix, true
+			}
 		}
 	}
+	return idPerm, idUser, idAuthenticated
+}
 
+// identityPermOf 只按显式凭据或会话 Cookie 计算权限，忽略分享令牌。
+//
+// 单独抽出来是为了让「分享权限」与「真实身份权限」可以比较后取较高值，
+// 也供 isAdminRequest 判断“这个请求背后是否真的有一个管理员身份”。
+func (s *Server) identityPermOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
+	if !s.auth.Enabled() {
+		// 未启用鉴权时没有“身份”可言：查询串里的 user 只是客户端自报的
+		// 名字，不能写进访问日志，也不该参与管理员判定。
+		return auth.PermReadWrite, "", false
+	}
 	user, pass, hasCred, cookieUser := s.credsOf(r)
 	switch {
 	case hasCred:
-		// 显式凭据：走原来的路径，密码要现验。
-		return s.auth.Lookup(urlPath, user, pass, true), user, true
+		// 显式凭据：走原来的路径，密码要现验。LookupChecked 同时告诉我们
+		// “密码不对”与“密码对但该路径没权限”—— 后者不能计入失败限速，
+		// 否则一个只被授予 /docs 的账号正常访问 / 十次就会被锁。
+		p, valid := s.auth.LookupChecked(urlPath, user, pass, true)
+		if valid {
+			s.noteVerifiedUser(r, user)
+		}
+		return p, user, valid
 	case cookieUser != "":
 		// 会话身份：密码在登录那一刻已经验过，这里只按身份取权限。
 		return s.auth.PermFor(cookieUser, urlPath), cookieUser, true
@@ -718,9 +814,16 @@ func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trusted
 // 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
 // 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
 // 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
-func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, user string) (string, bool) {
+func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
 	ip := s.clientIP(r)
-	if blocked, remain := s.authBlocked(ip, user); blocked {
+	// 只有可以主动提交口令的凭据类别才需要封禁检查。会话 Cookie 是
+	// 服务端签发的随机 token，无效值不构成口令猜测；匿名请求更不应被
+	// 别人的失败记录连坐。早先所有类别共用空用户名桶，10 个坏 Cookie
+	// 就能锁死同一 IP 上的全部有效会话/匿名访问。
+	if class != authClassBasic && class != authClassQuery {
+		return ip, true
+	}
+	if blocked, remain := s.authBlocked(ip, class, user); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
 		return ip, false
@@ -735,15 +838,24 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 		return permResult{Perm: auth.PermReadWrite}, true
 	}
 	// ACL 必须按磁盘上的真实名字匹配（大小写/规范化/短名）。
-	urlPath = s.canonicalPath(r, urlPath)
-
-	// 认证限速：Basic 认证可以被无限次尝试，不设闸门就等于把口令交给
-	// 字典攻击。计数按「来源 + 尝试的账号」隔离：只按来源统计的话，
-	// 持有任意合法账号的人可以穿插自己的成功请求把别人的失败计数清零。
-	limitUser, _, _ := credentials(r)
-	ip, ok := s.checkAuthLimit(w, r, limitUser)
+	canon, ok := s.canonicalPath(r, urlPath)
 	if !ok {
+		http.Error(w, "403 Forbidden: 路径超出服务范围或无法安全规范化", http.StatusForbidden)
 		return permResult{}, false
+	}
+	urlPath = canon
+
+	// 认证限速：Basic / 查询串认证可以被无限次尝试，不设闸门就等于把口令
+	// 交给字典攻击。计数按「来源 + 凭据类别 + 尝试的账号」隔离：只按来源
+	// 统计的话，持有任意合法账号的人可以穿插自己的成功请求把别人的失败
+	// 计数清零；不分类别的话，坏 Cookie/匿名请求会把有效会话一并锁死。
+	limitUser, _, hasCred, limitClass := credentialsWithSource(r)
+	ip := s.clientIP(r)
+	if hasCred {
+		var ok bool
+		if ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser); !ok {
+			return permResult{}, false
+		}
 	}
 
 	// 分享链接：带 `?share=<token>`（或那条 cookie）的请求，按令牌授予权限。
@@ -754,79 +866,70 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 权限级别由令牌决定：只读令牌写操作会被 requireWrite 挡下；可读写令牌
 	// 则在范围内与一个读写账号等价 —— 但**不等于管理员**，见 isAdminRequest。
 	//
-	// 写到权限判定之前，是因为这就是一次正常的鉴权判定，
-	// 只是凭据从「账号密码」换成了「分享令牌」。
+	// 与显式身份**取较高权限**：分享 Cookie 会随浏览器带到同路径的后续请求，
+	// 若无条件优先，管理员打开一次只读分享就会被降级成只读（实测可复现）。
+	// 反过来，显式身份权限更低时仍可借分享读到内容。
+	var (
+		shareKey   *uploadkey.Key
+		shareToken string
+		shareOK    bool
+	)
 	if tok := shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
-			// 首次拿到令牌的那一次就下发 cookie，之后靠它认人。
-			//
-			// ⚠️ 判据不能只看 `?share=`。分享地址有**两种形式**，而「分享」
-			// 按钮生成出来的偏偏是没有查询串的那种（/s/<token>/…，为了 wget
-			// 递归下来文件名干净）。只认查询串的话，路径形式打开的页面拿不到
-			// cookie —— 页面本身照样能渲染（初始数据是服务端注入的），但页面里
-			// 随后的每一个 XHR（列子目录、预览、上传、删除）都会 401，
-			// 前端收到 401 就弹登录框：表现为「点任何一个操作都跳登录页」。
-			//
-			// 所以判据改成「这次用的令牌不是从 cookie 来的」：两种形式都覆盖，
-			// 而已经在用 cookie 的请求不再重设，避免每个 XHR 都带一次 Set-Cookie。
-			if c, err := r.Cookie(shareCookieName); err != nil || c.Value != tok {
-				s.setShareCookie(w, r, tok, k.Scope, k.ExpiresAt)
-			}
-			return permResult{
-				Perm:          sharePerm(k),
-				User:          "share:" + k.Prefix,
-				Authenticated: true,
-				Share:         true,
-			}, true
+			shareKey, shareToken, shareOK = k, tok, true
 		}
 	}
 
-	// hadCookie 单独记一下：credsOf 解析失败时 cookieUser 是空的，
-	// 分不清「没带 cookie」和「带了但无效」—— 而后者要按失败计数。
-	hadCookie := sessionToken(r) != ""
-
-	user, pass, hasCred, cookieUser := s.credsOf(r)
-	var perm auth.Permission
-	switch {
-	case hasCred:
-		perm = s.auth.Lookup(urlPath, user, pass, true)
-		// 失败计数**只在这里**清零：真的用密码验过一次才算。
+	idPerm, idUser, idAuthenticated := s.identityPermOf(r, urlPath)
+	if shareOK && sharePerm(shareKey) > idPerm {
+		// 首次拿到令牌的那一次就下发 cookie，之后靠它认人。
 		//
-		// ⚠️ 不能放在下面统一的 `perm != PermNone` 分支里。那样任何一次
-		// 「匿名就能读」的请求都会把计数抹掉 —— 部署里有 `-a @/:r` 这类
-		// 公开只读规则（很常见）时，攻击者只要在两次猜密码之间插一个匿名
-		// GET，计数永远归零、封禁永远不触发，字典攻击又回到无限次。
-		// 会话 cookie 同理不在这里清：它是「过去某次登录成功」的凭据，
-		// 不代表当下验过密码，而且可能被第三方持有一份。
-		if perm != auth.PermNone {
-			s.noteAuthSuccess(ip, user)
+		// ⚠️ 判据不能只看 `?share=`。分享地址有**两种形式**，而「分享」
+		// 按钮生成出来的偏偏是没有查询串的那种（/s/<token>/…，为了 wget
+		// 递归下来文件名干净）。只认查询串的话，路径形式打开的页面拿不到
+		// cookie —— 页面本身照样能渲染（初始数据是服务端注入的），但页面里
+		// 随后的每一个 XHR（列子目录、预览、上传、删除）都会 401，
+		// 前端收到 401 就弹登录框：表现为「点任何一个操作都跳登录页」。
+		//
+		// 所以判据改成「这次用的令牌不是从 cookie 来的」：两种形式都覆盖，
+		// 而已经在用 cookie 的请求不再重设，避免每个 XHR 都带一次 Set-Cookie。
+		if c, err := r.Cookie(shareCookieName); err != nil || c.Value != shareToken {
+			s.setShareCookie(w, r, shareToken, shareKey.Scope, shareKey.ExpiresAt)
 		}
-	case cookieUser != "":
-		// 会话身份：cookie 在登录时已经验过密码，这里只按身份取权限。
-		user = cookieUser
-		perm = s.auth.PermFor(cookieUser, urlPath)
-	default:
-		perm = s.auth.Lookup(urlPath, "", "", false)
+		return permResult{
+			Perm:          sharePerm(shareKey),
+			User:          "share:" + shareKey.Prefix,
+			Authenticated: true,
+			Share:         true,
+		}, true
 	}
+
+	perm := idPerm
 	if perm != auth.PermNone {
+		// 显式凭据只有在这一刻才算真的验过密码，成功才清本账号的失败计数。
+		// 会话 cookie 不清：它不代表当下验过密码，而且可能被第三方持有一份。
+		if hasCred {
+			s.noteAuthSuccess(ip, limitClass, limitUser)
+		}
 		// 会话身份也算「已认证」—— 否则登录后每个请求都会被当成匿名。
-		return permResult{Perm: perm, User: user, Authenticated: hasCred || cookieUser != ""}, true
+		return permResult{Perm: perm, User: idUser, Authenticated: idAuthenticated}, true
 	}
 
 	// 只有「带了凭据但不对」才算一次失败；完全没带凭据只是未登录，
-	// 否则一个不带凭据的爬虫就能把正常用户的来源封掉。
-	//
-	// 无效 cookie（过期/已撤销/伪造）同样算失败：cookie 值完全由客户端提供，
-	// 伪造一个来试探是可行的，所以它和错密码一样该计数。
-	if hasCred || hadCookie {
-		s.noteAuthFailure(ip, limitUser)
+	// 否则一个不带凭据的爬虫就能把正常用户的来源封掉。无效会话 Cookie
+	// 不再计入：token 是 256 位随机值，伪造试探不构成口令猜测，而计入
+	// 会让匿名请求有机会污染有效会话的限速桶。
+	if hasCred && !idAuthenticated {
+		s.noteAuthFailure(ip, limitClass, limitUser)
 	}
 
+	hadCookie := sessionToken(r) != ""
 	if s.auth.NeedsAuth(urlPath) {
-		// cookie 无效就顺手清掉，免得浏览器每个后续请求都带着一张废票
-		// 反复撞限速闸门。
-		if hadCookie && cookieUser == "" {
-			s.clearSessionCookie(w, r)
+		// cookie 无效就顺手清掉，免得浏览器每个后续请求都带着一张废票。
+		if hadCookie {
+			if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
+				s.clearSessionCookie(w, r)
+			}
 		}
 		// 前端的 fetch 会带 X-Gofs-Ajax 标记，此时只回 401 不带挑战，
 		// 让应用自己的登录框处理，而不是弹出浏览器原生对话框。
@@ -897,7 +1000,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// CleanURLPath 保留结尾斜杠语义，所以对正常路径没有任何行为变化。
 	// 之后再按磁盘真实名字（大小写/Unicode 规范化/Windows 短名）对齐一次，
 	// 否则 ACL 会按请求里的写法匹配，而文件系统按另一套语义打开同一个文件。
-	urlPath := s.canonicalPath(r, r.URL.Path)
+	urlPath, canonicalOK := s.canonicalPath(r, r.URL.Path)
+	if !canonicalOK {
+		// 无法把请求路径映射为磁盘真实名字时拒绝，而不是拿未规范化的
+		// 路径去匹配 ACL —— 后者在大小写不敏感文件系统上可被利用。
+		http.Error(w, "403 Forbidden: 路径超出服务范围或无法安全规范化", http.StatusForbidden)
+		return
+	}
 
 	// 上传密钥走独立分支：它只代表「往某个目录传文件」这一件事，
 	// 不参与读、删、改名、解压等任何其它操作。
@@ -915,20 +1024,21 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// 共用同一套失败计数/封禁：否则攻击者对 "/" 发随机密码就能绕过限速，
 	// 用 PBKDF2 把 CPU 打满。
 	if s.auth.Enabled() && isAppShellNavigation(r) {
+		limitUser, _, hasCred, limitClass := credentialsWithSource(r)
 		ip := s.clientIP(r)
-		user, _, hasCred := credentials(r)
-		if blocked, remain := s.authBlocked(ip, user); blocked {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
-			http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
-				http.StatusTooManyRequests)
-			return
+		if hasCred {
+			var ok bool
+			if ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser); !ok {
+				return
+			}
 		}
-		if s.checkPerm(r, urlPath) == auth.PermNone {
-			if hasCred {
-				s.noteAuthFailure(ip, user)
-			} else if sessionToken(r) != "" {
-				// 无效/过期的 cookie 与猜密码同性质。
-				s.noteAuthFailure(ip, "")
+		perm, _, idAuthenticated := s.permOf(r, urlPath)
+		if perm == auth.PermNone {
+			// 只有“密码/账号不对”才算失败；密码正确但对当前路径无权限
+			// （例如只被授予 /docs 的账号访问 /）不应把账号打进封禁名单。
+			// 无效会话 Cookie 同样不再计数：它不是可猜测的口令。
+			if hasCred && !idAuthenticated {
+				s.noteAuthFailure(ip, limitClass, limitUser)
 			}
 			s.renderAuthGate(w, r, urlPath)
 			return
@@ -1159,6 +1269,7 @@ func (s *Server) writeListing(w http.ResponseWriter, r *http.Request,
 		w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
 		defer reset()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		s.setUserContentCache(w)
 		for _, e := range listing.Entries {
 			name := e.Name
 			if e.IsDir {
@@ -1257,6 +1368,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 用进展而不是总时长，是为了不误杀慢速的大文件传输。
 	w, resetWrite := withWriteProgress(w, s.cfg.DownloadTimeout)
 	defer resetWrite()
+	s.setUserContentCache(w)
 	s.guardInlineContent(w, r, info.Name(), ct)
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
@@ -1395,6 +1507,38 @@ func wantsJSON(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+// sanitizeErrorText 把错误文本里的服务端绝对路径替换掉，保留其余可读原因。
+// 用于解压进度等需要把失败原因告诉用户的场景。
+func (s *Server) sanitizeErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	for _, m := range s.Mounts() {
+		if root := m.Res.Root(); root != "" {
+			msg = strings.ReplaceAll(msg, root, "…")
+		}
+	}
+	return msg
+}
+
+// setUserContentCache 给“可能受鉴权保护”的文件/列表响应设置缓存边界。
+//
+// 不能一律 no-store：视频拖动与重复下载依赖浏览器缓存。启用鉴权时用
+// private + Vary，允许用户自己的浏览器缓存，但禁止共享缓存/CDN 把
+// 带 Cookie/Authorization 的内容复用给其他客户端。匿名公开部署不加限制。
+func (s *Server) setUserContentCache(w http.ResponseWriter) {
+	if !s.auth.Enabled() {
+		return
+	}
+	h := w.Header()
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "private")
+	}
+	h.Add("Vary", "Cookie")
+	h.Add("Vary", "Authorization")
 }
 
 // writeJSON 输出 JSON 响应。

@@ -92,7 +92,10 @@ func canonicalCaseFrom(root, abs string, lister DirLister) (string, error) {
 		if part == "" || part == "." {
 			continue
 		}
-		actual, exists := actualName(cur, part, lister)
+		actual, exists, err := actualName(cur, part, lister)
+		if err != nil {
+			return "", err
+		}
 		cur = filepath.Join(cur, actual)
 		if !exists {
 			// 从这里开始都不存在：原样拼回去。
@@ -111,10 +114,10 @@ func canonicalCaseFrom(root, abs string, lister DirLister) (string, error) {
 //
 // 先做精确名字快速判断；不在目录项里时，再用 Lstat 解析 name（覆盖大小写、
 // Unicode 规范化、Windows 短名/尾随空格点），并用 SameFile 找回真实名字。
-func actualName(dir, name string, lister DirLister) (string, bool) {
+func actualName(dir, name string, lister DirLister) (string, bool, error) {
 	full := filepath.Join(dir, name)
 	if _, err := os.Lstat(full); err != nil {
-		return name, false
+		return name, false, nil
 	}
 	var entries []os.DirEntry
 	var err error
@@ -124,22 +127,27 @@ func actualName(dir, name string, lister DirLister) (string, bool) {
 		entries, err = os.ReadDir(dir)
 	}
 	if err != nil {
-		return name, true // 读不了目录：保持原名，后续操作会给出真实错误
+		// ⚠️ 不能在这里“保持原名”放行。macOS/Windows 的默认文件系统
+		// 大小写不敏感：目录可执行但不可读（或 fd 耗尽）时 Lstat 能成功、
+		// ReadDir 失败；保持原名会让 ACL 按请求里的错误大小写匹配到更宽的
+		// 规则，最终却打开磁盘上另一条更严格规则保护的文件。
+		// 这里向上返回错误，由 canonicalPath 让请求 fail-closed。
+		return "", false, fmt.Errorf("无法读取目录 %s 以规范化路径: %w", dir, err)
 	}
 	for _, e := range entries {
 		if e.Name() == name {
-			return name, true
+			return name, true, nil
 		}
 	}
 	fi, err := os.Lstat(full)
 	if err != nil {
-		return name, true
+		return name, true, nil
 	}
 	for _, e := range entries {
 		efi, ierr := e.Info()
 		if ierr == nil && os.SameFile(efi, fi) {
-			return e.Name(), true
+			return e.Name(), true, nil
 		}
 	}
-	return name, true
+	return name, true, nil
 }

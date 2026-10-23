@@ -161,7 +161,7 @@ func (p *docxParser) end(t xml.EndElement) {
 		p.flushPara()
 	case "t":
 		if p.inText {
-			p.pushRun(clipRun(p.textBuf.String()))
+			p.pushRun(p.rd.chargeText(p.textBuf.String()))
 			p.inText = false
 		}
 	case "tc":

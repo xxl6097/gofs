@@ -386,7 +386,7 @@ func (s *Server) planRenameItem(r *http.Request, pl *renamePlan, vacating map[st
 		if errors.Is(err, fs.ErrNotExist) {
 			return "源已不存在（可能刚被改名或删除）"
 		}
-		return "无法访问源：" + err.Error()
+		return "无法访问源（权限不足或已删除）"
 	}
 	// 站点根 / 服务根不能改名：站点条目代表的是**另一个挂载根**
 	//（与 handleMove、handleDelete 同一道防线）。
@@ -490,7 +490,7 @@ func runRenamePlans(plans []renamePlan, maxName int) (done []renameDoneJSON, fai
 		return bad
 	}
 	failWith := func(pl *renamePlan, err error) *renameItemErrJSON {
-		return &renameItemErrJSON{Path: pl.path, Name: pl.name, Reason: "改名失败：" + err.Error()}
+		return &renameItemErrJSON{Path: pl.path, Name: pl.name, Reason: "改名失败（权限不足或目标冲突）"}
 	}
 	// moveToTemp 把一项挪到一个同目录的临时名上，位置就空出来了。
 	moveToTemp := func(pl *renamePlan) error {

@@ -174,7 +174,12 @@ func (p *xlsxParser) sheet(data []byte) []Block {
 				text = "FALSE"
 			}
 		}
-		curCell.Text = clipRun(text)
+		if !p.rd.chargeCell() {
+			curCell = nil
+			val.Reset()
+			return
+		}
+		curCell.Text = p.rd.chargeText(text)
 
 		// 按 A1 记法把单元格放到正确的列上：中间的空单元格要补位，
 		// 否则 B 列的值会挤到 A 列去。

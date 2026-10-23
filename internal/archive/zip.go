@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -49,11 +50,28 @@ func CheckZipDirectory(f *os.File, size int64, maxEntries int, maxDirBytes int64
 	e := buf[idx:]
 	entries := binary.LittleEndian.Uint16(e[10:12])
 	dirSize := binary.LittleEndian.Uint32(e[12:16])
+	dirOffset := binary.LittleEndian.Uint32(e[16:20])
 	if entries == 0xFFFF || (maxEntries > 0 && int(entries) > maxEntries) {
 		return fmt.Errorf("zip 条目数 %d 超过上限 %d", entries, maxEntries)
 	}
-	if dirSize == 0xFFFFFFFF || (maxDirBytes > 0 && int64(dirSize) > maxDirBytes) {
+	if dirSize == 0xFFFFFFFF || dirOffset == 0xFFFFFFFF ||
+		(maxDirBytes > 0 && int64(dirSize) > maxDirBytes) {
 		return fmt.Errorf("zip 中央目录 %d 字节，超过上限 %d", dirSize, maxDirBytes)
+	}
+	// EOCD 必须紧跟在中央目录之后。Go 的 archive/zip 在 baseOffset > 0
+	// 且 directoryOffset 处能读到合法头时，会**忽略 EOCD 声明的 dirSize**、
+	// 一路读到坏记录为止；条数又只比较 uint16，于是“声明 1 条、实际
+	// 65537 条”的包能通过上面的计数检查并在 zip.NewReader 里分配巨量
+	// *zip.File。这里直接拒绝需要重定位基址的包（带前缀的自解压 zip）。
+	eocdOff := int64(size-tail) + int64(idx)
+	if int64(dirOffset)+int64(dirSize) > eocdOff {
+		return errors.New("zip 中央目录位置超出文件范围")
+	}
+	if base := eocdOff - int64(dirSize) - int64(dirOffset); base != 0 {
+		return fmt.Errorf("zip 存在 %d 字节前置数据，目录偏移异常", base)
+	}
+	if entries > 0 && int64(entries)*46 > int64(dirSize) {
+		return fmt.Errorf("zip 条目数 %d 与目录大小 %d 不匹配", entries, dirSize)
 	}
 	return nil
 }
@@ -84,6 +102,12 @@ func newZipReader(f *os.File) (*zipReader, error) {
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("解析 zip 失败: %w", err)
+	}
+	// 预检被绕过时的兜底：zip.NewReader 已经分配完，但至少不要让后续
+	// List/Extract 继续处理一个超大条目表。
+	if len(zr.File) > hardMaxZipEntries {
+		f.Close()
+		return nil, fmt.Errorf("zip 条目数 %d 超过上限 %d", len(zr.File), hardMaxZipEntries)
 	}
 	return &zipReader{f: f, zr: zr}, nil
 }
@@ -122,12 +146,21 @@ func (z *zipReader) List(ctx context.Context) ([]Entry, error) {
 // Truncated 报告上一次 List 是否因为 MaxFiles 提前结束。
 func (z *zipReader) Truncated() bool { return z.truncated }
 
+// zipSize 把 zip 的 uint64 声明值安全转成 int64。
+// 超过 MaxInt64 时返回 -1（未知），调用方不应据此设置 Content-Length。
+func zipSize(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return -1
+	}
+	return int64(v)
+}
+
 // zipEntry 把 zip.File 转换为统一的 Entry。
 func zipEntry(f *zip.File) Entry {
 	e := Entry{
 		Name:           normalizeEntryName(f.Name),
-		Size:           int64(f.UncompressedSize64),
-		CompressedSize: int64(f.CompressedSize64),
+		Size:           zipSize(f.UncompressedSize64),
+		CompressedSize: zipSize(f.CompressedSize64),
 		IsDir:          f.FileInfo().IsDir(),
 		ModTime:        f.Modified.Format(time.RFC3339),
 		Mode:           f.Mode().String(),
@@ -146,13 +179,19 @@ func (z *zipReader) OpenEntry(_ context.Context, name string) (io.ReadCloser, En
 		if isEncrypted(f) {
 			return nil, Entry{}, ErrEncrypted
 		}
-		if z.limits.MaxEntryBytes > 0 && int64(f.UncompressedSize64) > z.limits.MaxEntryBytes {
+		// 声明值可能设置最高位（zip64），直接用 int64 比较会变成负数并
+		// 绕过上限；实际输出也不能只信声明值，必须再套一道字节闸门。
+		if f.UncompressedSize64 > math.MaxInt64 ||
+			(z.limits.MaxEntryBytes > 0 && f.UncompressedSize64 > uint64(z.limits.MaxEntryBytes)) {
 			return nil, Entry{}, fmt.Errorf("%w：%s 解压后 %d 字节，超过预览上限 %d",
 				ErrEntryTooLarge, f.Name, f.UncompressedSize64, z.limits.MaxEntryBytes)
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return nil, Entry{}, err
+		}
+		if z.limits.MaxEntryBytes > 0 {
+			rc = &limitedReadCloser{rc: rc, remain: z.limits.MaxEntryBytes, max: z.limits.MaxEntryBytes}
 		}
 		return rc, zipEntry(f), nil
 	}
@@ -165,6 +204,10 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 	rep := &Report{Format: FormatZip.String(), Dest: opts.Dest}
 	prog := Progress{Total: len(z.zr.File)}
 	start := time.Now()
+	var archiveSize int64
+	if fi, err := z.f.Stat(); err == nil {
+		archiveSize = fi.Size()
+	}
 
 	if err := os.MkdirAll(opts.Dest, 0o755); err != nil {
 		return nil, err
@@ -215,6 +258,9 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 					continue
 				}
 			}
+			if err := authorizeParents(opts, target); err != nil {
+				return rep, err
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return rep, err
 			}
@@ -235,7 +281,14 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 		if err := authorizeWrite(opts, target); err != nil {
 			return rep, err
 		}
-		if err := limit.checkNext(f.Name, int64(f.UncompressedSize64)); err != nil {
+		// 声明值不可信：最高位可让 int64 变负数，从而绕过累计上限；
+		// 压缩大小也可能被伪造得很大，用来稀释压缩比检查。坏值一律按 0
+		// 处理，由写出的 limitedWriter 按实际字节兜底。
+		declared := int64(0)
+		if f.UncompressedSize64 <= math.MaxInt64 {
+			declared = int64(f.UncompressedSize64)
+		}
+		if err := limit.checkNext(f.Name, declared); err != nil {
 			return rep, err
 		}
 
@@ -243,7 +296,14 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 		if err != nil {
 			return rep, err
 		}
-		n, werr := writeFile(target, rc, opts, limit, int64(f.CompressedSize64), f.Name, f.Modified)
+		compressed := int64(0)
+		if f.CompressedSize64 <= math.MaxInt64 {
+			compressed = int64(f.CompressedSize64)
+		}
+		if archiveSize > 0 && compressed > archiveSize {
+			compressed = archiveSize
+		}
+		n, werr := writeFile(target, rc, opts, limit, compressed, f.Name, f.Modified)
 		rc.Close()
 		if werr != nil {
 			if os.IsExist(werr) {

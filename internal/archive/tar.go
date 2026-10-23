@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xxl6097/gofs/internal/fsutil"
 )
@@ -32,6 +33,26 @@ type tarReader struct {
 
 // SetLimits 设置列表与单条目预览上限。
 func (t *tarReader) SetLimits(l Limits) { t.limits = l }
+
+// TAR 的 PAX/GNU 长名字单项上限是 1 MiB（Go 的 maxSpecialFileSize）。
+// 列表阶段把每个名字/链接都保留下来，几百个这样的条目就能吃掉数百 MB。
+// 这里给单字段和整次列表各设一个更合理的预算；实际文件系统路径通常
+// 也到不了 4 KiB。
+const (
+	maxEntryNameBytes = 4 << 10
+	maxListNameBytes  = 16 << 20
+)
+
+func clipEntryField(s string) string {
+	if len(s) <= maxEntryNameBytes {
+		return s
+	}
+	cut := maxEntryNameBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
 
 // newTarReader 构造未压缩 tar 读取器。
 func newTarReader(f *os.File) (*tarReader, error) {
@@ -127,6 +148,7 @@ func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
 	}
 	out := make([]Entry, 0, 128)
 	t.truncated = false
+	nameBudget := int64(maxListNameBytes)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -143,7 +165,15 @@ func (t *tarReader) List(ctx context.Context) ([]Entry, error) {
 			t.truncated = true
 			break
 		}
-		out = append(out, tarEntry(hdr))
+		e := tarEntry(hdr)
+		nameBudget -= int64(len(e.Name) + len(e.LinkTarget))
+		if nameBudget < 0 {
+			// 长度本身也是一个内存维度：扫描字节预算挡不住
+			// “1000 个 1 MiB 名字”这种输入。
+			t.truncated = true
+			break
+		}
+		out = append(out, e)
 	}
 	return out, nil
 }
@@ -154,12 +184,12 @@ func (t *tarReader) Truncated() bool { return t.truncated }
 // tarEntry 把 tar.Header 转换为统一的 Entry。
 func tarEntry(h *tar.Header) Entry {
 	e := Entry{
-		Name:       normalizeEntryName(h.Name),
+		Name:       clipEntryField(normalizeEntryName(h.Name)),
 		Size:       h.Size,
 		IsDir:      h.Typeflag == tar.TypeDir,
 		ModTime:    h.ModTime.Format(time.RFC3339),
 		Mode:       h.FileInfo().Mode().String(),
-		LinkTarget: h.Linkname,
+		LinkTarget: clipEntryField(h.Linkname),
 	}
 	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
 		if !e.IsDir {
@@ -249,6 +279,12 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 	if closer != nil {
 		defer closer.Close()
 	}
+	// tar/tar.gz 的压缩比用归档文件本身的物理大小计算。之前这里硬编码 0，
+	// 等于对 TAR 完全没有压缩比防护。
+	var archiveSize int64
+	if fi, serr := t.f.Stat(); serr == nil {
+		archiveSize = fi.Size()
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -270,6 +306,15 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 				prog.Current = name
 				onProgress(prog)
 			}
+		}
+
+		if len(hdr.Name) > maxEntryNameBytes {
+			prog.Skipped++
+			rep.Skipped++
+			rep.Warnings = append(rep.Warnings,
+				fmt.Sprintf("已跳过超长路径条目 %s（超过 %d 字节）", clipEntryField(name), maxEntryNameBytes))
+			report()
+			continue
 		}
 
 		// 符号链接与硬链接一律跳过，避免软链逃逸出根目录。
@@ -311,6 +356,9 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 					continue
 				}
 			}
+			if err := authorizeParents(opts, target); err != nil {
+				return rep, err
+			}
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()
 				return rep, err
@@ -341,7 +389,7 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			return rep, err
 		}
 
-		n, werr := writeFile(target, tr, opts, limit, 0, name, hdr.ModTime)
+		n, werr := writeFile(target, tr, opts, limit, archiveSize, name, hdr.ModTime)
 		if werr != nil {
 			if os.IsExist(werr) {
 				prog.Skipped++

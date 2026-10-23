@@ -70,10 +70,12 @@ type runtimeSettings struct {
 	// siteRoots 是**显式**配置的路径前缀（--root-allow / RootAllow），
 	// 不包含上面那个推导出来的父目录。
 	//
-	// 单独留一份是因为「加站点」与「换根」的默认值不同：换根默认限在启动
-	// 主目录的兄弟目录内；加站点默认不限（见 AllowsSite）。要区分「用户显式
-	// 写了白名单」与「我们替他推出来的默认范围」，就必须把它单独存着。
+	// 加站点默认与换根一致，限在 allowRoots 内；只有显式
+	// --allow-any-site 才放开到主机任意目录。要区分「用户显式写了白名单」
+	// 与「我们替他推出来的默认范围」，就必须把它单独存着。
 	siteRoots []string
+	// allowAnySite 对应 --allow-any-site：显式承担“管理员可挂载主机任意目录”。
+	allowAnySite bool
 }
 
 // mutate 串行化一次「改内存 + 落盘」。
@@ -393,6 +395,7 @@ func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 		listenBind:    cfg.Bind,
 		listenPort:    cfg.Port,
 		settingsFile:  cfg.SettingsFile,
+		allowAnySite:  cfg.AllowAnySite,
 	}
 	rs.loadSettings()
 
@@ -419,20 +422,18 @@ func newRuntimeSettings(cfg *config.Config, startRoot string) *runtimeSettings {
 
 // AllowsSite 判断某个目录能否被新增为站点。
 //
-// 与 AllowsRoot（运行期换根）**默认值刻意不同**：
-//
-//   - 换根默认限在启动主目录的兄弟目录内 —— 那是个「在目录树里跳来跳去」
-//     的动作，收窄一点更安全；
-//   - 加站点**默认不限制**（门槛是「你是管理员」）。运维明确想再加一个
-//     目录时，「先改启动参数重启」正是这个功能要免掉的事。
-//
-// 两者都认可**显式**配置的白名单：一旦写了 --root-allow / RootAllow，
-// 加站点也按它收窄 —— 想收紧的部署有这个开关，不想管的人不必配。
+// 默认与运行期换根一致：只允许启动根的同级目录。加站点会把服务根之外的
+// 目录暴露给对 / 有读写权限的账号，不应在未显式确认时默认放开主机任意
+// 目录；确需该能力时使用 --allow-any-site 或 --root-allow。
 func (s *runtimeSettings) AllowsSite(abs string) bool {
-	if len(s.siteRoots) == 0 {
+	if s.allowAnySite {
 		return true
 	}
-	for _, base := range s.siteRoots {
+	roots := s.siteRoots
+	if len(roots) == 0 {
+		roots = s.allowRoots
+	}
+	for _, base := range roots {
 		if fsutil.IsWithin(base, abs) {
 			return true
 		}
@@ -440,10 +441,18 @@ func (s *runtimeSettings) AllowsSite(abs string) bool {
 	return false
 }
 
-// SiteRoots 返回显式配置的白名单（供界面提示与错误信息用；空表示不限制）。
+// SiteRoots 返回当前生效的可挂载白名单（供界面提示与错误信息用）。
+// allow-any-site 下返回空，表示不限制。
 func (s *runtimeSettings) SiteRoots() []string {
-	out := make([]string, len(s.siteRoots))
-	copy(out, s.siteRoots)
+	if s.allowAnySite {
+		return nil
+	}
+	src := s.siteRoots
+	if len(src) == 0 {
+		src = s.allowRoots
+	}
+	out := make([]string, len(src))
+	copy(out, src)
 	return out
 }
 

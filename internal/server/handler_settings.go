@@ -181,7 +181,9 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 	rep.Root = s.res.Root()
 	// 有附加站点时不允许运行期换主根（换掉哪一个？其余的呢？）——
 	// 与站点增删是两件事：站点随时可增删，主根要换得先把站点清掉。
-	rep.RootSwitchable = s.cfg.AllowRootSwitch && !s.MultiRoot()
+	// 单文件模式同样不允许：换根会把“只暴露这一个文件”变成目录模式，
+	// 是单文件约束的直接绕过（UI 隐藏之外还必须在服务端拒绝）。
+	rep.RootSwitchable = s.cfg.AllowRootSwitch && !s.MultiRoot() && s.res.SingleFile() == ""
 	rep.MultiRoot = s.MultiRoot()
 	rep.SitesEditable = s.cfg.AllowRootSwitch && s.res.SingleFile() == ""
 	rep.SiteRoots = s.settings.SiteRoots()
@@ -518,6 +520,9 @@ func (s *Server) addSite(path, wantLabel string) (fsutil.Mount, error) {
 	if !s.cfg.AllowRootSwitch {
 		return fsutil.Mount{}, errSiteDisabled
 	}
+	if s.res.SingleFile() != "" {
+		return fsutil.Mount{}, errors.New("单文件模式不支持添加站点；请以目录模式启动后再管理站点")
+	}
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fsutil.Mount{}, errors.New("目录不能为空")
@@ -531,12 +536,12 @@ func (s *Server) addSite(path, wantLabel string) (fsutil.Mount, error) {
 	if err != nil {
 		return fsutil.Mount{}, err
 	}
-	// 默认不限目录（门槛是「你是管理员」）；只有部署方**显式**写了
-	// --root-allow / RootAllow 时，才按那份白名单收窄。
+	// 默认只允许启动根的同级目录；显式 --root-allow 可按前缀收窄/放宽，
+	// --allow-any-site 才恢复“挂载主机任意目录”的旧行为。
 	if !s.settings.AllowsSite(abs) {
-		return fsutil.Mount{}, errors.New("目标目录超出白名单；当前白名单：" +
+		return fsutil.Mount{}, errors.New("目标目录超出白名单；当前可挂载范围：" +
 			strings.Join(s.settings.SiteRoots(), "、") +
-			"（由 --root-allow / RootAllow 指定；去掉它即不再限制目录）")
+			"（可用 --root-allow 指定白名单，或 --allow-any-site 显式放开）")
 	}
 	info, err := os.Stat(abs)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -653,6 +658,9 @@ func (s *Server) switchRoot(newRoot string) error {
 	if s.MultiRoot() {
 		return errors.New("多根模式下不支持切换服务根目录")
 	}
+	if s.res.SingleFile() != "" {
+		return errors.New("单文件模式不支持切换服务根目录；请以目录模式启动")
+	}
 	newRoot = strings.TrimSpace(newRoot)
 	if newRoot == "" {
 		return errors.New("根目录不能为空")
@@ -711,14 +719,14 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 		}
 		return permResult{Perm: auth.PermNone}, true
 	}
-	user, pass, hasCred := credentials(r)
-	ip, ok := s.checkAuthLimit(w, r, user)
+	user, pass, hasCred, class := credentialsWithSource(r)
+	ip, ok := s.checkAuthLimit(w, r, class, user)
 	if !ok {
 		return permResult{}, false
 	}
 	if !hasCred || user == "" || !s.auth.Verify(user, pass) {
 		if hasCred {
-			s.noteAuthFailure(ip, user)
+			s.noteAuthFailure(ip, class, user)
 		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
@@ -726,7 +734,8 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 		http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 		return permResult{}, false
 	}
-	s.noteAuthSuccess(ip, user)
+	s.noteVerifiedUser(r, user)
+	s.noteAuthSuccess(ip, class, user)
 	perm := s.auth.Lookup("/", user, pass, true)
 	return permResult{Perm: perm, User: user, Authenticated: true}, true
 }
@@ -749,21 +758,22 @@ func (s *Server) isAdminRequest(r *http.Request) bool {
 		// 由 --allow-anonymous-admin 显式放开。
 		return s.cfg.AllowAnonymousAdmin
 	}
-	// ⚠️ 分享令牌一律不是管理员，与它的权限级别无关。
+	// ⚠️ 分享令牌本身不是管理员身份。可读写分享在范围内的 Perm 就是
+	// PermReadWrite，若直接拿 permOf(r, "/") 判断，一条 scope 为 / 的
+	// 可读写分享会让陌生人解锁「服务设置」（换根、重启、卸载）、用户管理
+	// 与密钥面板 —— 那不是“能改几个文件”，而是把整个服务交出去。
 	//
-	// 这一条是必须的：可读写分享在范围内的 Perm 就是 PermReadWrite，而
-	// permOf(r, "/") 是按**请求路径**算的 —— 一条 scope 为 / 的可读写分享
-	// 会在这里算出 PermReadWrite，于是拿到链接的陌生人直接解锁「服务设置」
-	// （换服务根目录、重启、卸载）、用户管理与密钥面板。那不是「能改几个
-	// 文件」，而是把整个服务交出去。
+	// 但也不能只看“请求里有没有分享令牌”：分享 Cookie 会随浏览器带到
+	// 同路径的后续请求上，管理员打开一次只读分享后，自己的有效会话
+	// 就会被这条规则误伤（设置/用户/密钥/升级/重启全部消失）。
 	//
-	// 换成更贴切的判据：管理员意味着「有身份、且这个身份对根有读写权限」。
-	// 分享令牌带的是「范围 + 级别」，从头到尾没有身份，所以永远出局。
-	if shareTokenOf(r) != "" {
-		return false
-	}
-	perm, _, _ := s.permOf(r, "/")
-	return perm == auth.PermReadWrite
+	// 正确判据是**真实身份**对根的权限，完全忽略分享令牌：只有存在一个
+	// 已认证、且对 / 有读写权限的显式账号或会话时才是管理员；纯分享游客
+	// 的 identityPermOf 只会得到匿名规则（通常为 None），仍然出局。
+	// 匿名规则即使给了 rw，也不能让页面显示管理入口 —— 管理接口本身
+	// 仍要求会话/账号，隐藏入口才不会出现“按钮在但点了 401”。
+	perm, _, authenticated := s.identityPermOf(r, "/")
+	return authenticated && perm == auth.PermReadWrite
 }
 
 // requireAdmin 要求请求来自「对服务根拥有读写权限」的账号。
@@ -792,8 +802,8 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 			http.StatusForbidden)
 		return false
 	}
-	user, pass, hasCred := credentials(r)
-	ip, ok := s.checkAuthLimit(w, r, user)
+	user, pass, hasCred, class := credentialsWithSource(r)
+	ip, ok := s.checkAuthLimit(w, r, class, user)
 	if !ok {
 		return false
 	}
@@ -802,14 +812,15 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 		// 显式凭据：先验密码，再判断权限。密码错误才计入失败，
 		// 一个合法的普通账号访问管理接口得到的是 403，而不是被封禁。
 		if !s.auth.Verify(user, pass) {
-			s.noteAuthFailure(ip, user)
+			s.noteAuthFailure(ip, class, user)
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}
 			http.Error(w, "401 Unauthorized", http.StatusUnauthorized)
 			return false
 		}
-		s.noteAuthSuccess(ip, user)
+		s.noteVerifiedUser(r, user)
+		s.noteAuthSuccess(ip, class, user)
 		if s.isAdminRequest(r) {
 			return true
 		}
@@ -818,13 +829,11 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 		return false
 	}
 
-	// 没有 Basic 凭据时只能靠会话 cookie。无效 cookie 计入失败
-	// （伪造/过期 cookie 和猜密码是一回事）；合法但非管理员的会话
-	// 只回 403，不能把正常用户打进封禁名单。
+	// 没有 Basic 凭据时只能靠会话 cookie。无效 Cookie 不计入失败：
+	// 它是 256 位随机值，伪造/过期都不构成口令猜测，计入只会让
+	// 匿名请求有机会污染有效会话的限速桶。合法但非管理员的会话
+	// 只回 403。
 	if _, ok := s.auth.ResolveSession(sessionToken(r)); !ok {
-		if sessionToken(r) != "" {
-			s.noteAuthFailure(ip, "")
-		}
 		if shouldChallenge(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 		}

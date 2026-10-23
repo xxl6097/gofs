@@ -44,9 +44,9 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 与 authorize 用同一套限速：这个接口现在会下发会话 cookie，
 	// 不设闸门等于把口令交给字典攻击 —— 而且登录成功一次就能拿到
 	// 一张长期有效的 cookie，比逐个请求试密码划算得多。
-	user, pass, ok := credentials(r)
+	user, pass, ok, class := credentialsWithSource(r)
 	ip := s.clientIP(r)
-	if blocked, remain := s.authBlocked(ip, user); blocked {
+	if blocked, remain := s.authBlocked(ip, class, user); blocked {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
 		s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
 			"message": "认证失败次数过多，请稍后再试",
@@ -61,14 +61,15 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.auth.Verify(user, pass) {
-		s.noteAuthFailure(ip, user)
-		s.logger.Errorf("登录失败：账号 %q 凭据不正确", user)
+		s.noteAuthFailure(ip, class, user)
+		s.logger.Errorf("登录失败：账号 %q 凭据不正确", truncateAuthUser(user))
 		s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
 			"message": "用户名或密码不正确",
 		})
 		return
 	}
-	s.noteAuthSuccess(ip, user)
+	s.noteVerifiedUser(r, user)
+	s.noteAuthSuccess(ip, class, user)
 
 	// 下发会话 cookie。之后浏览器**自己**发起的请求（<video>/<img> 的加载、
 	// <a download> 的下载）会带上它，于是 Range 流式播放与原生下载都可用，
@@ -79,11 +80,13 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 登录到攻击者账号（登录 CSRF）。查询串是 `<img>` 唯一能带上的
 	// 凭据形式；而 Authorization 头跨站设置不了，POST 又有同源校验。
 	// 这类 GET 仍然可以做一次凭据校验，只是不产生会话。
-	fromQuery := false
-	if _, _, ok := r.BasicAuth(); !ok && r.Method == http.MethodGet {
-		fromQuery = true
-	}
-	if !fromQuery {
+	fromQuery := class == authClassQuery
+	// GET + Basic 仍可校验凭据，但只有明确带 X-Gofs-Ajax（应用自己的登录框）
+	// 或 POST 才建立会话。否则 `https://user:pass@host/fs/auth` 这类顶层导航
+	// 会让受害者静默登录到攻击者账号（登录 CSRF）；非浏览器客户端请改用 POST。
+	issueSession := r.Method == http.MethodPost ||
+		(r.Method == http.MethodGet && r.Header.Get("X-Gofs-Ajax") == "1")
+	if !fromQuery && issueSession {
 		// 会话表满时宁可拒绝登录，也不发一张无法撤销的通行证。
 		token, ok := s.auth.NewSession(user)
 		if !ok {

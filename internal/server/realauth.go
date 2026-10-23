@@ -23,7 +23,11 @@ func (s *Server) keyCreatorAllowed(r *http.Request, k *uploadkey.Key, urlPath st
 	if k == nil || k.Creator == "" {
 		return false
 	}
-	return s.auth.PermFor(k.Creator, s.canonicalPath(r, urlPath)) >= need
+	canon, ok := s.canonicalPath(r, urlPath)
+	if !ok {
+		return false
+	}
+	return s.auth.PermFor(k.Creator, canon) >= need
 }
 
 // uploadKeyAllowed 同时校验密钥的 scope 与创建者当前 ACL。

@@ -231,6 +231,7 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 		name := path.Base(entry.Name)
 		h := w.Header()
 		h.Set("Content-Type", "application/octet-stream")
+		s.setUserContentCache(w)
 		h.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`,
 			asciiFallback(name), urlEncode(name)))
 		h.Set("X-Gofs-Archive-Entry", entry.Name)
@@ -491,7 +492,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Errorf("解压 %s 失败: %v", relSrc, exErr)
 		sse.event("error", map[string]any{
-			"message": exErr.Error(),
+			"message": s.sanitizeErrorText(exErr),
 			"partial": rep,
 		})
 		return
