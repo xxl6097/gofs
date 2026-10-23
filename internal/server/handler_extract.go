@@ -376,7 +376,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 
 	// 目标目录已存在且非空时，要求显式覆盖，避免把文件混进已有目录。
 	if info, err := os.Stat(destAbs); err == nil && info.IsDir() && !req.Overwrite {
-		if empty, eerr := isDirEmpty(destAbs); eerr == nil && !empty {
+		if empty, eerr := s.isDirEmpty(r, destClean, destAbs); eerr == nil && !empty {
 			http.Error(w, "409 Conflict: 目标目录已存在且非空，如需覆盖请设置 overwrite=true",
 				http.StatusConflict)
 			return
@@ -511,6 +511,9 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 				key = "extract:" + filepath.ToSlash(rel)
 			}
 			return s.secureOpenWrite(r, key, target, flags, perm)
+		},
+		MkdirAll: func(target string, perm fs.FileMode) error {
+			return s.secureMkdirAll(target, perm)
 		},
 	}
 

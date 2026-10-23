@@ -400,7 +400,20 @@ type Listing struct {
 // 一次性全部返回，光是序列化就会吃掉大量内存，响应体也会大到无法渲染；
 // 截断后由 Truncated 标记告知调用方。
 func ReadDir(res relator, dir string, hidden []string, maxEntries int) (*Listing, error) {
-	info, err := os.Stat(dir)
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return ReadDirFile(f, res, dir, hidden, maxEntries)
+}
+
+// ReadDirFile 与 ReadDir 相同，但读取调用方已经安全打开的目录 fd。
+//
+// 这样 ACL/真实路径校验与实际列举的是同一个 inode，避免“检查完目录再被
+// 换成软链”导致列出另一棵目录。调用方负责关闭 f。
+func ReadDirFile(f *os.File, res relator, dir string, hidden []string, maxEntries int) (*Listing, error) {
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
@@ -414,12 +427,6 @@ func ReadDir(res relator, dir string, hidden []string, maxEntries int) (*Listing
 	// maxEntries 个条目，其余只计数（TotalAll 仍然如实）。
 	// 注意：条目的选取顺序是文件系统顺序，最终会统一排序；被截断时
 	// Truncated/TotalAll 会告诉调用方这不是全部。
-	f, err := os.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
 	const readBatch = 256
 	var items []os.DirEntry
 	total := 0
@@ -749,6 +756,96 @@ func Search(res relator, root string, opt SearchOptions) (entries []Entry, total
 		total++
 		if opt.Limit > 0 && len(out) >= opt.Limit {
 			// 到上限了：继续走完，但只计数（见上面的说明）。
+			return nil
+		}
+		out = append(out, e)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out, total, nil
+}
+
+// SearchFS 与 Search 相同，但从一个受限的 fs.FS（通常是 os.Root.FS()）遍历。
+//
+// startRel 是搜索起点相对 fsys 根（mountRoot）的路径；rootAbs 是搜索起点
+// 的绝对路径，用于 res.Rel 与相对路径匹配。这样递归遍历也通过 os.Root
+// 逐段解析，不会因为目录在遍历中被换成根外软链而逃逸。
+func SearchFS(fsys fs.FS, startRel, rootAbs, mountRoot string, res relator, opt SearchOptions) (entries []Entry, total int, err error) {
+	matcher, err := newSearchMatcher(opt.Mode, opt.Pattern)
+	if err != nil {
+		return nil, 0, err
+	}
+	if opt.Ctx != nil {
+		if err := opt.Ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+	}
+	out := make([]Entry, 0, 32)
+	err = fs.WalkDir(fsys, startRel, func(p string, d fs.DirEntry, walkErr error) error {
+		if opt.Ctx != nil {
+			select {
+			case <-opt.Ctx.Done():
+				return opt.Ctx.Err()
+			default:
+			}
+		}
+		if walkErr != nil {
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if p == startRel {
+			return nil
+		}
+		if isHidden(d.Name(), opt.Hidden) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		abs := filepath.Join(mountRoot, filepath.FromSlash(p))
+		relPath := ""
+		if r, rerr := filepath.Rel(rootAbs, abs); rerr == nil {
+			relPath = filepath.ToSlash(r)
+		}
+		if !matcher.match(d.Name(), relPath) {
+			return nil
+		}
+		fi, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		rel, rerr := res.Rel(abs)
+		if rerr != nil {
+			return nil
+		}
+		e := Entry{
+			Path:    rel,
+			Name:    d.Name(),
+			Mtime:   fi.ModTime().Format(time.RFC3339),
+			IsDir:   d.IsDir(),
+			Symlink: d.Type()&fs.ModeSymlink != 0,
+		}
+		if !e.IsDir {
+			e.Size = fi.Size()
+			e.Ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(d.Name()), "."))
+			e.Archive = IsArchiveName(d.Name())
+			if lang := textfile.Language(d.Name()); lang != "" {
+				e.Editable = true
+				e.Lang = lang
+			}
+		}
+		total++
+		if opt.Limit > 0 && len(out) >= opt.Limit {
 			return nil
 		}
 		out = append(out, e)

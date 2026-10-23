@@ -268,7 +268,7 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 	prog := Progress{Total: -1}
 	start := time.Now()
 
-	if err := os.MkdirAll(opts.Dest, 0o755); err != nil {
+	if err := mkdirAll(opts, opts.Dest, 0o755); err != nil {
 		return nil, err
 	}
 
@@ -359,7 +359,7 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			if err := authorizeParents(opts, target); err != nil {
 				return rep, err
 			}
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := mkdirAll(opts, target, 0o755); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()
 				return rep, err
 			}

@@ -101,6 +101,16 @@ type Options struct {
 	// 其它安全打开方式落盘。target 是绝对路径，flags/perm 与 os.OpenFile
 	// 相同。为 nil 时退回 os.OpenFile。
 	OpenWrite func(target string, flags int, perm fs.FileMode) (*os.File, error)
+	// MkdirAll 可选：替换默认的 os.MkdirAll，供调用方用 os.Root 创建目录。
+	MkdirAll func(target string, perm fs.FileMode) error
+}
+
+// mkdirAll 在有安全实现时使用它，否则退回 os.MkdirAll。
+func mkdirAll(opts Options, target string, perm fs.FileMode) error {
+	if opts.MkdirAll != nil {
+		return opts.MkdirAll(target, perm)
+	}
+	return os.MkdirAll(target, perm)
 }
 
 // authorizeWrite 在落盘前执行调用方提供的逐条目授权。
@@ -515,7 +525,7 @@ func writeFile(target string, src io.Reader, opts Options, limit *limiter, compr
 		return 0, err
 	}
 	if dir := filepath.Dir(target); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := mkdirAll(opts, dir, 0o755); err != nil {
 			return 0, err
 		}
 	}

@@ -446,6 +446,36 @@ func (s *Store) Verify(token string) (*Key, error) {
 	return found, nil
 }
 
+// Peek 与 Verify 相同，但**不累加使用统计、不触发落盘**。
+//
+// 供日志/权限判定前的“这个 token 是什么范围”检查使用：那种调用可能在一个
+// 请求内发生多次，不该把 UseCount 刷成几十次。
+func (s *Store) Peek(token string) (*Key, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, ErrEmptyToken
+	}
+	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byHash[hash]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	found, ok := s.keys[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(found.Hash), []byte(hash)) != 1 {
+		return nil, ErrNotFound
+	}
+	if found.Expired(time.Now()) {
+		return nil, ErrExpired
+	}
+	return found, nil
+}
+
 // List 返回全部密钥的副本，按创建时间倒序。
 func (s *Store) List() []*Key {
 	s.mu.Lock()

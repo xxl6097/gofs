@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -169,7 +170,13 @@ func (s *Server) openUnderMount(real string, flags int, perm os.FileMode) (f *os
 		return nil, true, rerr
 	}
 	defer rootFS.Close()
-	f, err = rootFS.OpenFile(rel, flags, perm)
+	if flags == os.O_RDONLY {
+		// 读取（包括目录列举）用 Root.Open：Windows 上 OpenFile 对目录的
+		// 行为与 Unix 不一致，Open 的语义更稳定。
+		f, err = rootFS.Open(rel)
+	} else {
+		f, err = rootFS.OpenFile(rel, flags, perm)
+	}
 	if err != nil {
 		return nil, true, err
 	}
@@ -269,6 +276,189 @@ func (s *Server) secureOpenWrite(r *http.Request, urlPath, abs string, flags int
 		return f, nil
 	}
 	return ap.openWrite(flags, perm)
+}
+
+// secureMkdirAll 在服务根内逐级创建目录。
+//
+// 每一级都用 os.Root 相对根目录 fd 操作，即使中间目录被换成根外软链，
+// 也不会在根外建目录；根外目标（--allow-symlink）退回 os.MkdirAll。
+func (s *Server) secureMkdirAll(target string, perm os.FileMode) error {
+	real, err := fsutil.ResolveReal(target)
+	if err != nil {
+		return os.MkdirAll(target, perm)
+	}
+	root := s.mountRootFor(real)
+	if root == "" {
+		return os.MkdirAll(target, perm)
+	}
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer rootFS.Close()
+	rel, err := filepath.Rel(root, real)
+	if err != nil {
+		return os.MkdirAll(target, perm)
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := ""
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		if cur == "" {
+			cur = part
+		} else {
+			cur += "/" + part
+		}
+		name := filepath.FromSlash(cur)
+		fi, serr := rootFS.Stat(name)
+		if serr == nil {
+			if !fi.IsDir() {
+				return fmt.Errorf("%s 不是目录", target)
+			}
+			continue
+		}
+		if !errors.Is(serr, os.ErrNotExist) {
+			return serr
+		}
+		if merr := rootFS.Mkdir(name, perm); merr != nil && !errors.Is(merr, os.ErrExist) {
+			return merr
+		}
+	}
+	return nil
+}
+
+// searchSecure 在授权快照对应的目录内做递归搜索。
+//
+// 服务根内的搜索走 os.Root.FS()，遍历过程中即使目录被换成根外软链也不会
+// 逃逸；根外（--allow-symlink）目标退回原有路径遍历。
+func (s *Server) searchSecure(r *http.Request, urlPath, abs string, opt fsutil.SearchOptions) ([]fsutil.Entry, int, error) {
+	real, err := fsutil.ResolveReal(abs)
+	if err != nil {
+		return nil, 0, err
+	}
+	mountRoot := s.mountRootFor(real)
+	if mountRoot == "" {
+		return fsutil.Search(s.res, abs, opt)
+	}
+	rootFS, err := os.OpenRoot(mountRoot)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rootFS.Close()
+	startRel, err := filepath.Rel(mountRoot, real)
+	if err != nil {
+		return fsutil.Search(s.res, abs, opt)
+	}
+	if ap := s.authorizedPathFor(r, urlPath); ap != nil && ap.info != nil {
+		fi, serr := rootFS.Stat(startRel)
+		if serr != nil {
+			return nil, 0, serr
+		}
+		if !os.SameFile(fi, ap.info) {
+			return nil, 0, errPathChanged
+		}
+	}
+	return fsutil.SearchFS(rootFS.FS(), filepath.ToSlash(startRel), real, mountRoot, s.res, opt)
+}
+
+// mountRel 把绝对路径映射为「挂载根 + 根内相对路径 + 打开的 os.Root」。
+// ok=false 表示路径不在任何挂载根内（--allow-symlink 的根外目标）。
+func (s *Server) mountRel(path string) (rootFS *os.Root, root, rel string, ok bool, err error) {
+	real, err := fsutil.ResolveReal(path)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	root = s.mountRootFor(real)
+	if root == "" {
+		return nil, "", "", false, nil
+	}
+	rel, err = filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, "", "", false, nil
+	}
+	rootFS, err = os.OpenRoot(root)
+	if err != nil {
+		return nil, "", "", true, err
+	}
+	return rootFS, root, rel, true, nil
+}
+
+// secureRemoveAll 在挂载根内安全地递归删除；叶子是软链时只删链接本身。
+func (s *Server) secureRemoveAll(target string) error {
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(target)
+	}
+	rootFS, _, rel, ok, err := s.mountRel(target)
+	if err != nil {
+		if ok {
+			return err
+		}
+		return os.RemoveAll(target)
+	}
+	if !ok {
+		return os.RemoveAll(target)
+	}
+	defer rootFS.Close()
+	return rootFS.RemoveAll(rel)
+}
+
+// secureRemove 与 secureRemoveAll 相同，但只删除单个条目。
+func (s *Server) secureRemove(target string) error {
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(target)
+	}
+	rootFS, _, rel, ok, err := s.mountRel(target)
+	if err != nil {
+		if ok {
+			return err
+		}
+		return os.Remove(target)
+	}
+	if !ok {
+		return os.Remove(target)
+	}
+	defer rootFS.Close()
+	return rootFS.Remove(rel)
+}
+
+// secureRename 在同一挂载根内用 os.Root 重命名；叶子是软链时按链接本身
+// 处理，跨根/根外退回 os.Rename。
+func (s *Server) secureRename(src, dst string) error {
+	if fi, err := os.Lstat(src); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return os.Rename(src, dst)
+	}
+	srcRoot, srcRootPath, srcRel, srcOK, srcErr := s.mountRel(src)
+	if srcErr != nil {
+		if srcOK {
+			return srcErr
+		}
+		return os.Rename(src, dst)
+	}
+	dstRoot, dstRootPath, dstRel, dstOK, dstErr := s.mountRel(dst)
+	if dstErr != nil {
+		if srcOK {
+			srcRoot.Close()
+		}
+		return os.Rename(src, dst)
+	}
+	if !srcOK || !dstOK || srcRootPath != dstRootPath {
+		if srcOK {
+			srcRoot.Close()
+		}
+		if dstOK {
+			dstRoot.Close()
+		}
+		return os.Rename(src, dst)
+	}
+	defer srcRoot.Close()
+	if dstOK {
+		dstRoot.Close() // 只用于比较根路径；重命名在 srcRoot 上完成
+	}
+	return srcRoot.Rename(srcRel, dstRel)
 }
 
 // verifyAuthorizedParent 在 rename/删除等路径级操作前复核父目录快照。

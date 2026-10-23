@@ -172,7 +172,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 		http.Error(w, "409 Conflict: 同名目录已存在", http.StatusConflict)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := s.secureMkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -415,7 +415,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 	// 整批校验全部通过后才创建目标目录，避免“前几个文件越权、目录却已建好”
 	// 的半完成状态。目录本身已在上方按真实路径复核过权限。
 	if len(targets) > 0 {
-		if err := os.MkdirAll(base, 0o755); err != nil {
+		if err := s.secureMkdirAll(base, 0o755); err != nil {
 			s.writeErr(w, err)
 			return
 		}
@@ -494,25 +494,11 @@ func (s *Server) writeAllAuthorized(r *http.Request, urlPath, dst string, src io
 		}
 		dst = ap.real
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := s.secureMkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
 	f, err := s.secureOpenWrite(r, urlPath, dst,
 		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = copyUpload(f, src)
-	return err
-}
-
-// writeAll 把 src 全量写入 dst（内部复制兜底，没有 HTTP 授权上下文）。
-func writeAll(dst string, src io.Reader) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
@@ -546,7 +532,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, urlPath, a
 
 	if info.IsDir() {
 		// 二次确认：非空目录必须显式声明 recursive，避免误删。
-		empty, err := isDirEmpty(abs)
+		empty, err := s.isDirEmpty(r, urlPath, abs)
 		if err != nil {
 			s.writeErr(w, err)
 			return
@@ -562,11 +548,11 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, urlPath, a
 			http.Error(w, "403 Forbidden: 目录内的 "+bad+" 没有写权限", http.StatusForbidden)
 			return
 		}
-		if err := os.RemoveAll(abs); err != nil {
+		if err := s.secureRemoveAll(abs); err != nil {
 			s.writeErr(w, err)
 			return
 		}
-	} else if err := os.Remove(abs); err != nil {
+	} else if err := s.secureRemove(abs); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -591,7 +577,7 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, urlPath, ab
 		http.Error(w, "409 Conflict: 目标已存在", http.StatusConflict)
 		return
 	}
-	if err := os.MkdirAll(abs, 0o755); err != nil {
+	if err := s.secureMkdirAll(abs, 0o755); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -732,26 +718,26 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 				return
 			}
 		}
-		if err := os.RemoveAll(dst); err != nil {
+		if err := s.secureRemoveAll(dst); err != nil {
 			s.writeErr(w, err)
 			return
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := s.secureMkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	if err := os.Rename(src, dst); err != nil {
+	if err := s.secureRename(src, dst); err != nil {
 		// 跨设备时退化为复制 + 删除。
 		if !errors.Is(err, fs.ErrInvalid) && !strings.Contains(err.Error(), "cross-device") {
 			s.writeErr(w, err)
 			return
 		}
-		if err := copyTree(src, dst, s.cfg.AllowSymlink); err != nil {
+		if err := s.copyTree(r, src, dst, s.cfg.AllowSymlink); err != nil {
 			s.writeErr(w, err)
 			return
 		}
-		if err := os.RemoveAll(src); err != nil {
+		if err := s.secureRemoveAll(src); err != nil {
 			s.writeErr(w, err)
 			return
 		}
@@ -764,7 +750,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 // followSymlinks 为 false（默认的 !--allow-symlink）时跳过软链，不跟随。
 // 否则跨设备 MOVE 的兜底分支会把根外文件内容复制进来，或者沿着
 // 「软链 → 上级目录」无限递归。
-func copyTree(src, dst string, followSymlinks bool) error {
+func (s *Server) copyTree(r *http.Request, src, dst string, followSymlinks bool) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -780,22 +766,40 @@ func copyTree(src, dst string, followSymlinks bool) error {
 		}
 	}
 	if !info.IsDir() {
-		in, err := os.Open(src)
+		in, err := s.secureOpenRead(r, "", src)
 		if err != nil {
 			return err
 		}
 		defer in.Close()
-		return writeAll(dst, in)
+		if err := s.secureMkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		out, err := s.secureOpenWrite(r, "", dst,
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return err
+		}
+		_, cerr := copyUpload(out, in)
+		closeErr := out.Close()
+		if cerr != nil {
+			return cerr
+		}
+		return closeErr
 	}
-	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+	if err := s.secureMkdirAll(dst, info.Mode().Perm()); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(src)
+	df, err := s.secureOpenRead(r, "", src)
 	if err != nil {
 		return err
 	}
+	entries, rerr := df.ReadDir(-1)
+	_ = df.Close()
+	if rerr != nil {
+		return rerr
+	}
 	for _, e := range entries {
-		if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), followSymlinks); err != nil {
+		if err := s.copyTree(r, filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), followSymlinks); err != nil {
 			return err
 		}
 	}
@@ -803,8 +807,8 @@ func copyTree(src, dst string, followSymlinks bool) error {
 }
 
 // isDirEmpty 判断目录是否为空。
-func isDirEmpty(dir string) (bool, error) {
-	f, err := os.Open(dir)
+func (s *Server) isDirEmpty(r *http.Request, urlPath, dir string) (bool, error) {
+	f, err := s.secureOpenRead(r, urlPath, dir)
 	if err != nil {
 		return false, err
 	}

@@ -186,7 +186,7 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 	}
 	defer release()
 
-	entries, total, err := fsutil.Search(s.res, abs, fsutil.SearchOptions{
+	entries, total, err := s.searchSecure(r, urlPath, abs, fsutil.SearchOptions{
 		Pattern: pattern,
 		Mode:    fsutil.ParseSearchMode(r.URL.Query().Get("mode")),
 		Hidden:  s.cfg.Hidden,
@@ -196,6 +196,10 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 	if err != nil {
 		// 客户端已经断开：遍历是被 context 停下来的，不必再写响应/记错误日志。
 		if r.Context().Err() != nil {
+			return
+		}
+		if errors.Is(err, errPathChanged) {
+			http.Error(w, "409 Conflict: 搜索目录在请求期间发生变化，请重试", http.StatusConflict)
 			return
 		}
 		// 表达式非法（坏正则 / 坏通配符）是调用方的输入错误，回 400。

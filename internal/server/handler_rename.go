@@ -183,7 +183,7 @@ func (s *Server) handleRenameBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	done, fail, notes := runRenamePlans(work, s.cfg.MaxNameBytes)
+	done, fail, notes := runRenamePlans(work, s.cfg.MaxNameBytes, s.secureRename)
 	resp := renameRespJSON{Renamed: done, Skipped: skipped}
 	if fail == nil {
 		resp.OK = true
@@ -471,14 +471,14 @@ type renameStep struct{ from, to string }
 // 返回（已落地项, 首个失败项, 未还原的项）。任一步真实失败即停止并尽力回滚：
 // POSIX 没有跨多个文件的原子提交，能做到的是把磁盘尽量还原、并把真实状态说清楚
 // —— 静默留一个改了一半的目录是最坏的结果。
-func runRenamePlans(plans []renamePlan, maxName int) (done []renameDoneJSON, fail *renameItemErrJSON, unreverted []renameItemErrJSON) {
+func runRenamePlans(plans []renamePlan, maxName int, renameFn func(src, dst string) error) (done []renameDoneJSON, fail *renameItemErrJSON, unreverted []renameItemErrJSON) {
 	var journal []renameStep
 
 	rollback := func() []renameItemErrJSON {
 		var bad []renameItemErrJSON
 		for i := len(journal) - 1; i >= 0; i-- {
 			st := journal[i]
-			if err := os.Rename(st.to, st.from); err != nil {
+			if err := renameFn(st.to, st.from); err != nil {
 				// 还原不了的必须说出来，并给出文件此刻真实的位置 —— 否则用户会在
 				// 原处找不到自己的文件，也不知道该去哪找。
 				bad = append(bad, renameItemErrJSON{
@@ -498,7 +498,7 @@ func runRenamePlans(plans []renamePlan, maxName int) (done []renameDoneJSON, fai
 		if err != nil {
 			return err
 		}
-		if err := os.Rename(pl.srcAbs, tmp); err != nil {
+		if err := renameFn(pl.srcAbs, tmp); err != nil {
 			return err
 		}
 		journal = append(journal, renameStep{from: pl.srcAbs, to: tmp})
@@ -530,7 +530,7 @@ func runRenamePlans(plans []renamePlan, maxName int) (done []renameDoneJSON, fai
 				tempUsed = append(tempUsed, i)
 				continue
 			}
-			if err := os.Rename(pl.srcAbs, pl.dstAbs); err != nil {
+			if err := renameFn(pl.srcAbs, pl.dstAbs); err != nil {
 				return done, failWith(pl, err), rollback()
 			}
 			journal = append(journal, renameStep{from: pl.srcAbs, to: pl.dstAbs})
@@ -552,7 +552,7 @@ func runRenamePlans(plans []renamePlan, maxName int) (done []renameDoneJSON, fai
 	// 收尾：把借道的那些落到最终目标上（它们的源位置此时都已空出）。
 	for _, i := range tempUsed {
 		pl := &plans[i]
-		if err := os.Rename(pl.tempAbs, pl.dstAbs); err != nil {
+		if err := renameFn(pl.tempAbs, pl.dstAbs); err != nil {
 			return done, failWith(pl, err), rollback()
 		}
 		journal = append(journal, renameStep{from: pl.tempAbs, to: pl.dstAbs})

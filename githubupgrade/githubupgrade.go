@@ -118,6 +118,11 @@ type Options struct {
 	// PublicKeyText 是 PublicKey 的文本形式（hex 或 base64），供命令行使用。
 	// 与 PublicKey 同时给出时以 PublicKey 为准。
 	PublicKeyText string
+	// AllowUnsigned 允许在没有配置公钥时退回只校验 SHA-256。
+	//
+	// 默认**不允许**：没有签名时，换掉 release 里的 checksums.txt 与二进制
+	// 即可同时绕过 SHA-256；需要这种旧行为时必须显式打开并自行承担风险。
+	AllowUnsigned bool
 
 	// DryRun 为 true 时只下载并校验，不替换自己。
 	// 第一次接入、或在生产上试水时先开它。
@@ -202,6 +207,10 @@ func New(opts Options) (*Upgrader, error) {
 	}
 	if len(pub) > 0 && len(pub) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("githubupgrade: Ed25519 公钥长度必须为 %d 字节", ed25519.PublicKeySize)
+	}
+	if len(pub) == 0 && !opts.AllowUnsigned {
+		return nil, errors.New("githubupgrade: 必须配置 Ed25519 公钥以验证 checksums.txt.sig；" +
+			"如确实接受无签名更新，请显式设置 AllowUnsigned")
 	}
 	client := opts.Client
 	if client == nil {

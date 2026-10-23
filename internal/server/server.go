@@ -573,8 +573,9 @@ const (
 // 根路径 + HTTPS 时同样优先使用 __Host- 前缀；子路径分享（Path=/docs/）
 // 不满足 __Host- 的 Path=/ 要求，继续使用旧名字。
 const (
-	shareCookieName     = "gofs_share"
-	shareCookieHostName = "__Host-gofs_share"
+	shareCookieName       = "gofs_share"
+	shareCookieHostName   = "__Host-gofs_share"
+	shareCookieHostPrefix = "__Host-gofs_share_"
 )
 
 // shareTokenOf 取出请求里的分享令牌：查询参数优先，其次是 cookie。
@@ -589,7 +590,26 @@ func (s *Server) shareTokenOf(r *http.Request) string {
 	if v := r.URL.Query().Get("share"); v != "" {
 		return v
 	}
-	// __Host- 优先：同名的 Domain Cookie 无法覆盖它。
+	secureRoot := s.sessionCookiePath() == "/" && s.cookieSecure(r)
+	if secureRoot && s.keys != nil {
+		// HTTPS 根路径只认 __Host- 名字。子路径分享也升级为
+		// __Host-gofs_share_<scope 摘要> 且 Path=/，同时靠令牌自身的
+		// scope 在多个分享之间选择；旧名 gofs_share 不再采信。
+		matches := func(c *http.Cookie) bool {
+			k, err := s.keys.Peek(c.Value)
+			return err == nil && k.IsShare() && k.AllowsPath(r.URL.Path)
+		}
+		if c, err := r.Cookie(shareCookieHostName); err == nil && c.Value != "" && matches(c) {
+			return c.Value
+		}
+		for _, c := range r.Cookies() {
+			if strings.HasPrefix(c.Name, shareCookieHostPrefix) && matches(c) {
+				return c.Value
+			}
+		}
+		return ""
+	}
+	// 非根 HTTPS/纯 HTTP：保留旧名字（__Host- 的 Path=/ + Secure 条件不满足）。
 	if c, err := r.Cookie(shareCookieHostName); err == nil && c.Value != "" {
 		return c.Value
 	}
@@ -627,15 +647,22 @@ func (s *Server) setShareCookie(w http.ResponseWriter, r *http.Request, token, s
 	if strings.HasPrefix(p, "//") {
 		p = "/"
 	}
-	// __Host- 只能用于 Path=/ 且 Secure 的 cookie；子路径分享继续用旧名。
+	// __Host- 只能用于 Path=/ 且 Secure 的 cookie。根路径部署下子路径分享
+	// 也升级为 __Host- 名字（Path=/），用 scope 摘要区分多个分享。
 	name := shareCookieName
-	if p == "/" && s.cookieSecure(r) {
+	path := p
+	if s.sessionCookiePath() == "/" && s.cookieSecure(r) {
+		path = "/"
 		name = shareCookieHostName
+		if trimmed := strings.TrimSuffix(scope, "/"); trimmed != "" {
+			sum := sha256.Sum256([]byte(trimmed))
+			name = shareCookieHostPrefix + hex.EncodeToString(sum[:8])
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    token,
-		Path:     p,
+		Path:     path,
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -1252,7 +1279,18 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 		}
 	}
 
-	listing, err := fsutil.ReadDir(s.res, abs, s.cfg.Hidden, s.cfg.ListMaxEntries)
+	// 目录列举也用授权时打开的那个 inode，避免检查完目录后被换成软链。
+	dirFile, derr := s.secureOpenRead(r, urlPath, abs)
+	if derr != nil {
+		if errors.Is(derr, errPathChanged) {
+			http.Error(w, "409 Conflict: 目录在请求期间发生变化，请重试", http.StatusConflict)
+			return
+		}
+		s.writeErr(w, derr)
+		return
+	}
+	listing, err := fsutil.ReadDirFile(dirFile, s.res, abs, s.cfg.Hidden, s.cfg.ListMaxEntries)
+	_ = dirFile.Close()
 	if err != nil {
 		s.writeErr(w, err)
 		return

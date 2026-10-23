@@ -123,7 +123,7 @@
 > `-b 0.0.0.0`（或具体网卡 IP）；无鉴权时请先确认这确实是你要的暴露范围。
 
 ```bash
-# 构建
+# 构建（需要 Go 1.25+：os.Root 的安全 Rename/RemoveAll 用于防 TOCTOU）
 go build -o gofs ./cmd/gofs
 
 # 以只读模式服务当前目录
@@ -1843,6 +1843,12 @@ GOFS_TRUSTED_PROXIES='10.0.0.0/8,192.168.1.10' ./gofs -A /data
 拒绝），再用 `SameFile` 复核 inode；不一致返回 `409`，不会按旧权限读写另一个
 文件。新建文件用 `O_EXCL`，授权后路径若变成软链或已存在文件会直接失败。
 
+这套边界也覆盖**目录操作**：目录列举基于授权时打开的目录 fd，搜索通过
+`os.Root.FS()` 遍历；创建目录逐级用 `os.Root.Mkdir`，递归删除、单条删除与
+重命名分别走 `os.Root.RemoveAll` / `Remove` / `Rename`（需要 Go 1.25+），
+跨设备复制的每个文件也走安全打开。这样即使中途把某一级目录换成指向根外的
+软链，也不会在根外建目录、删文件或把整棵树搬走。
+
 **日志注入与凭据脱敏。** URL、User-Agent 以及**文件名**都会进日志。文件名这一点容易被忽略 ——
 Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admin" 200'`
 这样一个名字就能在日志里伪造出额外一行。所有日志行在写出前会清理控制字符与 ANSI 转义。
@@ -2149,8 +2155,11 @@ wget -r -np -nH --cut-dirs=2 -P out "https://host/s/<token>/docs/"
 打开分享链接时，服务端还会下发一个 **Path 限定在分享范围内**的 cookie。
 这不是为了记住登录：目录分享打开的是页面，而页面里的列表、预览都是前端
 再发 XHR 拉的，那些请求不带 `?share=` —— 没有这个 cookie 就会全部 401。
-HTTPS 根路径下使用 `__Host-gofs_share`（`Secure` + `Path=/`、不带 `Domain`），
-同站子域无法用 Domain Cookie 覆盖或伪造它；子路径分享继续用旧名字。
+HTTPS 根路径下，根范围分享使用 `__Host-gofs_share`，子路径分享使用
+`__Host-gofs_share_<scope 摘要>`（都是 `Secure` + `Path=/`、不带 `Domain`），
+同站子域无法用 Domain Cookie 覆盖或伪造；选择时还会按令牌自身的 scope
+匹配当前路径。根路径部署不再采信旧名 `gofs_share`；子路径 / 纯 HTTP 部署
+继续使用旧名字。
 
 ## 在线检测升级、重启与卸载（扩展点）
 
@@ -2239,6 +2248,9 @@ gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
 - **更新源必须 HTTPS**（本机回环镜像除外）：否则中间人可以同时替换二进制和
   校验和，摘要校验就形同虚设。`githubupgrade` 在构造时直接拒绝非 HTTPS 的
   `APIBase`；页面上的「查看发布页」也只接受 `https://` 链接。
+- **默认要求签名校验**：`githubupgrade` 未配置 `PublicKey` / `PublicKeyText`
+  时会直接拒绝构造，除非显式设置 `AllowUnsigned`；配置公钥后必须有
+  `checksums.txt.sig` 且验证通过，否则升级在落地前中止。
 - **同一时刻只允许一次升级**。两个管理员同时点会并发写同一个二进制，
   那是把文件写坏最直接的方式；第二个请求收到 409，正文里带上
   「开始于 15:32:10，已运行 6m3s」—— 光有状态码分不清「别人刚点了一下」
@@ -2269,13 +2281,14 @@ gofs.WithRestarter(gofs.RestarterFunc(func(ctx context.Context) error {
 
 ```bash
 go build -o /tmp/gofs-demo ./examples/upgrade
-/tmp/gofs-demo -owner <你> -repo <仓库> -root ./data -port 8080
+/tmp/gofs-demo -owner <你> -repo <仓库> -root ./data -port 8080 \
+    -public-key <32字节Ed25519公钥（hex或base64）>
 
 # 先只检查、不替换（推荐）
 /tmp/gofs-demo ... -dry-run
 
-# 强制校验 checksums.txt 的 Ed25519 签名（公钥 hex 或 base64）
-/tmp/gofs-demo ... -public-key <32字节公钥>
+# 确实无法签名时，显式接受只校验 SHA-256（不推荐）
+/tmp/gofs-demo ... -allow-unsigned
 ```
 
 它把安全上要紧的几步都写全了，可以直接抄：
@@ -2284,10 +2297,11 @@ go build -o /tmp/gofs-demo ./examples/upgrade
 - **校验和取自同一个 release 的 `checksums.txt`**，与二进制同样走 HTTPS ——
   攻击者要同时改两个地方；
 - **没有 `checksums.txt` 就拒绝升级**。「校验不了就放行」等于没有校验；
-- **可选的 Ed25519 签名**：给 `githubupgrade.New` 配置 `PublicKey`（或示例的
+- **默认强制 Ed25519 签名**：给 `githubupgrade.New` 配置 `PublicKey`（或示例的
   `-public-key`），并在 release 里附带 `checksums.txt.sig`，服务端会先验证
   校验和文件的签名再使用它。签名文件内容是 64 字节原始签名或 base64/hex；
-  配置公钥后，没有签名文件会直接拒绝升级；
+  没有签名文件会直接拒绝升级。只有显式设置 `AllowUnsigned`（示例
+  `-allow-unsigned`）才会退回只校验 SHA-256；
 - **临时文件建在目标二进制的**同目录**下**，这样 `rename` 是原子的；
   放 `/tmp` 再跨设备搬运会在最后一步退化成「复制+删除」，中途崩掉只剩半个文件；
 - **替换前先把原文件改成 `.old`**，`rename` 失败还能放回去；

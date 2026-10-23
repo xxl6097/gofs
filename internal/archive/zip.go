@@ -246,7 +246,7 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 	}
 	spans := zipDataSpans(z.zr, archiveSize)
 
-	if err := os.MkdirAll(opts.Dest, 0o755); err != nil {
+	if err := mkdirAll(opts, opts.Dest, 0o755); err != nil {
 		return nil, err
 	}
 
@@ -298,7 +298,7 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			if err := authorizeParents(opts, target); err != nil {
 				return rep, err
 			}
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := mkdirAll(opts, target, 0o755); err != nil {
 				return rep, err
 			}
 			prog.Dirs++

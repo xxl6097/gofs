@@ -290,3 +290,20 @@ func TestAuthorizedOpenRejectsSymlinkAtCreation(t *testing.T) {
 		t.Fatalf("软链未被拒绝：%v", err)
 	}
 }
+
+// TestHostShareCookieRejectsLegacyRootScope 确认 HTTPS 根路径下旧名字里
+// 的根范围分享令牌不再被采信，避免子域 Cookie tossing。
+func TestHostShareCookieRejectsLegacyRootScope(t *testing.T) {
+	s := newTestServer(t, testConfig(t, t.TempDir(), "-A", "-a", "boss:pw@/:rw"))
+	tok := newShare(t, s, "/")
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.TLS = &tls.ConnectionState{}
+	r.AddCookie(&http.Cookie{Name: shareCookieName, Value: tok})
+	if got := s.shareTokenOf(r); got != "" {
+		t.Fatalf("HTTPS 根路径仍采信旧名根分享：%q", got)
+	}
+	r.AddCookie(&http.Cookie{Name: shareCookieHostName, Value: tok})
+	if got := s.shareTokenOf(r); got != tok {
+		t.Fatalf("__Host- 分享 Cookie 没被采信：%q", got)
+	}
+}

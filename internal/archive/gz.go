@@ -127,7 +127,7 @@ func (g *gzReader) Extract(ctx context.Context, opts Options, onProgress func(Pr
 	prog := Progress{Total: 1}
 	start := time.Now()
 
-	if err := os.MkdirAll(opts.Dest, 0o755); err != nil {
+	if err := mkdirAll(opts, opts.Dest, 0o755); err != nil {
 		return nil, err
 	}
 	target, err := secureJoin(opts.Dest, g.out)
