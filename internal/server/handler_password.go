@@ -55,7 +55,9 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if user == "" || !s.auth.Verify(user, pass) {
-			s.noteAuthFailure(ip, class, user)
+			if s.noteAuthFailureAndReply(w, ip, class, user) {
+				return
+			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}
@@ -77,7 +79,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 这条路径还会验证一次当前密码，必须和登录共用一套失败限速；
-	// 单独一档，避免改密失败把登录/匿名访问连坐封禁。
+	// 单独一档，避免改密失败把登录/匿名访问连坐节流。
 	ip, ok := s.checkAuthLimit(w, r, authClassPassword, user)
 	if !ok {
 		return
@@ -91,7 +93,9 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	err := s.auth.ChangePassword(user, req.CurrentPassword, req.NewPassword)
 	if err != nil {
 		if errors.Is(err, auth.ErrPasswordMismatch) {
-			s.noteAuthFailure(ip, authClassPassword, user)
+			if s.noteAuthFailureAndReply(w, ip, authClassPassword, user) {
+				return
+			}
 			http.Error(w, "403 Forbidden: "+err.Error(), http.StatusForbidden)
 			return
 		}

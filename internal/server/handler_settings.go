@@ -726,7 +726,9 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 			return permResult{}, false
 		}
 		if !s.auth.Verify(user, pass) {
-			s.noteAuthFailure(ip, class, user)
+			if s.noteAuthFailureAndReply(w, ip, class, user) {
+				return permResult{}, false
+			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}
@@ -819,9 +821,11 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 
 	if hasCred {
 		// 显式凭据：先验密码，再判断权限。密码错误才计入失败，
-		// 一个合法的普通账号访问管理接口得到的是 403，而不是被封禁。
+		// 一个合法的普通账号访问管理接口得到的是 403，而不是被节流。
 		if !s.auth.Verify(user, pass) {
-			s.noteAuthFailure(ip, class, user)
+			if s.noteAuthFailureAndReply(w, ip, class, user) {
+				return false
+			}
 			if shouldChallenge(r) {
 				w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 			}

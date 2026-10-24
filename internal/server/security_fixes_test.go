@@ -99,7 +99,7 @@ func TestForwardedForHonoredFromTrustedProxy(t *testing.T) {
 		}).code
 	}
 	if last == http.StatusTooManyRequests {
-		t.Fatalf("可信代理下每个客户端只失败一次，不该被封禁，实际 = %d", last)
+		t.Fatalf("可信代理下每个客户端只失败一次，不该被节流，实际 = %d", last)
 	}
 }
 

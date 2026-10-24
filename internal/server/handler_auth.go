@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -50,16 +49,26 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	passwordLogin := ok && user != ""
 
 	if passwordLogin {
-		if blocked, remain := s.authBlocked(ip, class, user); blocked {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
-			s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
-				"message": "认证失败次数过多，请稍后再试",
-			})
-			return
+		// 超过失败阈值后先等一小段，再照常验密码：限速要拖慢字典攻击，
+		// 但不能让攻击者仅凭用户名就把合法账号锁死（正确密码永远能进）。
+		already, remain := s.authThrottled(ip, class, user)
+		if already {
+			if !s.waitAuthThrottle(r, remain) {
+				return
+			}
 		}
 		if !s.auth.Verify(user, pass) {
 			s.noteAuthFailure(ip, class, user)
 			s.logger.Errorf("登录失败：账号 %q 凭据不正确", truncateAuthUser(user))
+			// 密码已经验过且失败，此时回 429 不会误伤拿对密码的人。
+			// 达到阈值的那一次仍回 401，下一次才开始回 429。
+			if already {
+				w.Header().Set("Retry-After", "1")
+				s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+					"message": "认证失败次数过多，请稍后再试",
+				})
+				return
+			}
 			s.writeJSONStatus(w, http.StatusUnauthorized, map[string]any{
 				"message": "用户名或密码不正确",
 			})

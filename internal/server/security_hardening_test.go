@@ -79,7 +79,7 @@ func TestShareCookieDoesNotDowngradeAdmin(t *testing.T) {
 }
 
 // TestCrossSiteQueryCredentialsDoNotLockAccount 确认跨站 <img> 形式
-// 的查询串凭据不再计入账号失败封禁。
+// 的查询串凭据不再计入账号失败节流。
 func TestCrossSiteQueryCredentialsDoNotLockAccount(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), []byte("hi"))
@@ -99,7 +99,7 @@ func TestCrossSiteQueryCredentialsDoNotLockAccount(t *testing.T) {
 }
 
 // TestValidUserWithoutPathPermissionIsNotAuthFailure 确认“密码正确但对
-// 该路径无权限”不会把账号打进封禁名单。
+// 该路径无权限”不会把账号拖进节流窗口。
 func TestValidUserWithoutPathPermissionIsNotAuthFailure(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "docs", "a.txt"), []byte("hi"))

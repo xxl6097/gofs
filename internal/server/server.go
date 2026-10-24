@@ -493,11 +493,11 @@ func sharePerm(k *uploadkey.Key) auth.Permission {
 // credentialsWithSource 从请求中提取凭据，并报告凭据来源。
 //
 // 来源用于认证失败限速分桶：Basic 与查询串是两种可独立尝试的口令入口，
-// 会话 Cookie/匿名访问不能被它们的封禁记录连坐。
+// 会话 Cookie/匿名访问不能被它们的节流记录连坐。
 //
 // 查询串凭据是跨站 <img> 唯一能带上的形式，因此只在**非跨站**请求上采信：
 // 否则攻击页面可以用 `<img src="...?user=admin&pass=wrong">` ×10
-// 把受害者来源 IP 上的 admin 账号打进封禁名单（账号锁定 DoS）。
+// 把受害者来源 IP 上的 admin 账号拖进节流窗口，并借受害者 IP 猜口令。
 // 浏览器会带 Sec-Fetch-Site；旧客户端没有该头时退回 Origin/Referer 判断，
 // 两者都没有的非浏览器客户端（curl 等）不受影响。
 func credentialsWithSource(r *http.Request) (user, pass string, ok bool, source string) {
@@ -882,14 +882,22 @@ func (s *Server) checkPermExact(r *http.Request, urlPath string) auth.Permission
 // clientIP 返回经可信代理校正后的客户端地址。
 func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trustedProxies) }
 
-// checkAuthLimit 在验证凭据前检查来源是否已被封禁。
+// checkAuthLimit 在验证凭据前套一层节流。
 //
 // 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
 // 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
 // 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
-func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
+//
+// ⚠️ 这里**只等待、不拒绝**。早先是超过阈值直接回 429，结果攻击者只要
+// 知道用户名，随便编几次错误口令就能让 admin 在统计窗口内连正确密码都
+// 登不上（账号锁定 DoS）。现在改成先等一个很短的节流步长，再让调用方
+// 照常校验密码：猜错的人被拖慢，拿对密码的人总能进去。是否回 429 由
+// 调用方在密码校验失败后决定（见 noteAuthFailureAndReply）。
+//
+// 返回 false 只表示客户端在等待期间断开了，不是「被限速」。
+func (s *Server) checkAuthLimit(_ http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
 	ip := s.clientIP(r)
-	// 只有可以主动提交口令的凭据类别才需要封禁检查。会话 Cookie 是
+	// 只有可以主动提交口令的凭据类别才需要节流。会话 Cookie 是
 	// 服务端签发的随机 token，无效值不构成口令猜测；匿名请求更不应被
 	// 别人的失败记录连坐。早先所有类别共用空用户名桶，10 个坏 Cookie
 	// 就能锁死同一 IP 上的全部有效会话/匿名访问。
@@ -899,10 +907,10 @@ func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, u
 	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
 		return ip, true
 	}
-	if blocked, remain := s.authBlocked(ip, class, user); blocked {
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remain.Seconds())+1))
-		http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试", http.StatusTooManyRequests)
-		return ip, false
+	if throttled, remain := s.authThrottled(ip, class, user); throttled {
+		if !s.waitAuthThrottle(r, remain) {
+			return ip, false
+		}
 	}
 	return ip, true
 }
@@ -996,7 +1004,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 不再计入：token 是 256 位随机值，伪造试探不构成口令猜测，而计入
 	// 会让匿名请求有机会污染有效会话的限速桶。
 	if hasCred && !idAuthenticated {
-		s.noteAuthFailure(ip, limitClass, limitUser)
+		if s.noteAuthFailureAndReply(w, ip, limitClass, limitUser) {
+			return permResult{}, false
+		}
 	}
 
 	hadCookie := s.sessionToken(r) != ""
@@ -1097,7 +1107,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	// 返回外壳 + 前端登录后自行 fetch 数据，可以同时避开这两个问题。
 	//
 	// ⚠️ 这个预检也会验证 Basic 口令（checkPerm），因此必须与 authorize
-	// 共用同一套失败计数/封禁：否则攻击者对 "/" 发随机密码就能绕过限速，
+	// 共用同一套失败计数/节流：否则攻击者对 "/" 发随机密码就能绕过限速，
 	// 用 PBKDF2 把 CPU 打满。
 	if s.auth.Enabled() && isAppShellNavigation(r) {
 		limitUser, _, hasCred, limitClass := credentialsWithSource(r)
@@ -1111,10 +1121,14 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		perm, _, idAuthenticated := s.permOf(r, urlPath)
 		if perm == auth.PermNone {
 			// 只有“密码/账号不对”才算失败；密码正确但对当前路径无权限
-			// （例如只被授予 /docs 的账号访问 /）不应把账号打进封禁名单。
+			// （例如只被授予 /docs 的账号访问 /）不应把账号打进节流桶。
 			// 无效会话 Cookie 同样不再计数：它不是可猜测的口令。
+			//
+			// 注意先验密码再回 429：正确密码不会走到这里，所以不会被锁死。
 			if hasCred && !idAuthenticated {
-				s.noteAuthFailure(ip, limitClass, limitUser)
+				if s.noteAuthFailureAndReply(w, ip, limitClass, limitUser) {
+					return
+				}
 			}
 			s.renderAuthGate(w, r, urlPath)
 			return

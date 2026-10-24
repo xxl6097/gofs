@@ -19,7 +19,7 @@ func TestACLRejectsEncodedDotDot(t *testing.T) {
 	writeFile(t, filepath.Join(root, "docs", "ok.txt"), []byte("ok"))
 	writeFile(t, filepath.Join(root, "secret.txt"), []byte("TOP-SECRET"))
 
-	// 关掉认证失败封禁：本用例会连续发多次越权请求，被封禁后拿到的 429
+	// 关掉认证失败节流：本用例会连续发多次越权请求，被节流后拿到的 429
 	// 会掩盖真正要断言的东西（越权请求本身是否放行）。
 	s := newTestServer(t, testConfig(t, root, "-A",
 		"--auth-fail-limit", "0",

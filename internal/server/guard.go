@@ -38,10 +38,21 @@ type guard struct {
 
 // failRecord 记录某个来源的认证失败情况。
 type failRecord struct {
-	count   int
-	last    time.Time
-	blocked time.Time
+	count int
+	last  time.Time
+	// throttledUntil 是「需要减速」的截止时间。注意它**不是**「拒绝服务」
+	// 的截止时间：进入节流窗口后，每次尝试仍会验证密码，只是先等一小段
+	// 时间。这样攻击者没法用错误口令把合法用户锁在门外。
+	throttledUntil time.Time
 }
+
+// authThrottleStep 是节流窗口内两次口令校验之间的最小间隔。
+//
+// 不把整个统计窗口当成封禁：那样只要知道用户名，随便编几次错误口令就能
+// 让 admin 在 5 分钟内连正确密码都登不上（账号锁定 DoS）。改成「每次先等
+// 半秒再验」之后，暴力破解被压到每秒约 2 次，而合法用户带着正确密码
+// 最多等半秒就能登录 —— 限速还在，锁死没有了。
+const authThrottleStep = 500 * time.Millisecond
 
 // newGuard 依据配置构造防护器。
 func newGuard(cfg *config.Config) *guard {
@@ -292,8 +303,8 @@ func authFailKey(ip, class, user string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// authBlocked 判断该来源+类别+账号是否正处在封禁期。
-func (s *Server) authBlocked(ip, class, user string) (bool, time.Duration) {
+// authThrottled 判断该来源+类别+账号是否正处在节流窗口。
+func (s *Server) authThrottled(ip, class, user string) (bool, time.Duration) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return false, 0
@@ -305,13 +316,66 @@ func (s *Server) authBlocked(ip, class, user string) (bool, time.Duration) {
 		return false, 0
 	}
 	now := time.Now()
-	if now.Before(rec.blocked) {
-		return true, rec.blocked.Sub(now)
+	if now.Before(rec.throttledUntil) {
+		return true, rec.throttledUntil.Sub(now)
 	}
 	return false, 0
 }
 
-// noteAuthFailure 记录一次认证失败，达到阈值时开始封禁。
+// waitAuthThrottle 在节流窗口内等一小段时间再继续验证密码。
+//
+// ⚠️ 这里是「等待」而不是「拒绝」：拒绝会让攻击者仅凭用户名就能把
+// 合法账号锁死。等待把每次猜测压慢，但正确密码永远能走到校验。
+// 返回 false 表示客户端在等待期间断开了。
+func (s *Server) waitAuthThrottle(r *http.Request, remain time.Duration) bool {
+	wait := authThrottleStep
+	if remain < wait {
+		wait = remain
+	}
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-r.Context().Done():
+		return false
+	}
+}
+
+// throttledReply 在失败计数已进入节流窗口时写 429，返回 true 表示已写响应。
+//
+// 调用它之前密码**已经验过且失败**，所以正确密码不会走到这里 ——
+// 这是「限速但不锁死」的关键：429 只影响猜错的人，不影响拿对密码的人。
+func (s *Server) throttledReply(w http.ResponseWriter, ip, class, user string) bool {
+	if throttled, _ := s.authThrottled(ip, class, user); !throttled {
+		return false
+	}
+	// 实际节流步长是 500ms，按秒向上取整就是 1。
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
+		http.StatusTooManyRequests)
+	return true
+}
+
+// noteAuthFailureAndReply 记录一次失败；如果**这次之前**就已经在节流窗口里，
+// 写 429 并返回 true。
+//
+// 达到阈值的那一次本身仍按普通认证失败处理（401），从下一次开始才回 429：
+// 这样「第 N 次失败」的语义与以前一致，也不会让边界上的那一次看起来像
+// 被额外惩罚。密码正确时不要调用。
+func (s *Server) noteAuthFailureAndReply(w http.ResponseWriter, ip, class, user string) bool {
+	already, _ := s.authThrottled(ip, class, user)
+	s.noteAuthFailure(ip, class, user)
+	if !already {
+		return false
+	}
+	return s.throttledReply(w, ip, class, user)
+}
+
+// noteAuthFailure 记录一次认证失败，达到阈值时进入节流窗口。
 //
 // class/user 是本次**实际尝试的凭据类别与账号**（没有凭据时不应调用）。
 // 计数按「来源 + 类别 + 账号」隔离，成功登录不会清掉别人账号的失败记录，
@@ -339,8 +403,8 @@ func (s *Server) noteAuthFailure(ip, class, user string) {
 		}
 	}
 	// 硬上限：持续注入新键时，仅靠「清过期」挡不住内存增长。
-	// 淘汰时跳过仍在封禁期的记录，否则攻击者可以故意灌满表，
-	// 把针对自己的封禁记录挤掉后继续猜口令。
+	// 淘汰时跳过仍在节流期的记录，否则攻击者可以故意灌满表，
+	// 把针对自己的节流记录挤掉后继续猜口令。
 	if len(g.fails) >= maxAuthFailEntries {
 		n := 0
 		now := time.Now()
@@ -348,15 +412,15 @@ func (s *Server) noteAuthFailure(ip, class, user string) {
 			if n >= maxAuthFailEntries/2 {
 				break
 			}
-			if v.blocked.After(now) {
+			if v.throttledUntil.After(now) {
 				continue
 			}
 			delete(g.fails, k)
 			n++
 		}
 		if len(g.fails) >= maxAuthFailEntries {
-			// 表里全是仍在生效的封禁记录：宁可本次不记新键，
-			// 也不要让 map 无界增长。已有的封禁仍会按时过期。
+			// 表里全是仍在生效的节流记录：宁可本次不记新键，
+			// 也不要让 map 无界增长。已有的记录仍会按时过期。
 			return
 		}
 	}
@@ -370,10 +434,10 @@ func (s *Server) noteAuthFailure(ip, class, user string) {
 	rec.count++
 	rec.last = now
 	if rec.count >= limit {
-		rec.blocked = now.Add(window)
+		rec.throttledUntil = now.Add(window)
 		rec.count = 0
-		s.logger.Errorf("来源 %s（%s 账号 %q）认证失败达 %d 次，封禁至 %s",
-			ip, class, truncateAuthUser(user), limit, rec.blocked.Format(time.RFC3339))
+		s.logger.Errorf("来源 %s（%s 账号 %q）认证失败达 %d 次，进入 %s 节流窗口（正确密码仍可在等待后登录）",
+			ip, class, truncateAuthUser(user), limit, window)
 	}
 }
 

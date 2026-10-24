@@ -10,7 +10,7 @@ import (
 // 别的账号的失败计数。
 //
 // 修复前计数只按 IP 记录：攻击者每猜错一次 boss，就用自己合法的 alice
-// 账号发一次请求，整个 IP 的失败记录被删除，封禁永远不触发 —— 相当于
+// 账号发一次请求，整个 IP 的失败记录被删除，限速永远不触发 —— 相当于
 // 对 boss 拥有无限次口令猜测机会。
 func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
 	root := makeFixture(t)
@@ -40,15 +40,17 @@ func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
 		}
 	}
 	if !banned {
-		t.Fatal("穿插其它账号的成功请求后始终没有触发封禁 —— 失败计数被跨账号清零了")
+		t.Fatal("穿插其它账号的成功请求后始终没有触发限速 —— 失败计数被跨账号清零了")
 	}
 
-	// 封禁只针对被猜测的账号，不应误伤同 IP 的其它账号。
+	// 限速只针对被猜测的账号，不应误伤同 IP 的其它账号。
+	// 同时验证：boss 拿对密码时必须能登录 —— 否则攻击者只要乱猜几次
+	// 就能把 boss 锁死（账号锁定 DoS）。
 	if r := do(t, s, http.MethodGet, "/?json", nil,
-		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusTooManyRequests {
-		t.Fatalf("被封禁账号的正确密码返回 %d，期望 429", r.code)
+		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusOK {
+		t.Fatalf("节流期间 boss 的正确密码返回 %d，期望 200", r.code)
 	}
 	if r := do(t, s, http.MethodGet, "/?json", nil, alice); r.code != http.StatusOK {
-		t.Fatalf("封禁误伤了同 IP 的其它账号：alice 返回 %d", r.code)
+		t.Fatalf("节流误伤了同 IP 的其它账号：alice 返回 %d", r.code)
 	}
 }

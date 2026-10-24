@@ -2902,7 +2902,7 @@ func TestCSRFCanBeDisabled(t *testing.T) {
 	}
 }
 
-func TestAuthFailLimitBlocksBruteForce(t *testing.T) {
+func TestAuthFailLimitThrottlesBruteForce(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "-A",
 		"-a", "alice:secret@/:rw",
@@ -2915,7 +2915,7 @@ func TestAuthFailLimitBlocksBruteForce(t *testing.T) {
 			t.Fatalf("第 %d 次尝试状态码 = %d, 期望 401", i+1, r.code)
 		}
 	}
-	// 达到阈值后再来（哪怕密码是对的）也应被临时封禁。
+	// 超过阈值后，猜错的请求仍然被限速（429）。
 	r := do(t, s, http.MethodGet, "/?json", nil, bad)
 	if r.code != http.StatusTooManyRequests {
 		t.Fatalf("超限后状态码 = %d, 期望 429", r.code)
@@ -2923,9 +2923,13 @@ func TestAuthFailLimitBlocksBruteForce(t *testing.T) {
 	if ra := r.head.Get("Retry-After"); ra == "" {
 		t.Errorf("429 响应缺少 Retry-After")
 	}
+
+	// 关键：正确密码必须在节流等待后仍能登录。
+	// 早先这里会回 429 —— 攻击者只要知道用户名，随便编几次错误口令就能
+	// 把 admin 锁死，这是账号锁定 DoS。
 	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
-	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusTooManyRequests {
-		t.Errorf("封禁期间正确密码也应为 429，实际 = %d", r.code)
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusOK {
+		t.Errorf("节流期间正确密码应能登录，实际 = %d", r.code)
 	}
 }
 
@@ -2952,7 +2956,7 @@ func TestAuthFailResetsOnSuccess(t *testing.T) {
 	}
 }
 
-func TestAuthBlockExpires(t *testing.T) {
+func TestAuthThrottleExpires(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "-A",
 		"-a", "alice:secret@/:rw",
@@ -2962,14 +2966,18 @@ func TestAuthBlockExpires(t *testing.T) {
 	bad := map[string]string{"Authorization": basicAuth("alice", "wrong")}
 	do(t, s, http.MethodGet, "/?json", nil, bad)
 	do(t, s, http.MethodGet, "/?json", nil, bad)
-	if r := do(t, s, http.MethodGet, "/?json", nil, bad); r.code != http.StatusTooManyRequests {
-		t.Fatalf("状态码 = %d, 期望 429", r.code)
+	// 测试请求的 RemoteAddr 固定是 192.0.2.1:1234。
+	if throttled, _ := s.authThrottled("192.0.2.1", authClassBasic, "alice"); !throttled {
+		t.Fatal("失败达到阈值后应进入节流窗口")
 	}
 
 	time.Sleep(120 * time.Millisecond)
+	if throttled, _ := s.authThrottled("192.0.2.1", authClassBasic, "alice"); throttled {
+		t.Error("节流窗口到期后仍然处于节流状态")
+	}
 	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
 	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != 200 {
-		t.Errorf("封禁到期后状态码 = %d, 期望 200", r.code)
+		t.Errorf("节流到期后状态码 = %d, 期望 200", r.code)
 	}
 }
 

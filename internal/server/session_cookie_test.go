@@ -396,7 +396,7 @@ func TestSessionSurvivesAcrossRequests(t *testing.T) {
 // 失败计数只能在**用密码验成功**时清零。早先清零点放在统一的
 // `perm != PermNone` 分支里，于是任何一次「匿名就能读」的请求都会把它抹掉：
 // 部署里有 `-a @/:r` 这类公开只读规则时（很常见），攻击者只要在两次猜密码
-// 之间插一个匿名 GET，计数永远归零、封禁永远不触发 —— 字典攻击回到无限次。
+// 之间插一个匿名 GET，计数永远归零、节流永远不触发 —— 字典攻击回到无限次。
 //
 // 这里就按那个手法插着打：不修的话这条测试会一直拿到 401/403 而不是 429。
 func TestAuthFailCountNotResetByAnonymousAccess(t *testing.T) {
@@ -410,7 +410,7 @@ func TestAuthFailCountNotResetByAnonymousAccess(t *testing.T) {
 		t.Fatalf("匿名读根目录返回 %d，本用例需要一条公开只读规则", got.code)
 	}
 
-	banned := false
+	throttled := false
 	for i := 0; i < 12; i++ {
 		// 中间插一个匿名请求 —— 这正是攻击者的手法。
 		do(t, s, http.MethodGet, "/", nil, nil)
@@ -418,12 +418,12 @@ func TestAuthFailCountNotResetByAnonymousAccess(t *testing.T) {
 		got := do(t, s, http.MethodGet, "/fs/auth", nil,
 			map[string]string{"Authorization": basicAuth("boss", "wrong")})
 		if got.code == http.StatusTooManyRequests {
-			banned = true
+			throttled = true
 			break
 		}
 	}
-	if !banned {
-		t.Error("夹着匿名请求就一直猜不到封禁 —— 失败计数被匿名访问清零了")
+	if !throttled {
+		t.Error("夹着匿名请求就一直猜不到节流 —— 失败计数被匿名访问清零了")
 	}
 }
 

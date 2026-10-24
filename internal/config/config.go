@@ -232,7 +232,7 @@ const (
 	DefaultMaxConcurrentJobs = 64
 	// DefaultAuthFailLimit 同一来源在窗口内允许的认证失败次数，0 表示不限制。
 	DefaultAuthFailLimit = 10
-	// DefaultAuthFailWindow 认证失败的统计窗口，同时也是封禁时长。
+	// DefaultAuthFailWindow 认证失败的统计窗口，同时也是节流窗口。
 	DefaultAuthFailWindow = 5 * time.Minute
 	// DefaultMaxHeaderBytes 请求行 + 请求头允许的最大字节数（默认 64 KiB）。
 	DefaultMaxHeaderBytes = 64 << 10
@@ -380,7 +380,7 @@ type Config struct {
 	MaxConcurrentJobs int
 	// AuthFailLimit 为同一来源在窗口内允许的认证失败次数（0 表示不限制）。
 	AuthFailLimit int
-	// AuthFailWindow 为认证失败的统计窗口与封禁时长。
+	// AuthFailWindow 为认证失败的统计窗口与节流窗口。
 	AuthFailWindow time.Duration
 	// TrustedProxies 是允许提供 X-Forwarded-For / X-Real-IP /
 	// X-Forwarded-Proto 的反向代理地址（IP 或 CIDR）。
@@ -865,8 +865,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.IntVar(&cfg.MaxConcurrentJobs, "max-concurrent-jobs", cfg.MaxConcurrentJobs,
 		"同时进行的上传/解压任务数上限，0 表示不限制")
 	fs.IntVar(&cfg.AuthFailLimit, "auth-fail-limit", cfg.AuthFailLimit,
-		"同一来源认证失败多少次后临时封禁，0 表示不限制")
-	fs.Func("auth-fail-window", "认证失败的统计窗口与封禁时长，如 5m、1h", func(v string) error {
+		"同一来源认证失败多少次后进入节流，0 表示不限制")
+	fs.Func("auth-fail-window", "认证失败的统计窗口与节流窗口，如 5m、1h", func(v string) error {
 		d, err := time.ParseDuration(strings.TrimSpace(v))
 		if err != nil {
 			return fmt.Errorf("无法解析时长 %q: %w", v, err)
@@ -1332,8 +1332,9 @@ func usageText() string {
       --max-concurrent <n>   同时处理的请求数上限，默认 512；0 表示不限制
       --max-concurrent-jobs <n>
                              同时进行的上传/解压任务数上限，默认 64
-      --auth-fail-limit <n>  同一来源认证失败多少次后临时封禁，默认 10；0 表示关闭
-      --auth-fail-window <d> 认证失败的统计窗口与封禁时长，默认 5m
+      --auth-fail-limit <n>  同一来源认证失败多少次后进入节流，默认 10；0 表示关闭
+      --auth-fail-window <d> 认证失败的统计窗口与节流窗口，默认 5m
+                             节流只拖慢猜测，正确密码仍可登录（不会锁死账号）
       --trusted-proxies <ips>
                             可信反向代理地址（IP/CIDR，逗号分隔）。
                             只有直连对端在列表内时才采信 X-Forwarded-For /

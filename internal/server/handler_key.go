@@ -86,14 +86,16 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	fromSession := false
 	if s.auth.Enabled() {
 		if hasCred && user != "" {
-			// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/封禁；
+			// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/节流；
 			// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
 			ip, ok := s.checkAuthLimit(w, r, class, user)
 			if !ok {
 				return
 			}
 			if !s.auth.Verify(user, pass) {
-				s.noteAuthFailure(ip, class, user)
+				if s.noteAuthFailureAndReply(w, ip, class, user) {
+					return
+				}
 				if shouldChallenge(r) {
 					w.Header().Set("WWW-Authenticate", `Basic realm="gofs", charset="UTF-8"`)
 				}
