@@ -64,8 +64,8 @@
     var intro = document.createElement('div');
     intro.className = 'hint-box';
     intro.style.marginBottom = '14px';
-    intro.textContent = '上传密钥用于让脚本或第三方在不上交账号密码的前提下上传文件：' +
-      '它只能上传，不能浏览、删除或修改其它内容，并且可以限定目录、设置有效期、随时撤销。';
+    intro.textContent = '给脚本或第三方的最小上传凭证：只能上传，' +
+      '可限定目录与有效期，随时撤销。';
     body.appendChild(intro);
 
     // 创建区
@@ -75,7 +75,7 @@
 
     var nameInput = document.createElement('input');
     nameInput.type = 'text';
-    nameInput.placeholder = '用途备注，例如：备份脚本 / 给同事临时上传';
+    nameInput.placeholder = '用途，如：备份脚本';
     nameInput.className = 'key-input';
 
     var scopeInput = document.createElement('input');
@@ -112,7 +112,7 @@
 
     createBox.appendChild(row('用途名称', nameInput));
     createBox.appendChild(row('允许上传到', scopeInput,
-      '只允许写入该目录及其子目录；留 / 表示不限。'));
+      '限定写入目录及子目录；留 / 不限。'));
     createBox.appendChild(row('有效期', ttlSelect));
 
     var createBtn = G.btn('生成密钥', 'primary', function () { create(); });
@@ -198,7 +198,7 @@
       G.confirm({
         title: '撤销所选密钥',
         message: '确定要撤销选中的 ' + items.length + ' 个密钥吗？',
-        detail: names + ' 会立即失效，使用它们的脚本将收到 401，且无法恢复。',
+        detail: names + ' 会立即失效，相关脚本将收到 401，无法恢复。',
         okLabel: '撤销',
         danger: true
       }).then(function (yes) {
@@ -273,7 +273,7 @@
 
       var warn = document.createElement('div');
       warn.className = 'key-warn';
-      warn.textContent = '⚠ 密钥明文只显示这一次。关闭本窗口后无法再查看，请立即复制保存。';
+      warn.textContent = '⚠ 明文只显示一次，关闭后无法查看。';
       box.appendChild(warn);
 
       var tokWrap = document.createElement('div');
@@ -318,7 +318,7 @@
           // 复制的只有命令本身；文件/目录参数另行展示，粘进终端后自己补。
           cmd: 'bash <(curl -sS "' + scriptURL + '")',
           example: 'bash <(curl -sS "' + scriptURL + '") 文件或目录... [目标子目录]',
-          note: '目录会连层级一起上传；不带目标子目录就传到 ' + data.key.scope
+          note: '目录保留层级；省略目标目录则传到 ' + data.key.scope
         },
         {
           label: '请求头',
@@ -494,7 +494,7 @@
           G.confirm({
             title: '撤销密钥',
             message: '确定要撤销「' + k.name + '」吗？',
-            detail: '使用该密钥的脚本会立即收到 401，且无法恢复。',
+            detail: '使用它的脚本会立即收到 401，无法恢复。',
             okLabel: '撤销',
             danger: true
           }).then(function (yes) {

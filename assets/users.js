@@ -200,7 +200,7 @@
     if (!editing) {
       var pwHint = document.createElement('div');
       pwHint.className = 'key-hint';
-      pwHint.textContent = '密码只以 PBKDF2 摘要保存在服务端（users.json），服务端也拿不回明文。';
+      pwHint.textContent = '密码只保存 PBKDF2 摘要，服务端无法找回。';
       pwField.appendChild(pwHint);
     }
     body.appendChild(pwField);
@@ -217,8 +217,8 @@
     ruleHint.className = 'key-hint';
     ruleHint.innerHTML = '';
     ruleHint.appendChild(document.createTextNode(
-      '按「最长前缀」匹配：例如同时给 / 只读、/docs 可读写，则该账号在 /docs 下可写、' +
-      '其他位置只读。没有命中任何一条路径的请求一律拒绝。'));
+      '按最长前缀匹配：/ 只读、/docs 可读写时，账号在 /docs 可写、其余只读；' +
+      '未命中任何规则的请求一律拒绝。'));
     ruleField.appendChild(ruleHint);
     body.appendChild(ruleField);
 
@@ -292,8 +292,8 @@
     var intro = document.createElement('div');
     intro.className = 'hint-box';
     intro.style.marginBottom = '14px';
-    intro.textContent = '在这里创建的账号可以登录网页、按路径获得不同的读写权限。' +
-      '密码只以摘要形式保存在服务端，创建后无法再查看（忘了就重置）。';
+    intro.textContent = '账号可登录网页，并按路径获得读写权限。' +
+      '密码只存摘要，创建后无法查看；忘记请重置。';
     body.appendChild(intro);
 
     var listTitle = document.createElement('div');
@@ -343,8 +343,7 @@
           var tag = document.createElement('span');
           tag.className = 'user-tag';
           tag.textContent = '来自启动参数';
-          tag.title = '权限在 -a / GOFS_AUTH 里定义，只能在命令行修改；' +
-            '密码可在顶栏「改密」中修改（保存为覆盖值）';
+          tag.title = '权限由 -a / GOFS_AUTH 定义；密码可在「改密」中覆盖。';
           head.appendChild(tag);
         }
         main.appendChild(head);
@@ -395,13 +394,13 @@
         var box = document.createElement('div');
         box.className = 'hint-box';
         box.style.marginTop = '12px';
-        box.textContent = '匿名访问（由启动参数决定，界面上不可改）：' + ruleText(anon);
+        box.textContent = '匿名访问（启动参数配置，不可在此修改）：' + ruleText(anon);
         anonBox.appendChild(box);
       } else if (data.auth_on) {
         var box2 = document.createElement('div');
         box2.className = 'hint-box';
         box2.style.marginTop = '12px';
-        box2.textContent = '未配置匿名访问：所有请求都必须带账号密码。';
+        box2.textContent = '未配置匿名访问，所有请求都需登录。';
         anonBox.appendChild(box2);
       }
     }
@@ -411,9 +410,9 @@
       var ok = await G.confirm({
         title: '删除用户 ' + u.name + '？',
         message: mine
-          ? '你正在删除当前登录的账号，删除后这个页面会立刻失去权限。'
-          : '该账号将无法再登录，它签发的上传密钥与分享链接会一并撤销。',
-        detail: '删除后无法恢复，需要重新创建。',
+          ? '正在删除当前登录账号，页面会立刻失去权限。'
+          : '账号将无法登录，其密钥与分享链接一并撤销。',
+        detail: '删除后无法恢复。',
         okLabel: '删除',
         danger: true
       });

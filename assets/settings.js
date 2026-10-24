@@ -431,7 +431,7 @@
       if (!extras.length) {
         var empty = document.createElement('div');
         empty.className = 'hint';
-        empty.textContent = '还没有附加站点：每个目录挂在 /<标签>/ 下，与主目录互不影响。';
+        empty.textContent = '暂无附加站点；目录挂在 /<标签>/ 下。';
         listBox.appendChild(empty);
       }
 
@@ -457,10 +457,10 @@
       // 决定最终范围。返回空数组表示不限制（allow-any-site）。
       var roots = data.site_roots || [];
       G.setRichText(siteHint, editable
-        ? '新增的目录挂在 /<标签>/ 下，**立即生效**（不必点保存）。' +
-          (roots.length ? '可挂范围：' + roots.join('、') : '可挂任意已存在的目录') +
-          '　·　注意：标签会遮蔽主目录下的同名子目录。'
-        : '本服务已通过 --no-root-switch 禁止运行期改动服务目录。');
+        ? '挂载在 /<标签>/，**立即生效**。' +
+          (roots.length ? '范围：' + roots.join('、') : '可挂任意目录') +
+          '　·　同名子目录会被遮蔽。'
+        : '--no-root-switch 已禁止运行期改动服务目录。');
 
       if (onChanged) onChanged(data);
     }
@@ -517,8 +517,7 @@
         def: cur.title_default,
         current: function () { return cur.title; },
         maxLength: 60,
-        hintText: '显示在浏览器标签页与顶栏品牌名上；保存后本页生效，' +
-          '其它已打开的页面需刷新。'
+        hintText: '显示在标签页与顶栏；保存后本页生效，其它页面需刷新。'
       });
       el.appendChild(titleField.field);
 
@@ -536,15 +535,15 @@
         value: cur.path_prefix,
         def: cur.path_prefix_default,
         current: function () { return cur.path_prefix; },
-        hintText: '留空表示服务在根路径（/）；改错会让新旧地址都打不开。'
+        hintText: '留空表示根路径；改错后新旧地址都无法打开。'
       });
       el.appendChild(prefixField.field);
       addDisclosure(prefixField.field, '反向代理下怎么填？',
-        '挂在 nginx 等反向代理的子路径下时，这里必须与代理的 location 一致；' +
-        '保存后本页会跳到新地址，在代理改好之前它会打不开。');
+        '子路径部署时须与代理 location 一致；保存后跳转新地址，' +
+        '代理未同步前无法打开。');
       if (cur.path_prefix_locked) {
         addHint(prefixField.field,
-          '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');
+          '启动参数优先：仅本次运行有效，重启后恢复参数值。');
       }
 
       // ---- 监听地址 / 端口 ----
@@ -574,8 +573,7 @@
           value: cur.listen_addr,
           def: cur.listen_addr_default,
           current: function () { return cur.listen_addr; },
-          hintText: '留空表示所有网卡（0.0.0.0）。填 / 开头的绝对路径则改为监听 ' +
-            'unix socket（如 /run/gofs.sock）。'
+          hintText: '留空监听 0.0.0.0；填 / 开头的绝对路径则监听 unix socket。'
         });
         advBody.appendChild(listenAddrField.field);
 
@@ -584,19 +582,18 @@
           value: String(cur.listen_port),
           def: String(cur.listen_port_default),
           current: function () { return cur.listen_port; },
-          hintText: '保存后**立即**切到新端口：已有传输不断，新连接走新端口。' +
-            '0 表示由系统分配；监听 unix socket 时本项无效。'
+          hintText: '保存后**立即**切换端口，已有传输不断；' +
+            '0 由系统分配，unix socket 时无效。'
         });
         advBody.appendChild(listenPortField.field);
         if (cur.listen_locked) {
           addHint(listenPortField.field,
-            '启动参数优先：这里的改动只在本次运行有效，重启后会回到参数值。');
+            '启动参数优先：仅本次运行有效，重启后恢复参数值。');
         }
         el.appendChild(adv);
       } else {
         // 不显示那两个输入框，但把原因说清楚 —— 直接消失会让人以为功能没了。
-        addHint(el, '本实例不支持在页面上改监听地址：它没有自己的监听' +
-          '（以库方式嵌在别的 HTTP 服务里，监听归宿主管）。');
+        addHint(el, '本实例无独立监听（嵌入宿主服务），不能在页面修改。');
       }
 
       // ---- 服务根目录（主目录）----
@@ -626,11 +623,11 @@
         rootInput.placeholder = c.root || '/srv/data';
         rootInput.disabled = !c.root_switchable;
         rootHint.textContent = c.root_switchable
-          ? '服务在 /　·　可切换的范围：' + (c.allow_roots || []).join('、') +
-            '　·　填相对路径表示「从当前根再往下走」'
+          ? '服务在 /　·　可切换：' + (c.allow_roots || []).join('、') +
+            '　·　相对路径从当前根往下'
           : (c.multi_root
-              ? '服务在 /　·　有附加站点时不能切换主目录；先移除附加站点再换'
-              : '本服务已通过 --no-root-switch 禁止运行期切换根目录');
+              ? '服务在 /　·　有附加站点时不能换根，请先移除站点'
+              : '--no-root-switch 已禁止运行期换根');
       }
       syncRootField(cur);
       el.appendChild(rootField);
@@ -647,9 +644,9 @@
         def: cur.upload_max_size_default,
         current: function () { return cur.upload_max_size; },
         placeholder: '例如 10',
-        unlimitedHint: '不限制单文件大小 —— 只要磁盘放得下就能传。',
-        limitedHint: '超过该大小的上传会被拒绝（HTTP 413），且不会留下残缺文件。',
-        persistHint: '改过之后会记住，重启仍生效。'
+        unlimitedHint: '不限制单文件大小。',
+        limitedHint: '超过此大小的上传会被拒绝（413）。',
+        persistHint: '保存后重启仍生效。'
       });
       el.appendChild(uploadField.field);
 
@@ -666,8 +663,8 @@
         // 编辑上限没有「不限制」：打开文件要把整份内容读进内存，
         // 放开等于给一个几 GB 的「文本」文件留个口子。服务端也只收正整数。
         allowUnlimited: false,
-        limitedHint: '超过该大小的文件不显示「编辑」入口，服务端也会拒绝读写。',
-        persistHint: '改过之后会记住，重启仍生效。'
+        limitedHint: '超过此大小的文件不可编辑。',
+        persistHint: '保存后重启仍生效。'
       });
       el.appendChild(editField.field);
 
@@ -703,7 +700,7 @@
       var nextTitle = titleField.read();
       // 空标题交给服务端去拒绝（规则在那边），但没必要白跑一趟往返。
       if (!nextTitle) {
-        showErr('站点标题不能为空。想用启动参数里的默认值，请点「恢复启动时的默认值」。');
+        showErr('站点标题不能为空；可点「恢复默认」使用启动参数值。');
         return;
       }
       if (nextTitle !== (cur.title || '')) patch.title = nextTitle;
@@ -724,7 +721,7 @@
         if (nextAddr !== (cur.listen_addr || '')) {
           // 地址里不带端口：端口有单独的框，两个地方都能表达它只会让人犯迷糊。
           if (nextAddr && nextAddr.indexOf('/') !== 0 && nextAddr.indexOf(':') >= 0) {
-            showErr('监听地址里不要写端口，端口请填在「监听端口」里。');
+            showErr('地址中不要写端口，请填在「监听端口」。');
             return;
           }
           patch.listen_addr = nextAddr;
@@ -753,15 +750,15 @@
 
       var nextMax = uploadField.read();
       if (isNaN(nextMax)) {
-        showErr('上传上限请填写一个非负数字，或勾选「不限制」。');
+        showErr('上传上限请填非负数字，或勾选「不限制」。');
         return;
       }
       if (nextMax !== cur.upload_max_size) {
         if (nextMax === 0) {
           var ok = await G.confirm({
             title: '确认取消上传上限？',
-            message: '把单文件上传上限设为「不限制」后，一个请求就能把磁盘写满。',
-            detail: '只有在完全可信的网络里才建议这么做。',
+            message: '不限制后，单个请求即可写满磁盘。',
+            detail: '仅建议在完全可信的网络中使用。',
             okLabel: '仍然不限制',
             danger: true
           });
@@ -771,8 +768,8 @@
       }
 
       var nextEdit = editField.read();
-      if (isNaN(nextEdit)) {
-        showErr('编辑上限请填写一个非负数字，或勾选「不限制」。');
+      if (isNaN(nextEdit) || nextEdit <= 0) {
+        showErr('编辑上限请填正整数。');
         return;
       }
       if (nextEdit !== cur.edit_max_size) patch.edit_max_size = nextEdit;
@@ -793,10 +790,9 @@
         var target = patch.path_prefix || '/';
         var goOn = await G.confirm({
           title: '确认修改访问路径前缀？',
-          message: '保存后本页会跳到 ' + target + '，服务只会按新地址路由。',
-          detail: '挂在反向代理后面时，必须同步把代理的 location 改成 ' + target +
-            '，否则新旧地址都打不开，页面上的设置也就进不去了。' +
-            '改坏了可以用 --path-prefix 重启一次恢复。',
+          message: '保存后本页会跳到 ' + target + '，服务只按新地址路由。',
+          detail: '反向代理须同步修改 location 为 ' + target +
+            '，否则新旧地址都无法打开。可用 --path-prefix 重启恢复。',
           okLabel: '改并跳转',
           danger: true
         });
@@ -810,10 +806,9 @@
         var okListen = await G.confirm({
           title: '确认修改监听地址？',
           message: '服务将**立即**改到 ' + where + ':' + port + ' 上监听。',
-          detail: '已经在进行的传输不会中断（连接不会被掐断），但**新**连接都会走新地址。' +
-            '端口通常还牵着别的东西：Docker 的端口映射、防火墙规则、systemd unit、' +
-            '反向代理的 upstream —— 这些没同步改，外面就连不上了。' +
-            '改坏了可以用 --bind/--port 重启一次恢复。',
+          detail: '已有传输不中断，新连接走新地址。' +
+            'Docker 端口映射、防火墙、systemd、反代 upstream 需同步修改。' +
+            '可用 --bind/--port 重启恢复。',
           okLabel: '改并切换',
           danger: true
         });
@@ -1019,7 +1014,7 @@
 
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '升级由本部署自行实现的更新源提供；升级完成后需要重启服务生效。';
+    hint.textContent = '由本部署的更新源提供；升级后需重启生效。';
     box.appendChild(hint);
 
     var result = document.createElement('div');
@@ -1117,7 +1112,7 @@
       G.confirm({
         title: '确认升级到 ' + rel.version + '？',
         message: '服务会下载并替换当前的程序文件。',
-        detail: '升级过程中请不要关闭本页面；完成后需要重启服务才会生效。',
+        detail: '升级期间请勿关闭页面；完成后需重启生效。',
         okLabel: '开始升级',
         danger: true
       }).then(function (ok) {
@@ -1222,7 +1217,7 @@
 
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '重启方式由本部署自行实现；正在进行的上传与下载会中断。';
+    hint.textContent = '重启会中断正在进行的上传与下载。';
     box.appendChild(hint);
 
     var result = document.createElement('div');
@@ -1242,8 +1237,7 @@
         message: '正在进行的上传与下载会中断。',
         // 会话表在内存里，重启会把它清空 —— 不说清楚的话，
         // 刷新出来的登录框会让人以为「重启把配置搞坏了」。
-        detail: '重启期间页面会短暂断开，服务恢复后本页自动刷新。' +
-          '重启后需要重新登录（会话是内存态的）。',
+        detail: '页面会短暂断开，恢复后自动刷新；需重新登录。',
         okLabel: '重启',
         danger: true
       }).then(function (ok) { if (ok) run(); });
@@ -1308,8 +1302,7 @@
 
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '删掉什么由本部署的实现决定（二进制 / systemd 单元 / ' +
-      '配置目录…）；gofs 自身不删任何东西。这一步不可逆。';
+    hint.textContent = '删除范围由部署实现决定；不可逆。';
     box.appendChild(hint);
 
     var result = document.createElement('div');
@@ -1329,9 +1322,7 @@
         message: '这一步不可逆，服务会被移除。',
         // 把「不会自动恢复」说在最前面：重启会自己回来，卸载不会 ——
         // 这一点不说清楚，用户会像等重启那样干等下去。
-        detail: '卸载后本服务将被移除，页面会断开且**不会**自动恢复。' +
-          '具体删掉什么由本部署的实现决定（二进制、systemd 单元、配置目录等）。' +
-          '要恢复只能重新部署。',
+        detail: '服务会被移除且**不会**自动恢复；删除范围由部署实现决定，恢复需重新部署。',
         okLabel: '卸载',
         danger: true
       }).then(function (ok) { if (ok) run(); });
@@ -1376,8 +1367,7 @@
             headers: { 'X-Gofs-Ajax': '1' }
           });
           if (res.status > 0 && res.status < 500) {
-            say('卸载请求已受理，但服务仍在运行（可能只做了一半或还在收尾），' +
-              '请到服务端确认。', 'err');
+            say('卸载请求已受理，但服务仍在运行，请到服务端确认。', 'err');
             btn.disabled = false;
             return;
           }
