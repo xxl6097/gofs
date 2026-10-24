@@ -613,10 +613,10 @@ const DefaultPort = 5000
 func Defaults() *Config {
 	return &Config{
 		ServePath: ".",
-		// 默认只监听回环。历史上默认是空串（所有网卡），但那会让
-		// `gofs` 不加任何参数就把当前目录暴露给整个局域网；对外部署应
-		// 显式 `--bind 0.0.0.0`（或 `--bind <IP>`）。
-		Bind:               "127.0.0.1",
+		// 默认监听所有网卡，开箱即可从局域网访问。
+		// 只在本机使用时显式 `--bind 127.0.0.1`；未启用鉴权时请先确认
+		// 这确实是需要的暴露范围。
+		Bind:               "0.0.0.0",
 		Port:               DefaultPort,
 		PathPrefix:         "",
 		Hidden:             nil,
@@ -1275,8 +1275,8 @@ func usageText() string {
                              加后缀，互相嵌套的目录会被拒绝（启动即报错）
 
 选项:
-  -b, --bind <addrs>         监听地址或 unix socket（默认 127.0.0.1；
-                             对外提供服务需显式 --bind 0.0.0.0 或具体网卡 IP）
+  -b, --bind <addrs>         监听地址或 unix socket（默认 0.0.0.0，所有网卡；
+                             仅本机使用请显式 --bind 127.0.0.1）
   -p, --port <port>          监听端口，默认 5000
                              （这两项也能在页面的「设置 → 常规」里改，立即重绑；
                                此处显式给过的值优先，重启后回到参数值）

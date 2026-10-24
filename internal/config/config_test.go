@@ -124,15 +124,15 @@ func TestEnvExplicitDisableNotOverriddenByUpload(t *testing.T) {
 	}
 }
 
-// TestSafeDefaults 钉住收紧后的默认值：回环监听、禁止任意站点、assets
-// 不得位于服务根内。
+// TestSafeDefaults 钉住默认值：监听所有网卡（开箱即用）、禁止任意站点、
+// assets 不得位于服务根内。
 func TestSafeDefaults(t *testing.T) {
 	cfg, err := parse(t, "-log-format", "none", ".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Bind != "127.0.0.1" {
-		t.Errorf("默认 bind = %q，期望 127.0.0.1", cfg.Bind)
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("默认 bind = %q，期望 0.0.0.0", cfg.Bind)
 	}
 	if cfg.AllowAnySite {
 		t.Error("默认不应允许挂载任意站点")
