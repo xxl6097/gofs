@@ -230,10 +230,30 @@ const (
 	DefaultMaxConcurrent = 512
 	// DefaultMaxConcurrentJobs 同时进行的重任务（上传 / 解压）数上限。
 	DefaultMaxConcurrentJobs = 64
-	// DefaultAuthFailLimit 同一来源在窗口内允许的认证失败次数，0 表示不限制。
+	// DefaultAuthFailLimit 同一账号连续失败多少次后锁定，0 表示不限制。
 	DefaultAuthFailLimit = 10
-	// DefaultAuthFailWindow 认证失败的统计窗口，同时也是节流窗口。
-	DefaultAuthFailWindow = 5 * time.Minute
+	// DefaultAuthFailWindow 账号锁定的**基础退避时长**（旧名字保留兼容）。
+	//
+	// 首次达到阈值锁 1 分钟，之后每次再触发翻倍，最多 AuthLockMaxDelay。
+	DefaultAuthFailWindow = time.Minute
+	// DefaultAuthLockMaxDelay 指数退避的封顶时长。
+	DefaultAuthLockMaxDelay = 30 * time.Minute
+	// DefaultAuthLockExempt 是豁免账号锁定的来源网段（默认仅本机回环）。
+	//
+	// 这是一条管理员恢复通道：从本机直连 gofs 时不受锁定限制，
+	// 用正确口令登录成功后会把该账号的所有锁定状态清零。
+	DefaultAuthLockExempt = "127.0.0.1/32,::1/128"
+	// DefaultAuthFailIPLimit 单个来源 IP 在窗口内允许的认证失败次数。
+	// 这是用户名维度之外的独立闸门，用来堵住「换用户名、同一个口令」的喷洒：
+	// 只按用户名计数时，每个用户名都只失败一次，永远不会触发。
+	DefaultAuthFailIPLimit = 10
+	// DefaultAuthFailIPWindow 单 IP 失败计数的滑动窗口。
+	DefaultAuthFailIPWindow = time.Minute
+	// DefaultAuthFailGlobalLimit 所有来源合计在窗口内允许的认证失败次数。
+	// 它兜的是分布式喷洒：单个 IP 的阈值可以被大量出口地址摊薄。
+	DefaultAuthFailGlobalLimit = 200
+	// DefaultAuthFailGlobalWindow 全局失败计数的滑动窗口。
+	DefaultAuthFailGlobalWindow = time.Minute
 	// DefaultMaxHeaderBytes 请求行 + 请求头允许的最大字节数（默认 64 KiB）。
 	DefaultMaxHeaderBytes = 64 << 10
 	// DefaultMaxNameBytes 允许的单个文件名最大字节数。
@@ -387,10 +407,27 @@ type Config struct {
 	MaxConcurrent int
 	// MaxConcurrentJobs 为同时进行的重任务（上传 / 解压）数上限。
 	MaxConcurrentJobs int
-	// AuthFailLimit 为同一来源在窗口内允许的认证失败次数（0 表示不限制）。
+	// AuthFailLimit 为同一账号连续失败多少次后锁定（0 表示不限制）。
 	AuthFailLimit int
-	// AuthFailWindow 为认证失败的统计窗口与节流窗口。
+	// AuthFailWindow 为账号锁定的基础退避时长（指数退避的起点）。
+	//
+	// 旧名字 `--auth-fail-window` 保留为 `--auth-lock-base-delay` 的别名。
 	AuthFailWindow time.Duration
+	// AuthLockMaxDelay 为指数退避的封顶时长。
+	AuthLockMaxDelay time.Duration
+	// AuthLockExempt 是豁免账号锁定的来源 IP/CIDR 列表。
+	//
+	// 默认只豁免本机回环：管理员可以从服务器本机直连 gofs 恢复被锁账号。
+	AuthLockExempt []string
+	// AuthFailIPLimit 为单个来源 IP 在窗口内允许的认证失败次数（0 表示不限制）。
+	AuthFailIPLimit int
+	// AuthFailIPWindow 为单 IP 失败计数的滑动窗口。
+	AuthFailIPWindow time.Duration
+	// AuthFailGlobalLimit 为所有来源合计在窗口内允许的认证失败次数
+	// （0 表示不限制）。
+	AuthFailGlobalLimit int
+	// AuthFailGlobalWindow 为全局失败计数的滑动窗口。
+	AuthFailGlobalWindow time.Duration
 	// TrustedProxies 是允许提供 X-Forwarded-For / X-Real-IP /
 	// X-Forwarded-Proto 的反向代理地址（IP 或 CIDR）。
 	//
@@ -654,23 +691,29 @@ func Defaults() *Config {
 		ExtractMaxFiles:    DefaultExtractMaxFiles,
 		ExtractMaxRatio:    DefaultExtractMaxRatio,
 
-		UploadMaxSize:      DefaultUploadMaxSize,
-		UploadReadTimeout:  DefaultUploadReadTimeout,
-		DownloadTimeout:    DefaultDownloadTimeout,
-		ListMaxEntries:     DefaultListMaxEntries,
-		ArchiveMaxItems:    DefaultArchiveMaxItems,
-		ArchiveMaxBytes:    DefaultArchiveMaxBytes,
-		MaxConcurrent:      DefaultMaxConcurrent,
-		MaxConcurrentJobs:  DefaultMaxConcurrentJobs,
-		AuthFailLimit:      DefaultAuthFailLimit,
-		AuthFailWindow:     DefaultAuthFailWindow,
-		MaxHeaderBytes:     DefaultMaxHeaderBytes,
-		MaxNameBytes:       DefaultMaxNameBytes,
-		DisableCSRFProtect: false,
-		HashMaxSize:        DefaultHashMaxSize,
-		DisableHTMLSandbox: false,
-		AllowRootSwitch:    true,
-		RootAllow:          nil,
+		UploadMaxSize:        DefaultUploadMaxSize,
+		UploadReadTimeout:    DefaultUploadReadTimeout,
+		DownloadTimeout:      DefaultDownloadTimeout,
+		ListMaxEntries:       DefaultListMaxEntries,
+		ArchiveMaxItems:      DefaultArchiveMaxItems,
+		ArchiveMaxBytes:      DefaultArchiveMaxBytes,
+		MaxConcurrent:        DefaultMaxConcurrent,
+		MaxConcurrentJobs:    DefaultMaxConcurrentJobs,
+		AuthFailLimit:        DefaultAuthFailLimit,
+		AuthFailWindow:       DefaultAuthFailWindow,
+		AuthLockMaxDelay:     DefaultAuthLockMaxDelay,
+		AuthLockExempt:       splitList(DefaultAuthLockExempt),
+		AuthFailIPLimit:      DefaultAuthFailIPLimit,
+		AuthFailIPWindow:     DefaultAuthFailIPWindow,
+		AuthFailGlobalLimit:  DefaultAuthFailGlobalLimit,
+		AuthFailGlobalWindow: DefaultAuthFailGlobalWindow,
+		MaxHeaderBytes:       DefaultMaxHeaderBytes,
+		MaxNameBytes:         DefaultMaxNameBytes,
+		DisableCSRFProtect:   false,
+		HashMaxSize:          DefaultHashMaxSize,
+		DisableHTMLSandbox:   false,
+		AllowRootSwitch:      true,
+		RootAllow:            nil,
 		// 未启用鉴权时管理接口默认关闭：无鉴权只读/上传仍是常见用法，
 		// 但不该顺带把「挂载任意目录、改监听、换根」交给所有人。
 		AllowAnySite:        false,
@@ -745,6 +788,13 @@ func (c *Config) ApplyEnv() {
 	c.MaxConcurrentJobs = envInt("GOFS_MAX_CONCURRENT_JOBS", c.MaxConcurrentJobs)
 	c.AuthFailLimit = envInt("GOFS_AUTH_FAIL_LIMIT", c.AuthFailLimit)
 	c.AuthFailWindow = envDuration("GOFS_AUTH_FAIL_WINDOW", c.AuthFailWindow)
+	c.AuthFailWindow = envDuration("GOFS_AUTH_LOCK_BASE_DELAY", c.AuthFailWindow)
+	c.AuthLockMaxDelay = envDuration("GOFS_AUTH_LOCK_MAX_DELAY", c.AuthLockMaxDelay)
+	c.AuthLockExempt = envList("GOFS_AUTH_LOCK_EXEMPT", c.AuthLockExempt)
+	c.AuthFailIPLimit = envInt("GOFS_AUTH_FAIL_IP_LIMIT", c.AuthFailIPLimit)
+	c.AuthFailIPWindow = envDuration("GOFS_AUTH_FAIL_IP_WINDOW", c.AuthFailIPWindow)
+	c.AuthFailGlobalLimit = envInt("GOFS_AUTH_FAIL_GLOBAL_LIMIT", c.AuthFailGlobalLimit)
+	c.AuthFailGlobalWindow = envDuration("GOFS_AUTH_FAIL_GLOBAL_WINDOW", c.AuthFailGlobalWindow)
 	c.TrustedProxies = envList("GOFS_TRUSTED_PROXIES", c.TrustedProxies)
 	c.MaxHeaderBytes = envInt("GOFS_MAX_HEADER_BYTES", c.MaxHeaderBytes)
 	c.MaxNameBytes = envInt("GOFS_MAX_NAME_BYTES", c.MaxNameBytes)
@@ -881,13 +931,48 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.IntVar(&cfg.MaxConcurrentJobs, "max-concurrent-jobs", cfg.MaxConcurrentJobs,
 		"同时进行的上传/解压任务数上限，0 表示不限制")
 	fs.IntVar(&cfg.AuthFailLimit, "auth-fail-limit", cfg.AuthFailLimit,
-		"同一来源认证失败多少次后进入节流，0 表示不限制")
-	fs.Func("auth-fail-window", "认证失败的统计窗口与节流窗口，如 5m、1h", func(v string) error {
+		"同一账号连续失败多少次后锁定，0 表示不限制")
+	setLockBase := func(v string) error {
 		d, err := time.ParseDuration(strings.TrimSpace(v))
 		if err != nil {
 			return fmt.Errorf("无法解析时长 %q: %w", v, err)
 		}
 		cfg.AuthFailWindow = d
+		return nil
+	}
+	fs.Func("auth-lock-base-delay", "账号锁定的基础退避时长（首次），如 1m、30s", setLockBase)
+	// 旧名字保留兼容：脚本里已经写了 --auth-fail-window 的部署不用改。
+	fs.Func("auth-fail-window", "已弃用，等价于 --auth-lock-base-delay", setLockBase)
+	fs.Func("auth-lock-max-delay", "账号指数退避的封顶时长，如 30m、1h", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.AuthLockMaxDelay = d
+		return nil
+	})
+	fs.Func("auth-lock-exempt", "豁免账号锁定的来源 IP/CIDR（逗号分隔，默认仅本机回环）；管理员恢复通道", func(v string) error {
+		cfg.AuthLockExempt = append(cfg.AuthLockExempt, splitList(v)...)
+		return nil
+	})
+	fs.IntVar(&cfg.AuthFailIPLimit, "auth-fail-ip-limit", cfg.AuthFailIPLimit,
+		"单个来源 IP 认证失败多少次后进入节流，0 表示不限制")
+	fs.Func("auth-fail-ip-window", "单 IP 认证失败的统计窗口，如 1m、5m", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.AuthFailIPWindow = d
+		return nil
+	})
+	fs.IntVar(&cfg.AuthFailGlobalLimit, "auth-fail-global-limit", cfg.AuthFailGlobalLimit,
+		"所有来源合计认证失败多少次后进入节流，0 表示不限制")
+	fs.Func("auth-fail-global-window", "全局认证失败的统计窗口，如 1m、5m", func(v string) error {
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			return fmt.Errorf("无法解析时长 %q: %w", v, err)
+		}
+		cfg.AuthFailGlobalWindow = d
 		return nil
 	})
 	fs.Func("trusted-proxies", "可信反向代理地址（IP 或 CIDR，逗号分隔）；只有它们发来的转发头才会被采信", func(v string) error {
@@ -1145,7 +1230,25 @@ func (c *Config) Normalize() error {
 		return errors.New("--auth-fail-limit 不能为负数（0 表示不限制）")
 	}
 	if c.AuthFailLimit > 0 && c.AuthFailWindow <= 0 {
-		return errors.New("--auth-fail-window 必须为正时长")
+		return errors.New("--auth-lock-base-delay 必须为正时长")
+	}
+	if c.AuthLockMaxDelay <= 0 {
+		return errors.New("--auth-lock-max-delay 必须为正时长")
+	}
+	if c.AuthLockMaxDelay < c.AuthFailWindow {
+		return errors.New("--auth-lock-max-delay 不能小于基础退避时长")
+	}
+	if c.AuthFailIPLimit < 0 {
+		return errors.New("--auth-fail-ip-limit 不能为负数（0 表示不限制）")
+	}
+	if c.AuthFailIPLimit > 0 && c.AuthFailIPWindow <= 0 {
+		return errors.New("--auth-fail-ip-window 必须为正时长")
+	}
+	if c.AuthFailGlobalLimit < 0 {
+		return errors.New("--auth-fail-global-limit 不能为负数（0 表示不限制）")
+	}
+	if c.AuthFailGlobalLimit > 0 && c.AuthFailGlobalWindow <= 0 {
+		return errors.New("--auth-fail-global-window 必须为正时长")
 	}
 	// 转发头只在直连对端是可信代理时才采信；地址写错会让限速与日志
 	// 悄悄退回代理 IP，所以这里直接拒绝非法值。
@@ -1166,6 +1269,25 @@ func (c *Config) Normalize() error {
 			}
 		}
 		c.TrustedProxies = normalized
+	}
+	// 管理员恢复通道的网段写错会让「本机解锁」悄悄失效，直接拒绝非法值。
+	{
+		var normalized []string
+		for _, raw := range c.AuthLockExempt {
+			for _, item := range splitList(raw) {
+				item = strings.TrimSpace(item)
+				if item == "" {
+					continue
+				}
+				if net.ParseIP(item) == nil {
+					if _, _, err := net.ParseCIDR(item); err != nil {
+						return fmt.Errorf("--auth-lock-exempt 里的 %q 不是合法 IP 或 CIDR", item)
+					}
+				}
+				normalized = append(normalized, item)
+			}
+		}
+		c.AuthLockExempt = normalized
 	}
 	if c.MaxHeaderBytes < 4096 {
 		// 4 KiB 已经放不下正常的 Cookie 与长 URL，再小只会伤到自己。
@@ -1354,9 +1476,24 @@ func usageText() string {
       --max-concurrent <n>   同时处理的请求数上限，默认 512；0 表示不限制
       --max-concurrent-jobs <n>
                              同时进行的上传/解压任务数上限，默认 64
-      --auth-fail-limit <n>  同一来源认证失败多少次后进入节流，默认 10；0 表示关闭
-      --auth-fail-window <d> 认证失败的统计窗口与节流窗口，默认 5m
-                             节流只拖慢猜测，正确密码仍可登录（不会锁死账号）
+      --auth-fail-limit <n>  同一来源+账号连续失败多少次后锁定，默认 10；0 表示关闭
+      --auth-lock-base-delay <d>
+                             账号锁定的基础退避时长，默认 1m（首次锁定）
+                             之后每次再触发翻倍
+      --auth-lock-max-delay <d>
+                             指数退避的封顶时长，默认 30m
+      --auth-lock-exempt <ips>
+                             豁免账号锁定的来源 IP/CIDR，默认仅 127.0.0.1/32,::1/128
+                             这是管理员恢复通道：从本机用正确口令登录即可解锁
+      --auth-fail-window <d> 已弃用，等价于 --auth-lock-base-delay
+      --auth-fail-ip-limit <n>
+                            单个来源 IP 在窗口内允许的认证失败次数，默认 10；0 表示关闭
+      --auth-fail-ip-window <d>
+                            单 IP 失败计数的滑动窗口，默认 1m
+      --auth-fail-global-limit <n>
+                            所有来源合计在窗口内允许的认证失败次数，默认 200；0 表示关闭
+      --auth-fail-global-window <d>
+                            全局失败计数的滑动窗口，默认 1m
       --trusted-proxies <ips>
                             可信反向代理地址（IP/CIDR，逗号分隔）。
                             只有直连对端在列表内时才采信 X-Forwarded-For /

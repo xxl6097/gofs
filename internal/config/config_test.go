@@ -141,3 +141,111 @@ func TestSafeDefaults(t *testing.T) {
 		t.Error("默认不应允许 assets 位于服务根内")
 	}
 }
+
+// TestAuthSprayLimitDefaults 钉住新增的「按 IP / 全局」限速默认值。
+func TestAuthSprayLimitDefaults(t *testing.T) {
+	cfg, err := parse(t, "-log-format", "none", ".")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if cfg.AuthFailIPLimit != 10 || cfg.AuthFailIPWindow != time.Minute {
+		t.Errorf("单 IP 默认值 = %d/%s，期望 10/1m",
+			cfg.AuthFailIPLimit, cfg.AuthFailIPWindow)
+	}
+	if cfg.AuthFailGlobalLimit != 200 || cfg.AuthFailGlobalWindow != time.Minute {
+		t.Errorf("全局默认值 = %d/%s，期望 200/1m",
+			cfg.AuthFailGlobalLimit, cfg.AuthFailGlobalWindow)
+	}
+	// 用户名维度的默认值不能被本次改动带偏。
+	if cfg.AuthFailLimit != DefaultAuthFailLimit || cfg.AuthFailWindow != DefaultAuthFailWindow {
+		t.Errorf("用户名维度默认值 = %d/%s，期望 %d/%s",
+			cfg.AuthFailLimit, cfg.AuthFailWindow,
+			DefaultAuthFailLimit, DefaultAuthFailWindow)
+	}
+	if cfg.AuthLockMaxDelay != DefaultAuthLockMaxDelay {
+		t.Errorf("锁定封顶默认值 = %s，期望 %s", cfg.AuthLockMaxDelay, DefaultAuthLockMaxDelay)
+	}
+	if !contains(cfg.AuthLockExempt, "127.0.0.1/32") ||
+		!contains(cfg.AuthLockExempt, "::1/128") {
+		t.Errorf("默认恢复网段 = %v，期望包含回环", cfg.AuthLockExempt)
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAuthLockConfigOverrides(t *testing.T) {
+	cfg, err := parse(t,
+		"-log-format", "none",
+		"--auth-lock-base-delay", "30s",
+		"--auth-lock-max-delay", "10m",
+		"--auth-lock-exempt", "10.0.0.0/8,192.168.0.0/16",
+		".")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if cfg.AuthFailWindow != 30*time.Second {
+		t.Errorf("基础退避 = %s，期望 30s", cfg.AuthFailWindow)
+	}
+	if cfg.AuthLockMaxDelay != 10*time.Minute {
+		t.Errorf("封顶 = %s，期望 10m", cfg.AuthLockMaxDelay)
+	}
+	if !contains(cfg.AuthLockExempt, "10.0.0.0/8") ||
+		!contains(cfg.AuthLockExempt, "192.168.0.0/16") {
+		t.Errorf("恢复网段 = %v", cfg.AuthLockExempt)
+	}
+}
+
+func TestAuthLockConfigValidation(t *testing.T) {
+	if _, err := parse(t, "--auth-lock-base-delay", "0s", "."); err == nil {
+		t.Error("基础退避为 0 应当被拒绝")
+	}
+	if _, err := parse(t, "--auth-lock-max-delay", "0s", "."); err == nil {
+		t.Error("封顶为 0 应当被拒绝")
+	}
+	if _, err := parse(t,
+		"--auth-lock-base-delay", "10m",
+		"--auth-lock-max-delay", "1m", "."); err == nil {
+		t.Error("封顶小于基础退避应当被拒绝")
+	}
+	if _, err := parse(t, "--auth-lock-exempt", "not-an-ip", "."); err == nil {
+		t.Error("非法恢复网段应当被拒绝")
+	}
+}
+
+func TestAuthSprayLimitOverrides(t *testing.T) {
+	cfg, err := parse(t,
+		"-log-format", "none",
+		"--auth-fail-ip-limit", "5",
+		"--auth-fail-ip-window", "30s",
+		"--auth-fail-global-limit", "50",
+		"--auth-fail-global-window", "2m",
+		".")
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if cfg.AuthFailIPLimit != 5 || cfg.AuthFailIPWindow != 30*time.Second {
+		t.Errorf("单 IP 配置 = %d/%s，期望 5/30s", cfg.AuthFailIPLimit, cfg.AuthFailIPWindow)
+	}
+	if cfg.AuthFailGlobalLimit != 50 || cfg.AuthFailGlobalWindow != 2*time.Minute {
+		t.Errorf("全局配置 = %d/%s，期望 50/2m", cfg.AuthFailGlobalLimit, cfg.AuthFailGlobalWindow)
+	}
+}
+
+func TestAuthSprayLimitValidation(t *testing.T) {
+	if _, err := parse(t, "--auth-fail-ip-limit", "-1", "."); err == nil {
+		t.Error("负的单 IP 阈值应当被拒绝")
+	}
+	if _, err := parse(t, "--auth-fail-global-limit", "-1", "."); err == nil {
+		t.Error("负的全局阈值应当被拒绝")
+	}
+	if _, err := parse(t, "--auth-fail-ip-limit", "5", "--auth-fail-ip-window", "0s", "."); err == nil {
+		t.Error("阈值为正但窗口为 0 应当被拒绝")
+	}
+}

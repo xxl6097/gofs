@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAuthFailLimitNotResetByOtherAccount 确认「持有任意有效账号」不能清零
@@ -18,7 +19,8 @@ func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
 		"-a", "alice:apw@/:r",
 		"-a", "boss:boss-secret@/:rw",
 		"--auth-fail-limit", "3",
-		"--auth-fail-window", "5m"))
+		"--auth-lock-base-delay", "100ms",
+		"--auth-lock-max-delay", "1s"))
 
 	alice := map[string]string{"Authorization": basicAuth("alice", "apw")}
 
@@ -43,14 +45,20 @@ func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
 		t.Fatal("穿插其它账号的成功请求后始终没有触发限速 —— 失败计数被跨账号清零了")
 	}
 
-	// 限速只针对被猜测的账号，不应误伤同 IP 的其它账号。
-	// 同时验证：boss 拿对密码时必须能登录 —— 否则攻击者只要乱猜几次
-	// 就能把 boss 锁死（账号锁定 DoS）。
+	// 锁定只针对被猜测的账号，不应误伤同 IP 的其它账号。
+	if r := do(t, s, http.MethodGet, "/?json", nil, alice); r.code != http.StatusOK {
+		t.Fatalf("锁定误伤了同 IP 的其它账号：alice 返回 %d", r.code)
+	}
+
+	// 锁定期内正确密码也要被拒绝（这是锁定的语义）。
+	if r := do(t, s, http.MethodGet, "/?json", nil,
+		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusTooManyRequests {
+		t.Fatalf("锁定期内 boss 的正确密码返回 %d，期望 429", r.code)
+	}
+	// 退避期过后恢复。
+	time.Sleep(150 * time.Millisecond)
 	if r := do(t, s, http.MethodGet, "/?json", nil,
 		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusOK {
-		t.Fatalf("节流期间 boss 的正确密码返回 %d，期望 200", r.code)
-	}
-	if r := do(t, s, http.MethodGet, "/?json", nil, alice); r.code != http.StatusOK {
-		t.Fatalf("节流误伤了同 IP 的其它账号：alice 返回 %d", r.code)
+		t.Fatalf("退避期后 boss 的正确密码返回 %d，期望 200", r.code)
 	}
 }

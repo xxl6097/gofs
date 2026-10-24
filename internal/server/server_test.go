@@ -2930,7 +2930,8 @@ func TestAuthFailLimitThrottlesBruteForce(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A",
 		"-a", "alice:secret@/:rw",
 		"--auth-fail-limit", "3",
-		"--auth-fail-window", "5m"))
+		"--auth-lock-base-delay", "80ms",
+		"--auth-lock-max-delay", "1s"))
 
 	bad := map[string]string{"Authorization": basicAuth("alice", "wrong")}
 	for i := 0; i < 3; i++ {
@@ -2938,7 +2939,7 @@ func TestAuthFailLimitThrottlesBruteForce(t *testing.T) {
 			t.Fatalf("第 %d 次尝试状态码 = %d, 期望 401", i+1, r.code)
 		}
 	}
-	// 超过阈值后，猜错的请求仍然被限速（429）。
+	// 阈值的下一次请求进入锁定，直接 429。
 	r := do(t, s, http.MethodGet, "/?json", nil, bad)
 	if r.code != http.StatusTooManyRequests {
 		t.Fatalf("超限后状态码 = %d, 期望 429", r.code)
@@ -2947,12 +2948,15 @@ func TestAuthFailLimitThrottlesBruteForce(t *testing.T) {
 		t.Errorf("429 响应缺少 Retry-After")
 	}
 
-	// 关键：正确密码必须在节流等待后仍能登录。
-	// 早先这里会回 429 —— 攻击者只要知道用户名，随便编几次错误口令就能
-	// 把 admin 锁死，这是账号锁定 DoS。
+	// 锁定期内正确密码也要被拒绝。
 	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
+	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusTooManyRequests {
+		t.Errorf("锁定期内正确密码应返回 429，实际 = %d", r.code)
+	}
+	// 退避期后恢复。
+	time.Sleep(120 * time.Millisecond)
 	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusOK {
-		t.Errorf("节流期间正确密码应能登录，实际 = %d", r.code)
+		t.Errorf("退避期后正确密码应能登录，实际 = %d", r.code)
 	}
 }
 

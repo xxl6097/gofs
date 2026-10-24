@@ -49,21 +49,33 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	passwordLogin := ok && user != ""
 
 	if passwordLogin {
-		// 超过失败阈值后先等一小段，再照常验密码：限速要拖慢字典攻击，
-		// 但不能让攻击者仅凭用户名就把合法账号锁死（正确密码永远能进）。
-		already, remain := s.authThrottled(ip, class, user)
-		if already {
-			if !s.waitAuthThrottle(r, remain) {
+		// 账号锁定是硬拒绝：锁定期内不验密码、不计新失败、不延长锁定。
+		// 必须最先判断并直接返回 —— 走到 noteAuthFailure 就会续期。
+		if locked, remain := s.authThrottled(ip, class, user); locked {
+			w.Header().Set("Retry-After", retryAfterSeconds(remain))
+			s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
+				"message": "认证失败次数过多，请稍后再试",
+			})
+			return
+		}
+
+		// IP / 全局维度（上一项工作）保持原语义：超限时先减速再验密码。
+		// 它们只拖慢猜测，不阻止正确密码，也不会动账号锁定状态。
+		if sprayOver, sprayRemain := s.authSprayThrottled(ip); sprayOver {
+			if !s.waitAuthThrottle(r, sprayRemain) {
 				return
 			}
 		}
+
 		if !s.auth.Verify(user, pass) {
+			sprayNow, sprayRetry := s.noteSprayFailure(ip, user)
+			// 用户名维度：达到阈值的那一次仍回 401，下一次请求会在上面的
+			// Check 里直接拿到 429。IP / 全局维度：本次失败越过阈值时
+			// 当场回 429（这是上一项工作的既有语义，本次不改）。
 			s.noteAuthFailure(ip, class, user)
 			s.logger.Errorf("登录失败：账号 %q 凭据不正确", truncateAuthUser(user))
-			// 密码已经验过且失败，此时回 429 不会误伤拿对密码的人。
-			// 达到阈值的那一次仍回 401，下一次才开始回 429。
-			if already {
-				w.Header().Set("Retry-After", "1")
+			if sprayNow {
+				w.Header().Set("Retry-After", retryAfterSeconds(sprayRetry))
 				s.writeJSONStatus(w, http.StatusTooManyRequests, map[string]any{
 					"message": "认证失败次数过多，请稍后再试",
 				})
@@ -74,6 +86,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// 成功登录立即清零该账号的计数与锁定状态（包括其它来源的锁）。
 		s.noteVerifiedUser(r, user)
 		s.noteAuthSuccess(ip, class, user)
 	} else {

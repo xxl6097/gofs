@@ -52,6 +52,8 @@ type Server struct {
 	logger   *Logger
 	// trustedProxies 是允许提供转发头的反向代理网段；空表示不信任。
 	trustedProxies []*net.IPNet
+	// authLockExempt 是豁免账号锁定的来源网段（管理员恢复通道）。
+	authLockExempt []*net.IPNet
 
 	// assetTags 缓存内嵌资源的 ETag（按内容算，只算一次）。
 	// 为什么不能只用 modTime+size：见 handler_list.go 的 assetETag。
@@ -116,6 +118,7 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 	}
 
 	trustedProxies := parseTrustedProxies(cfg.TrustedProxies)
+	authLockExempt := parseTrustedProxies(cfg.AuthLockExempt)
 
 	logger, err := NewLogger(cfg.LogFormat, cfg.LogFile, trustedProxies)
 	if err != nil {
@@ -169,6 +172,7 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		ui:             ui,
 		logger:         logger,
 		trustedProxies: trustedProxies,
+		authLockExempt: authLockExempt,
 	}
 	// 恢复上次落盘的附加站点。**尽力而为**：单条坏数据只记日志、不阻止启动
 	// （与读取标题同一口径）—— 一个坏掉的设置文件不该让整个服务起不来。
@@ -948,20 +952,16 @@ func (s *Server) checkPermExact(r *http.Request, urlPath string) auth.Permission
 // clientIP 返回经可信代理校正后的客户端地址。
 func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trustedProxies) }
 
-// checkAuthLimit 在验证凭据前套一层节流。
+// checkAuthLimit 在验证凭据前检查账号锁定。
 //
 // 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
 // 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
 // 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
 //
-// ⚠️ 这里**只等待、不拒绝**。早先是超过阈值直接回 429，结果攻击者只要
-// 知道用户名，随便编几次错误口令就能让 admin 在统计窗口内连正确密码都
-// 登不上（账号锁定 DoS）。现在改成先等一个很短的节流步长，再让调用方
-// 照常校验密码：猜错的人被拖慢，拿对密码的人总能进去。是否回 429 由
-// 调用方在密码校验失败后决定（见 noteAuthFailureAndReply）。
-//
-// 返回 false 只表示客户端在等待期间断开了，不是「被限速」。
-func (s *Server) checkAuthLimit(_ http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
+// ⚠️ 账号锁定是硬拒绝：锁定期内直接 429，不验密码、不累加计数、不延长
+// 锁定。IP / 全局喷洒维度只在认证入口由 checkAuthLimitScoped 处理，仍是
+// 「先减速再验密码」。返回 false 表示响应已经写完，调用方必须立即返回。
+func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
 	ip := s.clientIP(r)
 	// 只有可以主动提交口令的凭据类别才需要节流。会话 Cookie 是
 	// 服务端签发的随机 token，无效值不构成口令猜测；匿名请求更不应被
@@ -973,10 +973,11 @@ func (s *Server) checkAuthLimit(_ http.ResponseWriter, r *http.Request, class, u
 	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
 		return ip, true
 	}
-	if throttled, remain := s.authThrottled(ip, class, user); throttled {
-		if !s.waitAuthThrottle(r, remain) {
-			return ip, false
-		}
+	// 账号锁定：锁定期内直接 429，不验密码、不计新失败、不延长锁定。
+	// 返回 false 表示响应已经写完，调用方必须立即返回。
+	if locked, remain := s.authThrottled(ip, class, user); locked {
+		writeAuthLocked(w, remain)
+		return ip, false
 	}
 	return ip, true
 }
@@ -1001,9 +1002,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 计数清零；不分类别的话，坏 Cookie/匿名请求会把有效会话一并锁死。
 	limitUser, _, hasCred, limitClass := credentialsWithSource(r)
 	ip := s.clientIP(r)
+	// IP / 全局维度只对认证入口计数；上传、下载、解压、预览等带着具体
+	// 文件路径的请求仍然只受原有的「来源+账号」限速约束（本次不改）。
+	spray := authSprayScope(r, urlPath)
 	if hasCred {
 		var ok bool
-		if ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser); !ok {
+		if spray {
+			ip, ok = s.checkAuthLimitScoped(w, r, limitClass, limitUser)
+		} else {
+			ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser)
+		}
+		if !ok {
 			return permResult{}, false
 		}
 	}
@@ -1078,7 +1087,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 不再计入：token 是 256 位随机值，伪造试探不构成口令猜测，而计入
 	// 会让匿名请求有机会污染有效会话的限速桶。
 	if hasCred && !idAuthenticated {
-		if s.noteAuthFailureAndReply(w, ip, limitClass, limitUser) {
+		var limited bool
+		if spray {
+			limited = s.noteAuthFailureAndReplyScoped(w, ip, limitClass, limitUser)
+		} else {
+			limited = s.noteAuthFailureAndReply(w, ip, limitClass, limitUser)
+		}
+		if limited {
 			return permResult{}, false
 		}
 	}
@@ -1186,9 +1201,15 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if s.auth.Enabled() && isAppShellNavigation(r) {
 		limitUser, _, hasCred, limitClass := credentialsWithSource(r)
 		ip := s.clientIP(r)
+		spray := authSprayScope(r, urlPath)
 		if hasCred {
 			var ok bool
-			if ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser); !ok {
+			if spray {
+				ip, ok = s.checkAuthLimitScoped(w, r, limitClass, limitUser)
+			} else {
+				ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser)
+			}
+			if !ok {
 				return
 			}
 		}
@@ -1200,7 +1221,13 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			//
 			// 注意先验密码再回 429：正确密码不会走到这里，所以不会被锁死。
 			if hasCred && !idAuthenticated {
-				if s.noteAuthFailureAndReply(w, ip, limitClass, limitUser) {
+				var limited bool
+				if spray {
+					limited = s.noteAuthFailureAndReplyScoped(w, ip, limitClass, limitUser)
+				} else {
+					limited = s.noteAuthFailureAndReply(w, ip, limitClass, limitUser)
+				}
+				if limited {
 					return
 				}
 			}

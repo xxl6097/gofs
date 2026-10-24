@@ -4,19 +4,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
-// TestLoginCorrectPasswordNotLockedOut 是「账号锁定 DoS」的回归测试。
+// TestLoginRecoversAfterLockoutBackoff 验证账号锁定是「有期限」的。
 //
-// 攻击者不需要任何有效凭据，只要知道用户名，连续发错误口令：
-//   - 超过阈值后，猜错的请求仍然被限速（429）；
-//   - 但**正确密码必须能登录**。早先的实现在整个统计窗口内直接拒绝，
-//     十次乱编的口令就能让 admin 连自己的正确密码都登不上。
-func TestLoginCorrectPasswordNotLockedOut(t *testing.T) {
+// 新策略下锁定期内连正确密码也会直接 429（这正是锁定的含义）；
+// 必须等退避期结束后才能重新登录。管理员可以用 --auth-lock-exempt
+// 的恢复通道提前解锁（见 auth_lock_test.go）。
+func TestLoginRecoversAfterLockoutBackoff(t *testing.T) {
 	s := newTestServer(t, testConfig(t, t.TempDir(),
 		"-a", "admin:secret@/:rw",
 		"--auth-fail-limit", "3",
-		"--auth-fail-window", "5m"))
+		"--auth-lock-base-delay", "80ms",
+		"--auth-lock-max-delay", "1s"))
 
 	attempt := func(password string) int {
 		r := httptest.NewRequest(http.MethodGet, "/fs/auth", nil)
@@ -32,13 +33,18 @@ func TestLoginCorrectPasswordNotLockedOut(t *testing.T) {
 			t.Fatalf("第 %d 次错误口令返回 %d，期望 401", i+1, code)
 		}
 	}
-	// 达到阈值后的下一次错误请求应被限速（先等待，再校验，再回 429）。
+	// 阈值那一次仍回 401；下一次开始进入锁定。
 	if code := attempt("wrong"); code != http.StatusTooManyRequests {
-		t.Fatalf("超限后的错误口令返回 %d，期望 429", code)
+		t.Fatalf("锁定后的错误口令返回 %d，期望 429", code)
+	}
+	// 锁定期内不接受正确密码 —— 否则锁定没有意义。
+	if code := attempt("secret"); code != http.StatusTooManyRequests {
+		t.Fatalf("锁定期内正确密码返回 %d，期望 429", code)
 	}
 
-	// 关键断言：正确密码不被别人的错误尝试锁死。
+	// 等过首次退避时长后恢复。
+	time.Sleep(120 * time.Millisecond)
 	if code := attempt("secret"); code != http.StatusOK {
-		t.Fatalf("正确密码被错误口令锁死，返回 %d（期望 200）", code)
+		t.Fatalf("退避期后正确密码返回 %d，期望 200", code)
 	}
 }

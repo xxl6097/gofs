@@ -92,9 +92,13 @@ func TestForwardedForHonoredFromTrustedProxy(t *testing.T) {
 
 	var last int
 	for i := 0; i < 15; i++ {
+		// 每次用不同用户名：账号锁定是账号级的，同一用户名即使来自不同 IP
+		// 也会在达到阈值后锁定。这里要验证的是「转发头被采信 → 每个来源
+		// 只失败一次」，所以让用户名也各不相同；若 XFF 被忽略，15 次都会
+		// 落到同一个 IP 的窗口里，仍会触发 429。
 		last = do(t, s, http.MethodGet, "/", nil, map[string]string{
 			"Accept":          "application/json",
-			"Authorization":   basicAuth("boss", fmt.Sprintf("wrong-%d", i)),
+			"Authorization":   basicAuth(fmt.Sprintf("boss-%d", i), fmt.Sprintf("wrong-%d", i)),
 			"X-Forwarded-For": fmt.Sprintf("10.8.0.%d", i+1),
 		}).code
 	}

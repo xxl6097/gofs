@@ -209,11 +209,11 @@ func TestFormUploadDoesNotCreateDirBeforeRealPermCheck(t *testing.T) {
 	}
 }
 
-// TestAuthFailKeyIsFixedLength 确认超长用户名不会直接变成超长 map 键。
-func TestAuthFailKeyIsFixedLength(t *testing.T) {
-	key := authFailKey("192.0.2.1", authClassBasic, strings.Repeat("a", 60_000))
+// TestAuthLockKeyIsFixedLength 确认超长用户名不会直接变成超长 map 键。
+func TestAuthLockKeyIsFixedLength(t *testing.T) {
+	key := authLockKey(strings.Repeat("a", 60_000))
 	if len(key) != 64 {
-		t.Fatalf("失败键长度 = %d，期望固定 64（SHA-256 hex）", len(key))
+		t.Fatalf("锁定键长度 = %d，期望固定 64（SHA-256 hex）", len(key))
 	}
 }
 

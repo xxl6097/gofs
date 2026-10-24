@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,24 +37,37 @@ type guard struct {
 
 	mu    sync.Mutex
 	fails map[string]*failRecord
+
+	// ipFails / globalFails 是「单 IP」与「全局」两个维度的失败窗口。
+	// 它们与上面的 fails（来源+账号维度）相互独立：后者是既有的账号锁定
+	// 逻辑，本次不改；前者专门堵跨用户名的口令喷洒。
+	ipFails     *authSprayWindow
+	globalFails *authSprayWindow
 }
 
-// failRecord 记录某个来源的认证失败情况。
-type failRecord struct {
-	count int
-	last  time.Time
-	// throttledUntil 是「需要减速」的截止时间。注意它**不是**「拒绝服务」
-	// 的截止时间：进入节流窗口后，每次尝试仍会验证密码，只是先等一小段
-	// 时间。这样攻击者没法用错误口令把合法用户锁在门外。
-	throttledUntil time.Time
-}
-
-// authThrottleStep 是节流窗口内两次口令校验之间的最小间隔。
+// failRecord 记录一个账号的锁定状态。
 //
-// 不把整个统计窗口当成封禁：那样只要知道用户名，随便编几次错误口令就能
-// 让 admin 在 5 分钟内连正确密码都登不上（账号锁定 DoS）。改成「每次先等
-// 半秒再验」之后，暴力破解被压到每秒约 2 次，而合法用户带着正确密码
-// 最多等半秒就能登录 —— 限速还在，锁死没有了。
+// 注意这是**账号级**状态：键是用户名的摘要，不区分来源 IP 或凭据类别。
+// 用户名原文不落 map，避免超长用户名（请求头可达 64 KiB）撑大内存。
+//
+// 状态机有三条硬规则（见 noteAuthFailure / authThrottled）：
+//   - 锁定期间只读，任何新请求都不得累加计数或延长 lockedUntil；
+//   - 锁定时长按指数退避增长，封顶 maxDelay；
+//   - 认证成功后立即清零。
+type failRecord struct {
+	// fails 是连续失败次数。成功登录后归零；锁定期间不增长。
+	fails int
+	// lockedUntil 是锁定截止时间。锁定只由「Check 放行后的失败」设置，
+	// 锁定期内的请求不会改写它。
+	lockedUntil time.Time
+	// last 是最后一次**计入**失败的时间，仅用于清理过期记录。
+	last time.Time
+}
+
+// authThrottleStep 是 IP/全局维度在超限时的减速步长。
+//
+// ⚠️ 账号锁定（username 维度）已经改为直接 429，不再使用这个等待；
+// 这里只服务于上一项工作引入的 IP/全局滑动窗口。
 const authThrottleStep = 500 * time.Millisecond
 
 // newGuard 依据配置构造防护器。
@@ -63,6 +79,8 @@ func newGuard(cfg *config.Config) *guard {
 	if cfg.MaxConcurrentJobs > 0 {
 		g.jobs = make(chan struct{}, cfg.MaxConcurrentJobs)
 	}
+	g.ipFails = newAuthSprayWindow(cfg.AuthFailIPLimit, cfg.AuthFailIPWindow)
+	g.globalFails = newAuthSprayWindow(cfg.AuthFailGlobalLimit, cfg.AuthFailGlobalWindow)
 	return g
 }
 
@@ -338,35 +356,41 @@ func truncateAuthUser(user string) string {
 	return user[:cut] + "…"
 }
 
-// authFailKey 把「来源 + 凭据类别 + 尝试的账号」摘要成固定长度的键。
+// authLockKey 是账号锁定的键：只按用户名，不区分来源与凭据类别。
 //
-// 用 SHA-256 而不是直接拼接，原因有二：
-//   - 用户名长度由请求头决定，直接做 map 键会让少量请求就占掉数 GB 内存；
-//   - 固定长度的键也不会因为用户名里的控制字符污染日志/诊断。
+// 用 SHA-256 而不是直接拿用户名当 map 键：用户名长度由请求头决定
+// （可达 64 KiB），摘要键能避免少量请求就占掉大量内存，也不会因为
+// 用户名里的控制字符污染诊断信息。
 //
-// ⚠️ 不能只用 IP：否则任何持有合法账号的人，只要在两次错误猜测之间
-// 穿插一次自己的成功请求，就能把整个 IP 的失败计数清零，对别人的账号
-// 做无限次口令猜测（BCP 的经典绕过）。成功只能清掉**本账号**的记录。
-func authFailKey(ip, class, user string) string {
-	sum := sha256.Sum256([]byte(ip + "\x00" + class + "\x00" + strings.TrimSpace(user)))
+// 账号锁定是账号级状态：同一个账号从另一个 IP、或走另一个验口令接口，
+// 都应看到同一把锁。IP / 全局维度有各自独立的滑动窗口，不受这里影响。
+func authLockKey(user string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(user)))
 	return hex.EncodeToString(sum[:])
 }
 
-// authThrottled 判断该来源+类别+账号是否正处在节流窗口。
+// authThrottled 是账号锁定的 Check：只读，锁定期内绝不写状态。
+//
+// 返回值 true 表示「现在不放行」，调用方必须直接返回剩余等待时间，
+// 不能再调用 noteAuthFailure —— 那会把锁定期往后推，正是本次要修的问题。
 func (s *Server) authThrottled(ip, class, user string) (bool, time.Duration) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return false, 0
 	}
+	// 管理员恢复通道：豁免来源不受账号锁定约束（IP/全局维度不受影响）。
+	if s.isAuthLockExempt(ip) {
+		return false, 0
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	rec := g.fails[authFailKey(ip, class, user)]
+	rec := g.fails[authLockKey(user)]
 	if rec == nil {
 		return false, 0
 	}
 	now := time.Now()
-	if now.Before(rec.throttledUntil) {
-		return true, rec.throttledUntil.Sub(now)
+	if now.Before(rec.lockedUntil) {
+		return true, rec.lockedUntil.Sub(now)
 	}
 	return false, 0
 }
@@ -394,27 +418,46 @@ func (s *Server) waitAuthThrottle(r *http.Request, remain time.Duration) bool {
 	}
 }
 
-// throttledReply 在失败计数已进入节流窗口时写 429，返回 true 表示已写响应。
-//
-// 调用它之前密码**已经验过且失败**，所以正确密码不会走到这里 ——
-// 这是「限速但不锁死」的关键：429 只影响猜错的人，不影响拿对密码的人。
-func (s *Server) throttledReply(w http.ResponseWriter, ip, class, user string) bool {
-	if throttled, _ := s.authThrottled(ip, class, user); !throttled {
-		return false
-	}
-	// 实际节流步长是 500ms，按秒向上取整就是 1。
-	w.Header().Set("Retry-After", "1")
+// writeAuthLocked 写账号锁定的 429 响应（普通文本格式）。
+func writeAuthLocked(w http.ResponseWriter, remain time.Duration) {
+	w.Header().Set("Retry-After", retryAfterSeconds(remain))
 	http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
 		http.StatusTooManyRequests)
+}
+
+// throttledReply 在账号仍处于锁定状态时写 429，返回 true 表示已写响应。
+func (s *Server) throttledReply(w http.ResponseWriter, ip, class, user string) bool {
+	locked, remain := s.authThrottled(ip, class, user)
+	if !locked {
+		return false
+	}
+	writeAuthLocked(w, remain)
 	return true
 }
 
-// noteAuthFailureAndReply 记录一次失败；如果**这次之前**就已经在节流窗口里，
-// 写 429 并返回 true。
+// retryAfterSeconds 把剩余等待时长换算成 Retry-After 的秒数（向上取整）。
 //
-// 达到阈值的那一次本身仍按普通认证失败处理（401），从下一次开始才回 429：
-// 这样「第 N 次失败」的语义与以前一致，也不会让边界上的那一次看起来像
-// 被额外惩罚。密码正确时不要调用。
+// 之前这里写死 "1"：实际锁定可能是几分钟，客户端按 1 秒重试只会
+// 在锁定期内反复撞 429。按真实剩余时间返回，客户端才能正确退避。
+func retryAfterSeconds(remain time.Duration) string {
+	if remain <= 0 {
+		return "1"
+	}
+	secs := int64(remain / time.Second)
+	if remain%time.Second != 0 {
+		secs++
+	}
+	if secs < 1 {
+		secs = 1
+	}
+	return strconv.FormatInt(secs, 10)
+}
+
+// noteAuthFailureAndReply 记录一次账号失败。
+//
+// 正常情况下调用方已经过了 Check（未锁定），所以这里不会写 429：
+// 达到阈值的那一次仍回 401，下一次请求会在 checkAuthLimit 里直接拿到 429。
+// 并发请求可能在记录前已看到锁定状态，此时补写 429。
 func (s *Server) noteAuthFailureAndReply(w http.ResponseWriter, ip, class, user string) bool {
 	already, _ := s.authThrottled(ip, class, user)
 	s.noteAuthFailure(ip, class, user)
@@ -424,76 +467,169 @@ func (s *Server) noteAuthFailureAndReply(w http.ResponseWriter, ip, class, user 
 	return s.throttledReply(w, ip, class, user)
 }
 
-// noteAuthFailure 记录一次认证失败，达到阈值时进入节流窗口。
-//
-// class/user 是本次**实际尝试的凭据类别与账号**（没有凭据时不应调用）。
-// 计数按「来源 + 类别 + 账号」隔离，成功登录不会清掉别人账号的失败记录，
-// 也不会因为无效 Cookie/匿名请求连坐有效会话。
-func (s *Server) noteAuthFailure(ip, class, user string) {
-	g := s.guard
-	if g == nil || s.cfg.AuthFailLimit <= 0 {
+// isAuthLockExempt 判断来源 IP 是否在管理员恢复通道的豁免网段内。
+func (s *Server) isAuthLockExempt(ip string) bool {
+	if ip == "" || len(s.authLockExempt) == 0 {
+		return false
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return ipInAny(parsed, s.authLockExempt)
+}
+
+// authLockAlert 输出一条可告警的结构化账号锁定日志。
+func (s *Server) authLockAlert(ip, class, user string, failures int,
+	lockedUntil time.Time, delay time.Duration) {
+	payload := struct {
+		Event       string `json:"event"`
+		User        string `json:"user"`
+		SrcIP       string `json:"src_ip"`
+		Class       string `json:"class"`
+		Failures    int    `json:"failures"`
+		LockedUntil string `json:"locked_until"`
+		Delay       string `json:"delay"`
+	}{
+		Event:       "auth_account_locked",
+		User:        truncateAuthUser(user),
+		SrcIP:       ip,
+		Class:       class,
+		Failures:    failures,
+		LockedUntil: lockedUntil.UTC().Format(time.RFC3339),
+		Delay:       delay.String(),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		s.logger.Errorf("账号锁定告警序列化失败: %v", err)
 		return
 	}
+	s.logger.Errorf("账号锁定 %s", data)
+}
+
+// authLockDelay 按连续失败次数计算本次锁定时长。
+//
+// 首次达到阈值锁 baseDelay；之后每多触发一次翻倍，封顶 maxDelay。
+// baseDelay 为 `--auth-lock-base-delay`（旧名 --auth-fail-window），
+// maxDelay 为 `--auth-lock-max-delay`。
+func (s *Server) authLockDelay(fails int) time.Duration {
+	base := s.cfg.AuthFailWindow
+	if base <= 0 {
+		base = time.Minute
+	}
+	max := s.cfg.AuthLockMaxDelay
+	if max <= 0 {
+		max = 30 * time.Minute
+	}
+	shift := fails - s.cfg.AuthFailLimit
+	if shift < 0 {
+		shift = 0
+	}
+	// 32 倍已经足够越过默认的 30m 上限；再大也只是溢出风险。
+	if shift > 5 {
+		shift = 5
+	}
+	d := base
+	for i := 0; i < shift; i++ {
+		if d >= max || d > max/2 {
+			return max
+		}
+		d *= 2
+	}
+	if d > max {
+		return max
+	}
+	return d
+}
+
+// noteAuthFailure 是账号锁定的 OnFailure：**只在 Check 放行后调用**。
+//
+// 锁定期间的请求必须由 authThrottled 直接拒绝，不能走到这里；即便因并发
+// 竞态走到了，这里也会在发现已锁定时立即返回，绝不累加计数、绝不延长
+// lockedUntil。这正是修复「攻击者每分钟探活一次就能永久锁死账号」的关键。
+//
+// 返回值 locked 表示本次失败是否让账号处于锁定状态；retry 是剩余时间。
+func (s *Server) noteAuthFailure(ip, class, user string) (
+	locked bool, retry time.Duration, fails int,
+) {
+	g := s.guard
+	if g == nil || s.cfg.AuthFailLimit <= 0 {
+		return false, 0, 0
+	}
+	// 管理员恢复通道：豁免来源的失败不计数，也就不会把账号锁上。
+	if s.isAuthLockExempt(ip) {
+		return false, 0, 0
+	}
 	limit := s.cfg.AuthFailLimit
-	window := s.cfg.AuthFailWindow
-	key := authFailKey(ip, class, user)
+	key := authLockKey(user)
+	now := time.Now()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// 顺手做一次惰性清理，避免被大量伪造来源/用户名撑爆内存。
-	// 只在字典明显变大时才扫，正常情况下这份开销可以忽略。
+	rec := g.fails[key]
+	// 已锁定：不写任何状态，直接返回剩余时间。
+	if rec != nil && now.Before(rec.lockedUntil) {
+		return true, rec.lockedUntil.Sub(now), rec.fails
+	}
+
+	// 惰性清理：只在表明显变大时扫，避免被大量伪造来源/用户名撑爆内存。
+	// 锁定期内的记录永远保留；其余按「最后一次计入失败 + 2×封顶时长」过期。
+	ttl := 2 * s.cfg.AuthLockMaxDelay
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
 	if len(g.fails) > 4096 {
-		now := time.Now()
 		for k, v := range g.fails {
-			if now.Sub(v.last) > 2*window {
+			if v.lockedUntil.After(now) {
+				continue
+			}
+			if now.Sub(v.last) > ttl {
 				delete(g.fails, k)
 			}
 		}
 	}
 	// 硬上限：持续注入新键时，仅靠「清过期」挡不住内存增长。
-	// 淘汰时跳过仍在节流期的记录，否则攻击者可以故意灌满表，
-	// 把针对自己的节流记录挤掉后继续猜口令。
+	// 淘汰时跳过仍在锁定期的记录，否则攻击者可以故意灌满表，
+	// 把针对自己的锁定记录挤掉后继续猜口令。
 	if len(g.fails) >= maxAuthFailEntries {
 		n := 0
-		now := time.Now()
 		for k, v := range g.fails {
 			if n >= maxAuthFailEntries/2 {
 				break
 			}
-			if v.throttledUntil.After(now) {
+			if v.lockedUntil.After(now) {
 				continue
 			}
 			delete(g.fails, k)
 			n++
 		}
 		if len(g.fails) >= maxAuthFailEntries {
-			// 表里全是仍在生效的节流记录：宁可本次不记新键，
-			// 也不要让 map 无界增长。已有的记录仍会按时过期。
-			return
+			return false, 0, 0
 		}
 	}
 
-	rec := g.fails[key]
-	now := time.Now()
-	if rec == nil || now.Sub(rec.last) > window {
+	if rec == nil {
 		rec = &failRecord{}
 		g.fails[key] = rec
 	}
-	rec.count++
+	rec.fails++
 	rec.last = now
-	if rec.count >= limit {
-		rec.throttledUntil = now.Add(window)
-		rec.count = 0
-		s.logger.Errorf("来源 %s（%s 账号 %q）认证失败达 %d 次，进入 %s 节流窗口（正确密码仍可在等待后登录）",
-			ip, class, truncateAuthUser(user), limit, window)
+	fails = rec.fails
+	if fails < limit {
+		return false, 0, fails
 	}
+
+	d := s.authLockDelay(fails)
+	rec.lockedUntil = now.Add(d)
+	s.authLockAlert(ip, class, user, fails, rec.lockedUntil, d)
+	return true, d, fails
 }
 
-// noteAuthSuccess 在认证通过后清掉**该来源+类别+账号**的失败计数。
+// noteAuthSuccess 是账号锁定的 OnSuccess：立刻清零该账号的计数与锁定状态。
 //
-// 绝不能只按 IP 清：那会让任何持有合法账号的人通过穿插成功请求
-// 把针对别的账号的失败记录一并抹掉，限速形同虚设。
+// 键就是用户名，所以一次成功登录会清掉该账号在任何来源、任何验口令接口
+// 上的锁。管理员恢复通道「从本机登录一次即解锁」正是依赖这一点。
 func (s *Server) noteAuthSuccess(ip, class, user string) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
@@ -501,7 +637,378 @@ func (s *Server) noteAuthSuccess(ip, class, user string) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.fails, authFailKey(ip, class, user))
+	delete(g.fails, authLockKey(user))
+}
+
+// ---------------------------------------------------------------------------
+// 按来源 IP / 全局的失败限速
+// ---------------------------------------------------------------------------
+
+// authGlobalKey 是全局失败窗口里唯一的一个键。
+const authGlobalKey = "*"
+
+// maxAuthSprayEntries 是单 IP / 全局两张失败表的硬上限。
+//
+// 与 maxAuthFailEntries 同理：攻击者可以伪造大量来源地址（只有在部署了
+// 可信代理且转发头可被伪造时）持续注入新键。超过上限时优先淘汰没有处于
+// 封禁期的记录；如果整张表都在封禁期，宁可不记这一次，也不让 map 无界增长。
+const maxAuthSprayEntries = 65536
+
+// authFailureEvent 是窗口内的一次失败。
+//
+// user 在**入表前**就已经脱敏（见 maskAuthUser）：窗口只需要给告警提供
+// 「像什么账号」，没必要为了日志把完整用户名留在内存里 —— 请求头里的
+// 用户名最长可到 64 KiB，原样保存会让内存占用被攻击者牵着走。
+type authFailureEvent struct {
+	at   time.Time
+	user string
+}
+
+// authSprayEntry 是某个维度（全局或单个 IP）的窗口状态。
+type authSprayEntry struct {
+	// events 按时间升序，最多保留 limit+1 条 —— 判定「是否超限」和
+	// 计算「多久后回到阈值以内」都只需要最老的这一条。
+	events []authFailureEvent
+	// blockedUntil 是本次超限的截止时间。
+	//
+	// ⚠️ 封禁期内再失败**不会**延长它：否则攻击者只要持续尝试，
+	// Retry-After 就永远是满窗口，既不符合「真实剩余时间」，客户端也
+	// 无法退避。到点后窗口内的事件自然滑出，重新从空窗口开始计数。
+	blockedUntil time.Time
+}
+
+// authSprayWindow 是一个带过期清理的滑动窗口。
+//
+// 它只记录**认证失败**：正确密码不会走到这里，所以即便某个 IP 因攻击
+// 被暂时拖慢，合法用户仍能在一次短等待后登录（见 waitAuthThrottle）。
+type authSprayWindow struct {
+	limit  int
+	window time.Duration
+
+	mu        sync.Mutex
+	entries   map[string]*authSprayEntry
+	lastSweep time.Time
+}
+
+func newAuthSprayWindow(limit int, window time.Duration) *authSprayWindow {
+	if limit <= 0 || window <= 0 {
+		return nil
+	}
+	return &authSprayWindow{
+		limit:   limit,
+		window:  window,
+		entries: make(map[string]*authSprayEntry),
+	}
+}
+
+// state 报告该键当前是否处于超限封禁期，以及还要等多久。
+func (w *authSprayWindow) state(key string, now time.Time) (bool, time.Duration) {
+	if w == nil {
+		return false, 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	e := w.entries[key]
+	if e == nil {
+		return false, 0
+	}
+	w.pruneLocked(e, now)
+	if now.Before(e.blockedUntil) {
+		return true, e.blockedUntil.Sub(now)
+	}
+	if !e.blockedUntil.IsZero() {
+		e.blockedUntil = time.Time{}
+	}
+	if len(e.events) == 0 {
+		delete(w.entries, key)
+	}
+	return false, 0
+}
+
+// record 记一次失败，并返回记录后的状态。
+//
+// over 表示该维度已超过阈值（本次请求也应返回 429）；retry 是真实的
+// 剩余解封时间；count 是窗口内的失败次数（受 limit+1 上限约束）；
+// users 是最近尝试过的用户名（已脱敏）；crossed 表示**本次**刚好跨过阈值，
+// 调用方应据此只发一条告警，而不是每次失败都刷屏。
+func (w *authSprayWindow) record(key, user string, now time.Time) (
+	over bool, retry time.Duration, count int, users []string, crossed bool,
+) {
+	if w == nil {
+		return false, 0, 0, nil, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.sweepLocked(now)
+
+	e := w.entries[key]
+	if e == nil {
+		if len(w.entries) >= maxAuthSprayEntries && !w.evictLocked(now) {
+			// 整张表都在封禁期：这次不记，避免内存无界增长。
+			return false, 0, 0, nil, false
+		}
+		e = &authSprayEntry{}
+		w.entries[key] = e
+	}
+	w.pruneLocked(e, now)
+
+	// 封禁期内不堆事件、也不延长截止时间：Retry-After 才能真正递减。
+	if now.Before(e.blockedUntil) {
+		return true, e.blockedUntil.Sub(now), len(e.events),
+			recentAuthUsers(e.events, 10), false
+	}
+	if !e.blockedUntil.IsZero() {
+		e.blockedUntil = time.Time{}
+	}
+
+	wasOver := len(e.events) > w.limit
+	e.events = append(e.events, authFailureEvent{at: now, user: maskAuthUser(user)})
+	// 只保留 limit+1 条：超过阈值之后，判定只需要「最老的那一条何时过期」。
+	if max := w.limit + 1; len(e.events) > max {
+		e.events = e.events[len(e.events)-max:]
+	}
+	count = len(e.events)
+	over = count > w.limit
+	if over {
+		// 需要让 count-limit 条事件滑出窗口；剩下的第一条（下标
+		// count-limit-1）过期时，窗口内就正好剩下 limit 条。
+		idx := count - w.limit - 1
+		e.blockedUntil = e.events[idx].at.Add(w.window)
+		retry = e.blockedUntil.Sub(now)
+		crossed = !wasOver
+	}
+	return over, retry, count, recentAuthUsers(e.events, 10), crossed
+}
+
+// pruneLocked 丢弃已经滑出窗口的事件。调用方需持有 w.mu。
+func (w *authSprayWindow) pruneLocked(e *authSprayEntry, now time.Time) {
+	cutoff := now.Add(-w.window)
+	i := 0
+	for i < len(e.events) && !e.events[i].at.After(cutoff) {
+		i++
+	}
+	if i > 0 {
+		e.events = e.events[i:]
+	}
+}
+
+// sweepLocked 定期清理整张表，避免大量只出现一次的来源长期占着内存。
+// 调用方需持有 w.mu。
+func (w *authSprayWindow) sweepLocked(now time.Time) {
+	if now.Sub(w.lastSweep) < w.window {
+		return
+	}
+	w.lastSweep = now
+	cutoff := now.Add(-w.window)
+	for k, e := range w.entries {
+		if now.Before(e.blockedUntil) {
+			continue
+		}
+		if len(e.events) == 0 || !e.events[len(e.events)-1].at.After(cutoff) {
+			delete(w.entries, k)
+		}
+	}
+}
+
+// evictLocked 在表满时淘汰一条不在封禁期的记录。
+// 返回 false 表示没有可淘汰的记录。调用方需持有 w.mu。
+func (w *authSprayWindow) evictLocked(now time.Time) bool {
+	for k, e := range w.entries {
+		if now.Before(e.blockedUntil) {
+			continue
+		}
+		delete(w.entries, k)
+		return true
+	}
+	return false
+}
+
+// recentAuthUsers 取窗口内最近尝试的用户名（最多 max 个、去重）。
+// 事件里的 user 已经是脱敏值（见 authFailureEvent），这里不再处理原文。
+func recentAuthUsers(events []authFailureEvent, max int) []string {
+	seen := make(map[string]bool, len(events))
+	out := make([]string, 0, max)
+	for i := len(events) - 1; i >= 0 && len(out) < max; i-- {
+		name := events[i].user
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+// authUserLogPrefixRunes 是告警日志里保留的用户名前缀字符数。
+//
+// 只留前几个字符：告警需要的是「像什么账号」，而不是完整账号名；
+// 用户名本身可能等于手机号/邮箱，原样写进日志会成为另一条泄露渠道。
+const authUserLogPrefixRunes = 3
+
+// maskAuthUser 脱敏一个用户名，供告警日志使用。
+func maskAuthUser(user string) string {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return "<empty>"
+	}
+	r := []rune(user)
+	if len(r) <= authUserLogPrefixRunes {
+		return string(r) + "…"
+	}
+	return string(r[:authUserLogPrefixRunes]) + "…"
+}
+
+// authSprayAlert 是「单 IP 失败超限」的告警钩子。
+//
+// 目前只输出一条结构化日志（JSON）。接入告警系统时替换这里即可，
+// 调用点不需要再改。注意 users 已经过脱敏，不要在这里改回原文。
+func (s *Server) authSprayAlert(srcIP string, failures int, users []string) {
+	payload := struct {
+		Event    string   `json:"event"`
+		SrcIP    string   `json:"src_ip"`
+		Failures int      `json:"failures"`
+		Limit    int      `json:"limit"`
+		Window   string   `json:"window"`
+		Users    []string `json:"users"`
+	}{
+		Event:    "auth_fail_ip_threshold",
+		SrcIP:    srcIP,
+		Failures: failures,
+		Limit:    s.cfg.AuthFailIPLimit,
+		Window:   s.cfg.AuthFailIPWindow.String(),
+		Users:    users,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		s.logger.Errorf("认证失败限速告警序列化失败: %v", err)
+		return
+	}
+	s.logger.Errorf("认证失败限速告警 %s", data)
+}
+
+// authSprayThrottled 按「全局 -> 单 IP」的顺序判断是否超限。
+//
+// 返回的剩余时间是两个维度里最长的那个：客户端必须等到所有维度都解封
+// 才有意义。没有凭据的请求不会走到这里，会话/匿名访问也不受影响。
+func (s *Server) authSprayThrottled(ip string) (bool, time.Duration) {
+	g := s.guard
+	if g == nil {
+		return false, 0
+	}
+	now := time.Now()
+	over := false
+	var retry time.Duration
+	if g.globalFails != nil {
+		if o, d := g.globalFails.state(authGlobalKey, now); o {
+			over = true
+			retry = d
+		}
+	}
+	if g.ipFails != nil && ip != "" {
+		if o, d := g.ipFails.state(ip, now); o {
+			over = true
+			if d > retry {
+				retry = d
+			}
+		}
+	}
+	return over, retry
+}
+
+// noteSprayFailure 在「全局」与「单 IP」两个维度各记一次失败。
+//
+// 调用方必须已经确认密码不正确。返回值与 authSprayThrottled 相同：
+// over=true 表示本次请求应返回 429。成功登录**不清零**这两个维度 ——
+// 否则攻击者只要穿插一个自己的合法账号，就能把针对别人的喷洒计数抹掉。
+func (s *Server) noteSprayFailure(ip, user string) (over bool, retry time.Duration) {
+	g := s.guard
+	if g == nil {
+		return false, 0
+	}
+	now := time.Now()
+
+	if g.globalFails != nil {
+		o, d, _, _, _ := g.globalFails.record(authGlobalKey, user, now)
+		if o {
+			over = true
+			retry = d
+		}
+	}
+	if g.ipFails != nil && ip != "" {
+		o, d, count, users, crossed := g.ipFails.record(ip, user, now)
+		if o {
+			over = true
+			if d > retry {
+				retry = d
+			}
+		}
+		if crossed {
+			s.authSprayAlert(ip, count, users)
+		}
+	}
+	return over, retry
+}
+
+// checkAuthLimitScoped 与 checkAuthLimit 相同，但额外检查「全局」和
+// 「单 IP」两个维度，并取所有维度里最长的剩余时间只等待一次。
+//
+// 只有认证入口（GET / 的 Basic 校验、/fs/auth）才应该调用它；文件传输
+// 路径仍走 checkAuthLimit，避免一次喷洒把正常的传输请求拖慢。
+func (s *Server) checkAuthLimitScoped(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
+	ip := s.clientIP(r)
+	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
+		return ip, true
+	}
+	// 账号锁定是硬拒绝：直接 429，不验密码、不计新失败、不延长锁定。
+	if locked, remain := s.authThrottled(ip, class, user); locked {
+		writeAuthLocked(w, remain)
+		return ip, false
+	}
+	// IP / 全局维度（上一项工作）仍然保持「先减速、再验密码」的语义：
+	// 它只拖慢猜测，不阻止正确密码。
+	if over, remain := s.authSprayThrottled(ip); over {
+		if !s.waitAuthThrottle(r, remain) {
+			return ip, false
+		}
+	}
+	return ip, true
+}
+
+// noteAuthFailureAndReplyScoped 在三个维度上记一次失败；任一维度超限
+// 就写 429 并返回 true。
+//
+// 与 noteAuthFailureAndReply 的区别只是多了「全局 / 单 IP」两个计数维度；
+// 用户名维度的语义（达到阈值的那一次仍回 401、下一次才 429）保持不变。
+func (s *Server) noteAuthFailureAndReplyScoped(w http.ResponseWriter, ip, class, user string) bool {
+	// 判定顺序：全局 -> 单 IP -> 用户名。already 必须在记录前取，
+	// 这样「用户名的第 N 次失败仍回 401、下一次才 429」的语义不变。
+	already, _ := s.authThrottled(ip, class, user)
+	sprayOver, retry := s.noteSprayFailure(ip, user)
+	s.noteAuthFailure(ip, class, user)
+
+	if already {
+		if _, d := s.authThrottled(ip, class, user); d > retry {
+			retry = d
+		}
+	}
+	if !already && !sprayOver {
+		return false
+	}
+	w.Header().Set("Retry-After", retryAfterSeconds(retry))
+	http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
+		http.StatusTooManyRequests)
+	return true
+}
+
+// authSprayScope 判断请求是否属于「会参与 IP/全局限速的认证入口」。
+//
+// 目前只有 GET / 的 Basic 校验（应用外壳预检与 authorize 两条分支）：
+// /fs/extract、/fs/text、/fs/office 以及上传/下载都带着具体的文件路径，
+// 不会命中这里。静态资源 /fs/assets/* 走独立处理器，根本不经过鉴权，
+// 自然也不计数。
+func authSprayScope(r *http.Request, urlPath string) bool {
+	return r.Method == http.MethodGet && urlPath == "/"
 }
 
 // ---------------------------------------------------------------------------
