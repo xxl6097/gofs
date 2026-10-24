@@ -310,6 +310,9 @@ func TestCLIDoesNotAdvertiseDefaultCredential(t *testing.T) {
 		"-A", "-b", "127.0.0.1", "-p", "0", "--log-format", "none",
 		"-a", "boss:pw@/:rw",
 		"--key-file", "", "--user-file", "", "--settings-file", "",
+		// 测试请求的 RemoteAddr 是 192.0.2.1，不是回环地址；这条用例
+		// 只关心默认账号，显式允许明文认证以避开传输安全策略。
+		"--allow-insecure-auth",
 		root,
 	}, io.Discard)
 	if err != nil {

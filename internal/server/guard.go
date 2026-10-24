@@ -140,6 +140,54 @@ func (g *guard) acquire(ctx context.Context, sem chan struct{}, wait time.Durati
 }
 
 // ---------------------------------------------------------------------------
+// 传输安全：明文 HTTP 不接受口令与会话
+// ---------------------------------------------------------------------------
+
+// withSecureAuth 拒绝在明文连接上提交账号密码，并忽略/清理明文连接上的会话。
+//
+// Basic 只是 Base64，同网段抓包就能还原密码；会话 Cookie 是 bearer 凭据，
+// 抓包后可以原样复用。两者在非 TLS 连接上都等于把账号交出去。
+//
+// 放行的三种情况见 secureTransport：直接 HTTPS、可信代理声明 HTTPS、
+// 本机回环/Unix socket。其余情况：
+//   - 带 Basic / 查询串口令 → 403，并提示改用 HTTPS 或 --allow-insecure-auth；
+//   - 只带会话 cookie → 不认它（sessionToken 返回空），顺手清掉，继续按匿名处理。
+//     不直接 403 是为了让浏览器还能打开登录页；否则带着一张旧 cookie
+//     的用户会看到一张错误页，连改配置的入口都没有。
+func (s *Server) withSecureAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.auth.Enabled() || s.secureTransport(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if hasPasswordCredentials(r) {
+			w.Header().Set("Cache-Control", "no-store")
+			msg := "账号密码不能通过明文 HTTP 传输：请改用 HTTPS，" +
+				"或在受控内网中显式启用 --allow-insecure-auth"
+			if r.Header.Get("X-Gofs-Ajax") == "1" {
+				s.writeJSONStatus(w, http.StatusForbidden, map[string]any{"message": msg})
+				return
+			}
+			http.Error(w, "403 Forbidden: "+msg, http.StatusForbidden)
+			return
+		}
+		if s.sessionTokenRaw(r) != "" {
+			s.clearSessionCookie(w, r)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hasPasswordCredentials 判断请求是否携带了可被直接还原/重放的口令。
+func hasPasswordCredentials(r *http.Request) bool {
+	if _, _, ok := r.BasicAuth(); ok {
+		return true
+	}
+	q := r.URL.Query()
+	return q.Has("user") || q.Has("pass")
+}
+
+// ---------------------------------------------------------------------------
 // 跨站请求校验（CSRF）
 // ---------------------------------------------------------------------------
 

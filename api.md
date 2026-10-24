@@ -66,7 +66,13 @@ curl -u admin:secret -T a.txt http://127.0.0.1:5000/docs/a.txt
 `user:pass@/dir1:rw,/dir2` 表示该账号在 `/dir1` 可读写、在 `/dir2` 只读。
 上传要求目标路径具备**读写**权限。
 
-也支持查询参数形式（不推荐，凭据会留在 URL / 日志 / 浏览器历史里）：
+⚠️ **明文 HTTP 不接受账号凭据**：Basic 只是 Base64。除了本机回环 / Unix
+socket，只有 HTTPS（或可信代理声明 `X-Forwarded-Proto: https`）上的 Basic
+请求才会被处理；远程明文 HTTP 会得到 `403`。受控内网确实需要明文时，
+服务端需显式启用 `--allow-insecure-auth`。
+
+也支持查询参数形式（不推荐，凭据会留在 URL / 日志 / 浏览器历史里，
+同样受上面的传输安全限制）：
 
 ```bash
 curl -T a.txt 'http://127.0.0.1:5000/docs/a.txt?user=admin&pass=secret'
@@ -925,7 +931,7 @@ document.getElementById('picker').addEventListener('change', async (e) => {
 | --- | --- |
 | `400` | PUT 目标以 `/` 结尾（Linux）；POST 不是 `multipart/form-data`；没有文件；`path` 含 `..`；文件名过长 |
 | `401` | 未带凭据；账号密码错误；上传密钥无效 / 已过期 / 已撤销 |
-| `403` | 未开启 `--allow-upload`；目标路径没有写权限；密钥 scope 外；用只读分享令牌上传；目标是符号链接；跨站写请求 |
+| `403` | 未开启 `--allow-upload`；目标路径没有写权限；密钥 scope 外；用只读分享令牌上传；目标是符号链接；跨站写请求；**明文 HTTP 上提交账号密码** |
 | `409` | PUT 的目标已存在且是目录；路径在请求期间被替换 |
 | `413` | 超过单文件上传上限；multipart 表单总量超过 1 GiB |
 | `429` | 认证失败次数过多，看 `Retry-After`；限速只影响猜错的请求，正确凭据在短暂等待后仍可通过 |

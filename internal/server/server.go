@@ -209,7 +209,7 @@ func (s *Server) restoreSites() {
 // Handler 返回配置好中间件的 http.Handler。
 // 中间件由外到内的顺序：
 // 路径前缀 -> 分享路径改写 -> 并发闸门 -> 访问日志 -> CORS -> 跨站校验
-// -> panic 恢复 -> 路由。
+// -> panic 恢复 -> 传输安全（明文 HTTP 不接受口令/会话）-> 路由。
 //
 // 并发闸门放在最外层，是为了在真正开始干活之前就把多余请求挡掉；
 // 它拒绝的请求不写访问日志 —— 服务过载时再拼命写日志只会雪上加霜。
@@ -244,6 +244,7 @@ func (s *Server) Handler() http.Handler {
 
 	var h http.Handler = mux
 	h = s.withRecover(h)
+	h = s.withSecureAuth(h)
 	h = s.withCSRFProtect(h)
 	h = s.withCORS(h)
 	h = s.withLogging(h)
@@ -759,11 +760,69 @@ func (s *Server) clearSessionCookieAt(w http.ResponseWriter, r *http.Request, pa
 	}
 }
 
+// secureTransport 判断当前连接是否足以承载口令与会话。
+//
+// 默认只接受三种情况：
+//   - 本进程直接跑 HTTPS（r.TLS != nil）；
+//   - 可信反向代理明确声明外部协议是 HTTPS（X-Forwarded-Proto: https）；
+//   - 请求来自本机回环地址或 Unix socket（不经过网络）。
+//
+// 反向代理终止 TLS 但既没配 --trusted-proxies、也没开 --cookie-secure 时，
+// 服务端无法确认外部协议，按不安全处理 —— 否则一段明文 HTTP 就能拿到
+// 账号密码和会话。确实无法传递协议时用 --allow-insecure-auth 显式承担风险。
+func (s *Server) secureTransport(r *http.Request) bool {
+	if s.cfg.AllowInsecureAuth {
+		return true
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if trustedPeer(r, s.trustedProxies) {
+		// 代理明确说 http 时必须拒绝；没说（空串）也不能假设是 https。
+		return s.externalScheme(r) == "https"
+	}
+	// --cookie-secure 是运维对「外部由反代终止 TLS」的显式声明。
+	if s.cfg.CookieSecure {
+		return true
+	}
+	return isLocalPeer(r)
+}
+
+// isLocalPeer 判断直连对端是否在本机（环回地址 / Unix socket）。
+//
+// Unix socket 的 RemoteAddr 可能是空串、@ 或文件路径；这些都不经过网络。
+func isLocalPeer(r *http.Request) bool {
+	addr := r.RemoteAddr
+	if addr == "" || addr == "@" || strings.HasPrefix(addr, "/") {
+		return true
+	}
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
 // sessionToken 取出请求里的会话 token（没有则空串）。
+//
+// 明文 HTTP 上不认会话：token 是 bearer 凭据，抓包即可原样复用。
+// 不安全的连接直接返回空串，让请求按匿名处理（页面外壳仍能打开登录框）。
+func (s *Server) sessionToken(r *http.Request) string {
+	if !s.secureTransport(r) {
+		return ""
+	}
+	return s.sessionTokenRaw(r)
+}
+
+// sessionTokenRaw 只按 cookie 取值，不判断传输是否安全。
+//
+// 供 withSecureAuth 清理明文连接上残留的会话 cookie；业务代码一律用
+// sessionToken，避免在 HTTP 上误认会话。
 //
 // HTTPS 根路径部署只认 __Host-gofs_sid，不透支旧名：否则同站子域可以
 // 用 Domain Cookie 把受害者登录成攻击者账号（cookie tossing）。
-func (s *Server) sessionToken(r *http.Request) string {
+func (s *Server) sessionTokenRaw(r *http.Request) string {
 	if c, err := r.Cookie(sessionCookieHostName); err == nil && c.Value != "" {
 		return c.Value
 	}
@@ -1696,7 +1755,14 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 }
 
 // handleHealth 健康检查。
+//
+// 启用鉴权后同样要求登录：版本号与服务存活时间本身也是信息，没必要
+// 对未认证的陌生人开放。前端的重启/卸载轮询不依赖 200，只要服务能回
+// 一个 4xx 就说明进程已经回来了（见 settings.js 的 healthOK）。
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireLogin(w, r); !ok {
+		return
+	}
 	s.writeJSON(w, map[string]any{
 		"status":  "ok",
 		"version": s.cfg.Version,

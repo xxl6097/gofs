@@ -75,6 +75,23 @@ func (s *Server) Banner(w io.Writer) {
 	default:
 		fmt.Fprintf(w, "  鉴权      : 已启用（账号来自用户表），页面使用 Basic 认证\n")
 	}
+	// 启用鉴权时把「凭据能走哪种连接」说清楚：默认只接受 HTTPS 或本机
+	// 回环，远程明文 HTTP 登录会被拒绝。不打印这一行的话，LAN 部署的
+	// 用户会看到登录框却怎么都登不进去。
+	if s.inner.AuthEnabled() {
+		switch {
+		case cfg.AllowInsecureAuth:
+			fmt.Fprintf(w, "  传输安全  : 允许明文认证（--allow-insecure-auth，密码可能被同网段抓包）\n")
+		case cfg.TLSCert != "":
+			fmt.Fprintf(w, "  传输安全  : HTTPS（本进程终止 TLS）\n")
+		case cfg.CookieSecure:
+			fmt.Fprintf(w, "  传输安全  : 外部 HTTPS（--cookie-secure 声明）\n")
+		case len(cfg.TrustedProxies) > 0:
+			fmt.Fprintf(w, "  传输安全  : 需经可信代理声明 X-Forwarded-Proto: https\n")
+		default:
+			fmt.Fprintf(w, "  传输安全  : 仅 HTTPS / 本机回环接受账号密码；远程明文 HTTP 登录会被拒绝\n")
+		}
+	}
 	// 无鉴权时管理接口默认关闭，横幅上要说清楚 —— 否则运维点开「设置」
 	// 看到 403 只能靠猜。
 	if !s.inner.AuthEnabled() {

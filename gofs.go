@@ -314,6 +314,14 @@ func WithTLS(certFile, keyFile string) Option {
 	}
 }
 
+// WithAllowInsecureAuth 允许在明文 HTTP 上提交账号密码与会话。
+//
+// 默认关闭：Basic 只是 Base64，同网段抓包即可还原密码。打开后远程明文
+// HTTP 也能登录，只应在受控网络或已有其他链路加密时使用。
+func WithAllowInsecureAuth(allow bool) Option {
+	return func(c *Config) { c.AllowInsecureAuth = allow }
+}
+
 // WithAssetsDir 用磁盘上的目录替换内嵌前端资源，便于改前端时热更新。
 func WithAssetsDir(dir string) Option {
 	return func(c *Config) { c.AssetsDir = dir }

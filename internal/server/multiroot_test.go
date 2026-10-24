@@ -23,6 +23,7 @@ func testConfigRoots(t *testing.T, roots []string, extra ...string) *config.Conf
 	// anonymous_admin_test.go 用 testConfigDefaultPolicy 覆盖）。
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
 		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		"--allow-insecure-auth",
 		"--allow-anonymous-admin"}
 	args = append(args, extra...)
 	args = append(args, roots...)

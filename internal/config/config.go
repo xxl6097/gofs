@@ -356,6 +356,14 @@ type Config struct {
 	// 这类部署显式打开本开关即可。
 	CookieSecure bool
 
+	// AllowInsecureAuth 允许在**明文 HTTP** 连接上提交账号密码与会话。
+	//
+	// 默认关闭：Basic 只是 Base64，同网段抓包就能还原密码并复用会话。
+	// 关闭时，非 TLS 且非本机回环/Unix socket 的请求只要携带 Basic 凭据
+	// 就会被拒绝（会话 Cookie 则直接不认）。确实处在受控内网、或 TLS 由
+	// 上游终止但无法传 X-Forwarded-Proto 时，显式打开本开关承担风险。
+	AllowInsecureAuth bool
+
 	// 在线解压的安全上限。
 	ExtractMaxTotal int64
 	ExtractMaxFiles int
@@ -720,6 +728,7 @@ func (c *Config) ApplyEnv() {
 	c.TLSCert = envStr("GOFS_TLS_CERT", c.TLSCert)
 	c.TLSKey = envStr("GOFS_TLS_KEY", c.TLSKey)
 	c.CookieSecure = envBool("GOFS_COOKIE_SECURE", c.CookieSecure)
+	c.AllowInsecureAuth = envBool("GOFS_ALLOW_INSECURE_AUTH", c.AllowInsecureAuth)
 	c.ExtractMaxTotal = envInt64("GOFS_EXTRACT_MAX_TOTAL", c.ExtractMaxTotal)
 	c.ExtractMaxFiles = envInt("GOFS_EXTRACT_MAX_FILES", c.ExtractMaxFiles)
 	c.ExtractMaxRatio = envInt("GOFS_EXTRACT_MAX_RATIO", c.ExtractMaxRatio)
@@ -819,6 +828,8 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	fs.StringVar(&cfg.TLSKey, "tls-key", cfg.TLSKey, "HTTPS 私钥路径")
 	fs.BoolVar(&cfg.CookieSecure, "cookie-secure", cfg.CookieSecure,
 		"强制会话/分享 Cookie 带 Secure（TLS 在反向代理终止且未配置可信代理时使用）")
+	fs.BoolVar(&cfg.AllowInsecureAuth, "allow-insecure-auth", cfg.AllowInsecureAuth,
+		"允许在明文 HTTP 上提交账号密码与会话（默认拒绝；Basic 仅 Base64，抓包即可还原）")
 	fs.Int64Var(&cfg.ExtractMaxTotal, "extract-max-total", cfg.ExtractMaxTotal, "单次解压写出字节上限")
 	fs.IntVar(&cfg.ExtractMaxFiles, "extract-max-files", cfg.ExtractMaxFiles, "单次解压文件数上限")
 	fs.IntVar(&cfg.ExtractMaxRatio, "extract-max-ratio", cfg.ExtractMaxRatio, "单文件压缩比上限（防解压炸弹）")
@@ -1298,6 +1309,9 @@ func usageText() string {
       --unsafe-assets-in-root
                              允许 assets 位于服务根内（开发用；可能导致同源 XSS）
       --cookie-secure        强制会话/分享 Cookie 带 Secure（反向代理终止 TLS 时用）
+      --allow-insecure-auth  允许在明文 HTTP 上提交账号密码与会话，默认关闭
+                             默认只在 HTTPS 或本机回环/Unix socket 上接受凭据；
+                             远程明文 HTTP 的 Basic 登录会被 403 拒绝
       --log-format <format>  自定义 HTTP 日志格式
       --log-file <file>      日志文件
       --compress <level>     打包压缩级别：none/low/medium/high，默认 low

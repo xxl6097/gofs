@@ -22,7 +22,8 @@
   var EP_UPGRADE = BASE + '/fs/upgrade';
   var EP_RESTART = BASE + '/fs/restart';
   var EP_UNINSTALL = BASE + '/fs/uninstall';
-  // 重启期间要靠它判断「服务回来没有」。这个接口不需要鉴权，是故意挑的。
+  // 重启期间要靠它判断「服务回来没有」。启用鉴权后它同样要求登录，
+  // 所以调用方把 401 等 4xx 也视为「进程已经回来」。
   var EP_HEALTH = BASE + '/fs/health';
 
   var UNITS = [
@@ -948,12 +949,19 @@
 
   // healthOK 探一次 /fs/health，返回服务是否已经能响应。
   //
-  // 用裸 fetch 而不是 G.apiFetch：这个接口不需要鉴权，而 apiFetch 遇到 401
-  // 会把用户弹到登录框 —— 服务刚重启、内存里的会话表被清空时，正需要避开它。
+  // 用裸 fetch 而不是 G.apiFetch：apiFetch 遇到 401 会把用户弹到登录框 ——
+  // 服务刚重启、内存里的会话表被清空时，正需要避开它。
+  //
+  // 启用鉴权后 health 也要求登录；重启后旧会话已经没了，返回 401 是正常的。
+  // 所以判据不是 res.ok，而是「拿到一个 < 500 的 HTTP 响应」：
+  // 401/403 说明进程已经回来，只是需要重新登录。
   async function healthOK() {
     try {
-      var res = await fetch(EP_HEALTH, { cache: 'no-store' });
-      return res.ok;
+      var res = await fetch(EP_HEALTH, {
+        cache: 'no-store',
+        headers: { 'X-Gofs-Ajax': '1' }
+      });
+      return res.status > 0 && res.status < 500;
     } catch (e) {
       return false;   // 连不上：多半还没起来
     }
@@ -1351,8 +1359,11 @@
 
     // waitForGone 确认服务**没有**回来。
     //
-    // 用裸 fetch 而不是 apiFetch：health 不需要鉴权，而 apiFetch 遇到 401
-    // 会把用户弹到登录框 —— 服务都没了，弹一个登录框只会让人更糊涂。
+    // 用裸 fetch 而不是 apiFetch：apiFetch 遇到 401 会把用户弹到登录框 ——
+    // 服务都没了，弹一个登录框只会让人更糊涂。
+    //
+    // health 在启用鉴权后也要求登录：卸载期间旧会话可能已经失效，返回 401
+    // 同样说明进程还活着，不能只看 res.ok。
     async function waitForGone() {
       // 15 秒：只是个观察窗口，不是「卸载要多久」。实现方若是异步收尾
       // （比如交给 systemd 停服务），这里可能还是连得上 —— 那种情况
@@ -1360,8 +1371,11 @@
       for (var i = 0; i < 15; i++) {
         await new Promise(function (r) { setTimeout(r, 1000); });
         try {
-          var res = await fetch(EP_HEALTH, { cache: 'no-store' });
-          if (res.ok) {
+          var res = await fetch(EP_HEALTH, {
+            cache: 'no-store',
+            headers: { 'X-Gofs-Ajax': '1' }
+          });
+          if (res.status > 0 && res.status < 500) {
             say('卸载请求已受理，但服务仍在运行（可能只做了一半或还在收尾），' +
               '请到服务端确认。', 'err');
             btn.disabled = false;

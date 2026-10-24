@@ -42,6 +42,11 @@ func testConfig(t *testing.T, root string, extra ...string) *config.Config {
 	// 决定，测试不该碰它。
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
 		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		// 测试请求的 RemoteAddr 是 192.0.2.1，不是回环地址；默认的
+		// 「明文 HTTP 不接受口令」会让所有 Basic 用例失败。
+		// 安全默认值本身由 transport_security_test.go 用
+		// --allow-insecure-auth=false 专门覆盖。
+		"--allow-insecure-auth",
 		// 绝大多数用例沿用「无鉴权 = 管理员」的旧行为来测设置接口；
 		// 「未启用鉴权时管理接口默认关闭」由 anonymous_admin_test.go
 		// 用 testConfigDefaultPolicy 专门覆盖。
@@ -60,7 +65,8 @@ func testConfig(t *testing.T, root string, extra ...string) *config.Config {
 func testConfigDefaultPolicy(t *testing.T, root string, extra ...string) *config.Config {
 	t.Helper()
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
-		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", ""}
+		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		"--allow-insecure-auth"}
 	args = append(args, extra...)
 	args = append(args, root)
 	cfg, err := config.Parse(args, io.Discard)
@@ -76,6 +82,7 @@ func testConfigDated(t *testing.T, root, layout string, extra ...string) *config
 	args := []string{"-b", "127.0.0.1", "-p", "0", "-log-format", "none",
 		"--upload-date-layout", layout,
 		"--key-file", "", "--user-file", "", "--settings-file", "",
+		"--allow-insecure-auth",
 		"--allow-anonymous-admin"}
 	args = append(args, extra...)
 	args = append(args, root)
