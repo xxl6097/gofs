@@ -768,14 +768,14 @@ func (s *Server) clearSessionCookieAt(w http.ResponseWriter, r *http.Request, pa
 
 // secureTransport 判断当前连接是否足以承载口令与会话。
 //
-// 默认只接受三种情况：
+// AllowInsecureAuth 默认开启（HTTP 开箱即用），此时总是返回 true。
+// 用 --allow-insecure-auth=false 收紧后，只接受三种情况：
 //   - 本进程直接跑 HTTPS（r.TLS != nil）；
 //   - 可信反向代理明确声明外部协议是 HTTPS（X-Forwarded-Proto: https）；
 //   - 请求来自本机回环地址或 Unix socket（不经过网络）。
 //
-// 反向代理终止 TLS 但既没配 --trusted-proxies、也没开 --cookie-secure 时，
-// 服务端无法确认外部协议，按不安全处理 —— 否则一段明文 HTTP 就能拿到
-// 账号密码和会话。确实无法传递协议时用 --allow-insecure-auth 显式承担风险。
+// 收紧后，反向代理终止 TLS 但既没配 --trusted-proxies、也没开
+// --cookie-secure 时，服务端无法确认外部协议，按不安全处理。
 func (s *Server) secureTransport(r *http.Request) bool {
 	if s.cfg.AllowInsecureAuth {
 		return true
@@ -812,8 +812,9 @@ func isLocalPeer(r *http.Request) bool {
 
 // sessionToken 取出请求里的会话 token（没有则空串）。
 //
-// 明文 HTTP 上不认会话：token 是 bearer 凭据，抓包即可原样复用。
-// 不安全的连接直接返回空串，让请求按匿名处理（页面外壳仍能打开登录框）。
+// 关闭明文认证时，明文 HTTP 上不认会话（token 是 bearer 凭据，抓包即可
+// 原样复用），直接返回空串让请求按匿名处理（页面外壳仍能打开登录框）。
+// 默认 AllowInsecureAuth 开启，此时与普通 cookie 一样读取。
 func (s *Server) sessionToken(r *http.Request) string {
 	if !s.secureTransport(r) {
 		return ""

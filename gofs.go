@@ -316,8 +316,8 @@ func WithTLS(certFile, keyFile string) Option {
 
 // WithAllowInsecureAuth 允许在明文 HTTP 上提交账号密码与会话。
 //
-// 默认关闭：Basic 只是 Base64，同网段抓包即可还原密码。打开后远程明文
-// HTTP 也能登录，只应在受控网络或已有其他链路加密时使用。
+// 默认开启（HTTP 开箱即用）。传入 false 可强制只在 HTTPS 或本机回环上
+// 接受凭据；Basic 只是 Base64，关闭明文认证能避免同网段抓包还原密码。
 func WithAllowInsecureAuth(allow bool) Option {
 	return func(c *Config) { c.AllowInsecureAuth = allow }
 }

@@ -67,9 +67,9 @@
   大小写别名规范化、无鉴权部署的管理接口默认关闭、
   路径前缀注入与监听路径误删防护、可写部署的 index.html 默认沙箱化、
   删号 / 改密自动撤销该账号签发的密钥与分享、PBKDF2 并发闸门（详见下文）
-- **明文 HTTP 默认不承载账号凭据**：Basic / 会话只接受 HTTPS、可信代理声明的
-  HTTPS、或本机回环/Unix socket；远程明文 HTTP 登录直接 403
-  （受控内网可显式 `--allow-insecure-auth`）
+- **HTTP 开箱即用**：默认允许在明文 HTTP 上使用账号密码与会话；
+  需要更严格时可 `--allow-insecure-auth=false`，此时只接受 HTTPS、
+  可信代理声明的 HTTPS、或本机回环/Unix socket，远程明文登录直接 403
 - **`/fs/health` 在启用鉴权后需要登录**，不再对匿名暴露版本号与存活信息
 - 自定义日志格式（`$remote_addr` `$status` `$http_user_agent` …）
 - 可替换的自定义前端资源（`--assets`）
@@ -224,9 +224,9 @@ gofs [选项] [serve-path ...]
       --unsafe-assets-in-root
                              允许 assets 位于服务根内（开发用，可能导致同源 XSS）
       --cookie-secure        强制会话/分享 Cookie 带 Secure（反代终止 TLS 时用）
-      --allow-insecure-auth  允许在明文 HTTP 上提交账号密码与会话，默认关闭
-                             默认只在 HTTPS 或本机回环/Unix socket 接受凭据；
-                             远程明文 HTTP 的 Basic 登录会被 403 拒绝
+      --allow-insecure-auth  允许在明文 HTTP 上提交账号密码与会话，默认开启
+                             设为 false 可强制只在 HTTPS / 本机回环 / Unix
+                             socket 上接受凭据（远程明文 HTTP Basic 会 403）
       --log-format <format>  自定义 HTTP 日志格式（none 可关闭）
       --log-file <file>      日志文件
       --compress <level>     打包压缩级别：none/low/medium/high，默认 low
@@ -505,7 +505,7 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 | 浏览器寿命 | 勾选「保持登录」30 天；否则是浏览器会话级 Cookie（服务端会话本身仍按 30 天/7 天空闲管理） |
 | HttpOnly | JS 读不到 token，XSS 偷不走 |
 | SameSite=Lax | 跨站子资源请求不带它，挡住借已登录身份读私有文件那类攻击 |
-| Secure | HTTPS 下附加（含可信代理声明的 HTTPS）；明文 HTTP 默认根本不发会话 cookie，只有本机回环或显式 `--allow-insecure-auth` 才发（此时不加 Secure）；反代终止 TLS 且未配置可信代理时用 `--cookie-secure` |
+| Secure | HTTPS 下附加（含可信代理声明的 HTTPS）；默认允许明文认证时，纯 HTTP 也会发会话 cookie（不加 Secure，可被抓包复用）；用 `--allow-insecure-auth=false` 收紧后，明文 HTTP 不再发/不认会话；反代终止 TLS 且未配置可信代理时用 `--cookie-secure` |
 | 路径 | 跟随 `--path-prefix`，前缀部署下依然生效 |
 
 登录接口（`GET/POST /fs/auth`）与其它接口一样受认证失败节流约束
@@ -525,22 +525,29 @@ Cookie 就能把同一 IP 上的有效会话和匿名访问一起拖慢。成功
 （账号锁定 DoS）。现在 429 只在「密码已经验过且失败」之后返回，所以只影响
 猜错的人。
 
-⚠️ **明文 HTTP 不承载账号凭据**：Basic 只是 Base64，同网段抓包即可还原密码；
-会话 Cookie 是 bearer 凭据，抓包后可以原样复用。默认只有以下三种连接接受
-Basic / 查询串口令与会话：
+⚠️ **明文 HTTP 默认可用，但它不安全**：Basic 只是 Base64，同网段抓包即可
+还原密码；会话 Cookie 是 bearer 凭据，抓包后可以原样复用。默认允许明文
+认证是为了 HTTP 部署开箱即用；需要收紧时加：
+
+```bash
+gofs --allow-insecure-auth=false ...
+# 或 GOFS_ALLOW_INSECURE_AUTH=false gofs ...
+```
+
+收紧后只有以下三种连接接受 Basic / 查询串口令与会话：
 
 - 本进程直接跑 HTTPS（`--tls-cert` / `--tls-key`）；
 - 可信反向代理明确声明 `X-Forwarded-Proto: https`（需配 `--trusted-proxies`）；
 - 请求来自本机回环地址或 Unix socket。
 
-其余明文连接上的登录请求返回 403 并说明原因；会话 Cookie 直接不予采信并清掉
-（但请求仍按匿名继续，免得用户连登录页都打不开）。确实要在受控内网使用明文时，
-显式加 `--allow-insecure-auth`；反代终止 TLS 但无法传递协议头时，也可以用
-`--cookie-secure` 声明外部链路是 HTTPS。
+其余明文连接上的登录请求会返回 403 并说明原因；会话 Cookie 不予采信并清掉
+（但请求仍按匿名继续，免得用户连登录页都打不开）。反代终止 TLS 但无法传递
+协议头时，也可以用 `--cookie-secure` 声明外部链路是 HTTPS。
 
-⚠️ **前面有反向代理时必须声明它**：配 `--trusted-proxies` 并让代理传
-`X-Forwarded-Proto`（或用 `--cookie-secure` 声明外部是 HTTPS）。否则代理的
-连接会被当成普通本机客户端，服务端无从判断外部链路是不是明文。
+⚠️ **反代终止 TLS 时必须声明它**：配 `--trusted-proxies` 并让代理传
+`X-Forwarded-Proto`（或用 `--cookie-secure` 声明外部是 HTTPS）。否则服务端
+会把连接当作明文：用 `--allow-insecure-auth=false` 收紧时登录会被 403，
+分享链接与 Secure Cookie 也可能退回 `http://`。
 
 上传密钥与分享令牌同样是 bearer 凭据，抓包后可被复用；它们不在上述
 Basic/会话检查范围内（分享链接经常需要 HTTP 工具直接抓取），敏感部署请
@@ -1841,12 +1848,17 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
   启动时重新校验，非法值直接忽略。
 
 **明文 HTTP 与凭据。** HTTP Basic 只是 Base64，不带 TLS 的登录等于把账号密码
-交给同网段任何一个能抓包的人；会话 Cookie 一旦被抓到也能直接复用。默认策略是
-**只在本进程 HTTPS、可信代理声明 `X-Forwarded-Proto: https`、或本机回环 /
-Unix socket 上接受凭据**。其余连接的 Basic / 查询串口令返回 403，会话 Cookie
-不采信并清除（请求按匿名继续，登录页仍能打开）。受控内网确实需要明文时，用
-`--allow-insecure-auth` 显式承担风险；反代终止 TLS 用 `--trusted-proxies` +
-转发头，或用 `--cookie-secure` 声明外部链路。
+交给同网段任何一个能抓包的人；会话 Cookie 一旦被抓到也能直接复用。
+
+- **默认允许明文认证**，方便 HTTP 部署开箱即用。使用 HTTP 就意味着接受上述
+  风险；生产环境应尽快改为 HTTPS。
+- 需要收紧时加 `--allow-insecure-auth=false`（或
+  `GOFS_ALLOW_INSECURE_AUTH=false`）。此时只在本进程 HTTPS、可信代理声明
+  `X-Forwarded-Proto: https`、或本机回环 / Unix socket 上接受凭据；其余连接的
+  Basic / 查询串口令返回 403，会话 Cookie 不采信并清除（请求按匿名继续，
+  登录页仍能打开）。
+- 反代终止 TLS 用 `--trusted-proxies` + 转发头，或用 `--cookie-secure`
+  声明外部链路。
 
 **健康检查需要登录。** 启用鉴权后 `/fs/health` 与其它接口一样要求有效凭据，
 不再对匿名暴露版本号与存活信息。前端重启/卸载轮询把「任何小于 500 的响应」
@@ -2009,8 +2021,8 @@ Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admi
 --allow-share              允许只读实例创建分享链接
 --unsafe-assets-in-root    允许 assets 位于服务根内（开发用，风险自负）
 --cookie-secure            强制会话/分享 Cookie 带 Secure
---allow-insecure-auth      允许在明文 HTTP 上提交账号密码与会话（默认关闭；
-                           默认只接受 HTTPS / 本机回环 / Unix socket 上的凭据）
+--allow-insecure-auth      允许在明文 HTTP 上提交账号密码与会话（默认开启；
+                           设为 false 则只接受 HTTPS / 本机回环 / Unix socket）
                            （也可用 GOFS_ALLOW_INSECURE_AUTH）
 --allow-anonymous-admin    未启用鉴权时仍开放管理接口（默认关闭，风险自负）
 ```
@@ -2032,7 +2044,7 @@ gofs 是个自包含的 HTTP 服务，可以直接听公网端口，也可以躲
 | `proxy_set_header Host $http_host;` | 写操作全部 403、分享链接指向 `127.0.0.1` | 跨站写校验比的是 `Origin` 的 host 与 `r.Host` 是否同源（`internal/server/guard.go`）；分享链接与一键脚本的地址也取自 `r.Host`（`internal/server/up_script.go`） |
 | `proxy_buffering off;` | 在线解压进度条全程不动，结束才刷新 | 解压进度走 SSE（`text/event-stream`），nginx 默认会把响应缓冲起来 |
 | `client_max_body_size 0;` | 稍大的文件上传返回 413 | nginx 默认 1m，而 gofs 单次上传默认允许 10GiB |
-| 启动参数加 `--trusted-proxies 127.0.0.1` | 限速与日志看到的都是代理 IP；分享链接退回 `http://`，Secure cookie 不生效；**启用鉴权时登录会 403** | gofs **默认不采信任何转发头**。nginx 与 gofs 同机时直连对端就是 `127.0.0.1`（unix socket 同理）；不信任代理就无法确认外部是 HTTPS，按明文连接拒绝凭据 |
+| 启动参数加 `--trusted-proxies 127.0.0.1` | 限速与日志看到的都是代理 IP；分享链接退回 `http://`，Secure cookie 不生效；**用 `--allow-insecure-auth=false` 收紧明文认证时登录会 403** | gofs **默认不采信任何转发头**。nginx 与 gofs 同机时直连对端就是 `127.0.0.1`（unix socket 同理）；不信任代理就无法确认外部是 HTTPS |
 
 再配上 `proxy_request_buffering off;`：否则 nginx 会先把整个上传体缓冲到磁盘
 再转发给 gofs，几百 MB 以上的上传会先卡一阵，还可能写满临时目录。
@@ -2046,8 +2058,8 @@ gofs -b 127.0.0.1 -p 5000 --trusted-proxies 127.0.0.1,::1 -a 'admin:密码@/:rw'
 
 没这一行时，上面的 `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto`
 会被**安全地忽略**：限速按代理 IP 统计（所有人共用一个桶），访问日志里也全是
-`127.0.0.1`。启用鉴权时还有更直接的后果 —— 服务端无法确认外部链路是 HTTPS，
-会把代理转发来的明文请求当成不安全连接，Basic 登录返回 403。要么补上
+`127.0.0.1`。如果同时用 `--allow-insecure-auth=false` 收紧明文认证，服务端
+无法确认外部是 HTTPS，代理转发来的 Basic 登录还会返回 403。要么补上
 `--trusted-proxies` 并让代理传 `X-Forwarded-Proto`，要么用 `--cookie-secure`
 声明外部是 HTTPS。
 

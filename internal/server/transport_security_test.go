@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/xxl6097/gofs/internal/config"
 )
 
 // secureConfig 返回一个**没有** --allow-insecure-auth 的测试配置。
@@ -174,6 +176,31 @@ func TestTrustedProxyProtoControlsAuth(t *testing.T) {
 	}
 	if got := doFrom(t, s, "192.0.2.1:1234", http.MethodGet, "/fs/auth", httpReq); got.code != http.StatusForbidden {
 		t.Fatalf("可信代理声明 http 时登录返回 %d，期望 403", got.code)
+	}
+}
+
+// TestDefaultConfigAllowsPlainHTTPAuth 确认默认配置下远程明文 HTTP 也能
+// 登录（HTTP 开箱即用）。收紧模式见 secureConfig 的测试。
+func TestDefaultConfigAllowsPlainHTTPAuth(t *testing.T) {
+	root := t.TempDir()
+	cfg, err := config.Parse([]string{
+		"-b", "127.0.0.1", "-p", "0", "--log-format", "none",
+		"--no-upload-dated", "--key-file", "", "--user-file", "", "--settings-file", "",
+		"-a", "admin:secret@/:rw", root,
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("解析配置失败: %v", err)
+	}
+	if !cfg.AllowInsecureAuth {
+		t.Fatal("默认 AllowInsecureAuth 应为 true（HTTP 开箱即用）")
+	}
+	s := newTestServer(t, cfg)
+
+	if got := do(t, s, http.MethodGet, "/fs/auth", nil, map[string]string{
+		"Authorization": basicAuth("admin", "secret"),
+		"X-Gofs-Ajax":   "1",
+	}); got.code != http.StatusOK {
+		t.Fatalf("默认配置下远程明文 Basic 登录返回 %d，期望 200：%s", got.code, got.body)
 	}
 }
 

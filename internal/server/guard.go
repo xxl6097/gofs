@@ -140,17 +140,18 @@ func (g *guard) acquire(ctx context.Context, sem chan struct{}, wait time.Durati
 }
 
 // ---------------------------------------------------------------------------
-// 传输安全：明文 HTTP 不接受口令与会话
+// 传输安全：可选的「强制 HTTPS」
 // ---------------------------------------------------------------------------
 
-// withSecureAuth 拒绝在明文连接上提交账号密码，并忽略/清理明文连接上的会话。
+// withSecureAuth 在关闭明文认证时，拒绝明文连接上的账号密码并忽略会话。
 //
 // Basic 只是 Base64，同网段抓包就能还原密码；会话 Cookie 是 bearer 凭据，
-// 抓包后可以原样复用。两者在非 TLS 连接上都等于把账号交出去。
+// 抓包后可以原样复用。默认为了 HTTP 开箱即用是允许的；需要收紧时用
+// --allow-insecure-auth=false 关闭，此时只在以下情况放行（见 secureTransport）：
+// 直接 HTTPS、可信代理声明 HTTPS、本机回环/Unix socket。
 //
-// 放行的三种情况见 secureTransport：直接 HTTPS、可信代理声明 HTTPS、
-// 本机回环/Unix socket。其余情况：
-//   - 带 Basic / 查询串口令 → 403，并提示改用 HTTPS 或 --allow-insecure-auth；
+// 关闭明文认证后，其余情况：
+//   - 带 Basic / 查询串口令 → 403，并提示改用 HTTPS；
 //   - 只带会话 cookie → 不认它（sessionToken 返回空），顺手清掉，继续按匿名处理。
 //     不直接 403 是为了让浏览器还能打开登录页；否则带着一张旧 cookie
 //     的用户会看到一张错误页，连改配置的入口都没有。
@@ -163,7 +164,7 @@ func (s *Server) withSecureAuth(next http.Handler) http.Handler {
 		if hasPasswordCredentials(r) {
 			w.Header().Set("Cache-Control", "no-store")
 			msg := "账号密码不能通过明文 HTTP 传输：请改用 HTTPS，" +
-				"或在受控内网中显式启用 --allow-insecure-auth"
+				"或用 --allow-insecure-auth（默认开启）允许明文认证"
 			if r.Header.Get("X-Gofs-Ajax") == "1" {
 				s.writeJSONStatus(w, http.StatusForbidden, map[string]any{"message": msg})
 				return

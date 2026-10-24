@@ -75,19 +75,19 @@ func (s *Server) Banner(w io.Writer) {
 	default:
 		fmt.Fprintf(w, "  鉴权      : 已启用（账号来自用户表），页面使用 Basic 认证\n")
 	}
-	// 启用鉴权时把「凭据能走哪种连接」说清楚：默认只接受 HTTPS 或本机
-	// 回环，远程明文 HTTP 登录会被拒绝。不打印这一行的话，LAN 部署的
-	// 用户会看到登录框却怎么都登不进去。
+	// 启用鉴权时把「凭据能走哪种连接」说清楚：先报 HTTPS / 反代，
+	// 都没配置时才提示默认允许明文认证。不打印这一行的话，LAN 部署的
+	// 用户会看到登录框却怎么都登不进去（收紧模式）。
 	if s.inner.AuthEnabled() {
 		switch {
-		case cfg.AllowInsecureAuth:
-			fmt.Fprintf(w, "  传输安全  : 允许明文认证（--allow-insecure-auth，密码可能被同网段抓包）\n")
 		case cfg.TLSCert != "":
 			fmt.Fprintf(w, "  传输安全  : HTTPS（本进程终止 TLS）\n")
 		case cfg.CookieSecure:
 			fmt.Fprintf(w, "  传输安全  : 外部 HTTPS（--cookie-secure 声明）\n")
 		case len(cfg.TrustedProxies) > 0:
 			fmt.Fprintf(w, "  传输安全  : 需经可信代理声明 X-Forwarded-Proto: https\n")
+		case cfg.AllowInsecureAuth:
+			fmt.Fprintf(w, "  传输安全  : 允许明文认证（默认；--allow-insecure-auth=false 可强制 HTTPS，密码可能被同网段抓包）\n")
 		default:
 			fmt.Fprintf(w, "  传输安全  : 仅 HTTPS / 本机回环接受账号密码；远程明文 HTTP 登录会被拒绝\n")
 		}
