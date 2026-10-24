@@ -28,10 +28,14 @@ func runUpScript(t *testing.T, body string, args []string, env map[string]string
 	// 输出格式模仿 -w '%{http_code} %{redirect_url}'。
 	fakeCurl := `#!/bin/sh
 url=""
+out=""
 probe=0
+prev=""
 for a in "$@"; do
   [ "$a" = "-I" ] && probe=1
+  [ "$prev" = "-o" ] && out="$a"
   url="$a"
+  prev="$a"
 done
 printf '%s\n' "$*" >> "$CURL_LOG"
 http="${FAKE_HTTP_CODE:-307}"
@@ -41,6 +45,7 @@ case "$url" in
   http://*)  printf '%s %s\n' "$http" "https://gofs.test/" ;;
   *)         printf '000 \n' ;;
 esac
+[ -n "$out" ] && printf '%s' "${FAKE_BODY:-}" > "$out"
 `
 	curlPath := filepath.Join(binDir, "curl")
 	if writeErr := os.WriteFile(curlPath, []byte(fakeCurl), 0o755); writeErr != nil {
@@ -170,6 +175,46 @@ func TestUpScriptReportsRedirectFailure(t *testing.T) {
 	if !strings.Contains(stderr, "跳转未完成") {
 		t.Errorf("没有给出跳转失败提示：\n%s", stderr)
 	}
+}
+
+// TestUpScriptPrintsServerResponseBody 确认上传接口返回的数据会被打印：
+// 失败时进 stderr（否则只看到 HTTP 403，不知道原因），成功时进 stdout。
+func TestUpScriptPrintsServerResponseBody(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(local, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("写文件: %v", err)
+	}
+
+	t.Run("失败时打印服务端错误说明", func(t *testing.T) {
+		const body = "403 Forbidden: 上传目标超出该密钥允许的范围"
+		stdout, stderr, _, err := runUpScript(t, upScriptForTest("http://gofs.test/docs/"),
+			[]string{local}, map[string]string{
+				"FAKE_HTTP_CODE": "403",
+				"FAKE_BODY":      body,
+			})
+		if err == nil {
+			t.Fatal("403 被当成了成功")
+		}
+		if !strings.Contains(stderr, "HTTP 403") || !strings.Contains(stderr, body) {
+			t.Fatalf("失败输出里缺少状态码或服务端返回体：\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+	})
+
+	t.Run("成功时打印服务端 JSON", func(t *testing.T) {
+		const body = `{"count":1,"dest":"/docs","saved":["/docs/f.txt"]}`
+		stdout, stderr, _, err := runUpScript(t, upScriptForTest("http://gofs.test/docs/"),
+			[]string{local}, map[string]string{
+				"FAKE_HTTP_CODE": "201",
+				"FAKE_BODY":      body,
+			})
+		if err != nil {
+			t.Fatalf("脚本失败: %v\n%s\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, body) {
+			t.Fatalf("成功输出里没有服务端返回体：\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+	})
 }
 
 // TestUpScriptReportsHTTPError 确认 4xx 会带上状态码、且不触发 https 重试。

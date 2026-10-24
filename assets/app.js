@@ -986,14 +986,14 @@
 
   // SHARE_TTLS 是分享链接可选的有效期。
   //
-  // 没有「永久」这一档：分享链接会把内容公开出去，而一条永不过期的公开
-  // 地址一旦流出就再也收不回来了。要长期开放就每次续一下，或者走
-  // 「密钥」面板里那条真正的永久选项（那里是显式操作）。
+  // 「永久有效」需要用户显式选择：公开地址一旦流出就收不回来，所以它排在
+  // 最后、默认仍是 7 天，选中时说明块会给出醒目提示。
   var SHARE_TTLS = [
     { label: '1 小时', seconds: 3600 },
     { label: '1 天', seconds: 86400 },
     { label: '7 天', seconds: 604800 },
-    { label: '30 天', seconds: 2592000 }
+    { label: '30 天', seconds: 2592000 },
+    { label: '永久有效', seconds: 0 }
   ];
 
   // SHARE_PERMS 是分享链接可选的权限级别，kind 直接对应后端的凭证类型。
@@ -1059,10 +1059,12 @@
     var hint = document.createElement('div');
     hint.className = 'hint-box';
 
-    // 说明随权限级别实时改写：可读写要红框提示，因为它能删文件。
+    // 说明随权限级别/有效期实时改写：可读写能删文件，永久有效则意味着
+    // 这条公开地址一旦流出就收不回来 —— 两者都用醒目样式提示。
     function syncHint() {
       var rw = permSel.value === 'readwrite';
-      hint.className = 'hint-box' + (rw ? ' danger' : '');
+      var permanent = sel.value === '0';
+      hint.className = 'hint-box' + (rw || permanent ? ' danger' : '');
       // 走 setRichText 而不是 textContent：文案里的 **不需要登录** 是要
       // 加粗给人看的，直接贴上去用户会看见两颗星号。
       setRichText(hint, '任何拿到这条链接的人都能' +
@@ -1070,9 +1072,12 @@
         '，**不需要登录**。' +
         (rw ? '可读写：对方还能上传、新建、重命名、删除其中的内容，' +
           '请只发给你信任的人。' : '') +
-        '链接到期自动失效，也可以随时在「密钥」面板里撤销。');
+        (permanent
+          ? '这条链接**永不过期**，只能手动在「密钥」面板里撤销，请谨慎使用。'
+          : '链接到期自动失效，也可以随时在「密钥」面板里撤销。'));
     }
     permSel.onchange = syncHint;
+    sel.onchange = syncHint;
     syncHint();
 
     var body = document.createElement('div');

@@ -27,7 +27,8 @@ const upScriptName = "/up"
 //   - **保留目录层级**：上传一个目录时，里面的子目录结构在服务端原样重建。
 //     靠的是 multipart 的 path 字段 —— 单靠文件名不行，服务端会把
 //     多部分文件名压平到它的基本名。
-//   - 只用 curl 和 bash，没有别的依赖。
+//   - 只用 curl、bash 和标准 Unix 工具（find/dirname/basename/mktemp），
+//     没有别的依赖。
 //
 // __KEY__ 与 __BASE__ 在脚本里处于单引号中，替换前做 shell 转义；
 // __SCOPE__ 只出现在注释里，替换前去掉控制字符（注释不认引号，换行会
@@ -64,6 +65,22 @@ fi
 ok=0
 bad=0
 
+# 每次上传的服务端响应体写进这个临时文件。上传接口返回的 JSON/错误说明
+# 是排查 403/413/409 的关键，不能像以前那样直接丢进 /dev/null。
+BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/gofs-up.XXXXXX") || {
+  echo "无法创建临时文件" >&2
+  exit 1
+}
+trap 'rm -f "$BODY_FILE"' EXIT
+
+# print_body <缩进>：打印最近一次上传的响应体；为空时什么也不做。
+print_body() {
+  local body
+  body=$(<"$BODY_FILE") || body=""
+  [ -n "$body" ] || return 0
+  printf '%s%s\n' "$1" "$body"
+}
+
 # 反代终止 TLS 时，服务端可能不知道外部用的是 HTTPS，把地址写成了 http://。
 # 先用一个**不带密钥**的 HEAD 探一下：明文地址若被跳到 https，就把 BASE
 # 一次换掉 —— 既避免把密钥和文件先发到明文连接上，也避免每个文件白传一遍。
@@ -83,12 +100,13 @@ fi
 # 上传内容根本没发出去，脚本却会报成功。
 post_once() {
   local url="$1" file="$2" target="$3"
+  : > "$BODY_FILE"
   if [ -n "$target" ]; then
-    curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+    curl -sS -o "$BODY_FILE" -w '%{http_code} %{redirect_url}' \
       -H "X-Gofs-Upload-Key: $KEY" \
       -F "path=$target" -F "file=@$file" "$url"
   else
-    curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+    curl -sS -o "$BODY_FILE" -w '%{http_code} %{redirect_url}' \
       -H "X-Gofs-Upload-Key: $KEY" \
       -F "file=@$file" "$url"
   fi
@@ -105,6 +123,7 @@ post() {
   url="$BASE"
   if ! resp=$(post_once "$url" "$1" "$target"); then
     echo "  ✗ $rel（连接失败）" >&2
+    print_body "    " >&2
     bad=$((bad + 1))
     return
   fi
@@ -119,6 +138,7 @@ post() {
     url="https://${url#http://}"
     if ! resp=$(post_once "$url" "$1" "$target"); then
       echo "  ✗ $rel（改用 https 重试失败）" >&2
+      print_body "    " >&2
       bad=$((bad + 1))
       return
     fi
@@ -128,16 +148,19 @@ post() {
   case "$code" in
     2??)
       echo "  ✓ ${target:+$target/}$(basename "$rel")"
+      print_body "    "
       ok=$((ok + 1))
       ;;
     3??)
       # 跳过去了却没找到可用的 https 地址：多半是反代没把
       # X-Forwarded-Proto 传给服务端，或服务端没配 --trusted-proxies。
       echo "  ✗ $rel（HTTP $code 跳转未完成，检查反代的 X-Forwarded-Proto 与 --trusted-proxies）" >&2
+      print_body "    " >&2
       bad=$((bad + 1))
       ;;
     *)
       echo "  ✗ $rel（HTTP $code）" >&2
+      print_body "    " >&2
       bad=$((bad + 1))
       ;;
   esac

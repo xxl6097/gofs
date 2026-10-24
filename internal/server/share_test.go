@@ -242,6 +242,46 @@ func TestShareCookieForSPA(t *testing.T) {
 	}
 }
 
+// TestPermanentShareLink 确认分享链接可以永不过期。
+//
+// ttl_seconds=0 在存储层一直表示「永久」，但界面曾经刻意不提供这一档。
+// 这里从 API 走完整链路：创建 -> 返回 permanent=true -> 链接立即可用。
+func TestPermanentShareLink(t *testing.T) {
+	s, _ := shareServer(t)
+	payload := `{"name":"永久分享","scope":"/docs","kind":"read","ttl_seconds":0}`
+	created := do(t, s, http.MethodPost, "/fs/keys", strings.NewReader(payload),
+		map[string]string{
+			"Content-Type":  "application/json",
+			"Authorization": basicAuth("boss", "pw"),
+		})
+	if created.code != http.StatusCreated {
+		t.Fatalf("创建永久分享返回 %d：%s", created.code, created.body)
+	}
+
+	var d struct {
+		Key   map[string]any `json:"key"`
+		Token string         `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(created.body), &d); err != nil {
+		t.Fatalf("解析创建结果失败: %v\n%s", err, created.body)
+	}
+	if d.Token == "" {
+		t.Fatal("没有返回分享令牌")
+	}
+	if permanent, _ := d.Key["permanent"].(bool); !permanent {
+		t.Fatalf("permanent = %v，期望 true：%s", d.Key["permanent"], created.body)
+	}
+	if _, has := d.Key["expires_at"]; has {
+		t.Errorf("永久分享不应带 expires_at：%s", created.body)
+	}
+
+	// 链接必须立即可用，而且不依赖登录。
+	got := do(t, s, http.MethodGet, "/docs/readme.txt?share="+d.Token, nil, nil)
+	if got.code != http.StatusOK || !strings.Contains(got.body, "内容:docs/readme.txt") {
+		t.Fatalf("永久分享读取失败：%d %s", got.code, got.body)
+	}
+}
+
 // TestKeyViewReportsKind 确认列表里能区分两种凭证（界面上要标出来）。
 func TestKeyViewReportsKind(t *testing.T) {
 	s, _ := shareServer(t)
