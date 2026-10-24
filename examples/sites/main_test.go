@@ -56,7 +56,7 @@ func call(t *testing.T, ts *httptest.Server, method, path string, body io.Reader
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.SetBasicAuth("admin", "admin123")
+	req.SetBasicAuth("gofs", "gofs123")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -133,10 +133,10 @@ func TestDemoScopesPerSite(t *testing.T) {
 		got != http.StatusUnauthorized {
 		t.Errorf("uploader 读主目录返回 %d，期望被拒", got)
 	}
-	// admin 两边都行。
+	// gofs 两边都行。
 	for _, p := range []string{"/a.txt", "/uploads/u.txt"} {
-		if got := ask("admin", "admin123", p); got != http.StatusOK {
-			t.Errorf("admin 读 %s 返回 %d，期望 200", p, got)
+		if got := ask("gofs", "gofs123", p); got != http.StatusOK {
+			t.Errorf("gofs 读 %s 返回 %d，期望 200", p, got)
 		}
 	}
 }

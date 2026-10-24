@@ -721,10 +721,8 @@ func (s *Server) requireLogin(w http.ResponseWriter, r *http.Request) (permResul
 	}
 	user, pass, hasCred, class := credentialsWithSource(r)
 	if hasCred && user != "" {
-		ip, ok := s.checkAuthLimit(w, r, class, user)
-		if !ok {
-			return permResult{}, false
-		}
+		// 先验口令，失败后才由 noteAuthFailureAndReply 决定 401/429。
+		ip := s.clientIP(r)
 		if !s.auth.Verify(user, pass) {
 			if s.noteAuthFailureAndReply(w, ip, class, user) {
 				return permResult{}, false
@@ -814,10 +812,9 @@ func (s *Server) requireAdminOr(w http.ResponseWriter, r *http.Request, action s
 		return false
 	}
 	user, pass, hasCred, class := credentialsWithSource(r)
-	ip, ok := s.checkAuthLimit(w, r, class, user)
-	if !ok {
-		return false
-	}
+	// 先验口令，失败后才由 noteAuthFailureAndReply 决定 401/429；
+	// 锁定状态不会在验口令前拒绝请求。
+	ip := s.clientIP(r)
 
 	if hasCred {
 		// 显式凭据：先验密码，再判断权限。密码错误才计入失败，

@@ -50,10 +50,8 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if hasCred {
 		// Basic 凭据本身也要先验过：否则只要知道一个账号名，就能从
 		// 「来自启动参数」这类错误里区分出它存不存在，甚至绕过失败计数。
-		ip, ok := s.checkAuthLimit(w, r, class, user)
-		if !ok {
-			return
-		}
+		// 先验口令，失败后才由 noteAuthFailureAndReply 决定 401/429。
+		ip := s.clientIP(r)
 		if user == "" || !s.auth.Verify(user, pass) {
 			if s.noteAuthFailureAndReply(w, ip, class, user) {
 				return
@@ -78,12 +76,11 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		user = u
 	}
 
-	// 这条路径还会验证一次当前密码，必须和登录共用一套失败限速；
+	// 这条路径还会验证一次当前密码，必须和登录共用一套失败计数；
 	// 单独一档，避免改密失败把登录/匿名访问连坐节流。
-	ip, ok := s.checkAuthLimit(w, r, authClassPassword, user)
-	if !ok {
-		return
-	}
+	// 锁定状态不在这里提前拒绝：先让 ChangePassword 验当前密码，
+	// 只有验错才回 401/429。
+	ip := s.clientIP(r)
 
 	var req passwordChangeRequest
 	if !s.decodeJSON(w, r, &req) {

@@ -33,11 +33,11 @@ uitest:
 	NODE_PATH=$(NODE_MODULES) $(NODE_BIN) scripts/test-ui.mjs $(GOFS_URL)
 
 ## run-auth: 以鉴权模式启动，供 uitest / settings-check / users-check 使用
-##   admin 可写根目录；test 只读，用来验证「改设置需要根目录写权限」
+##   boss 可写根目录；test 只读，用来验证「改设置需要根目录写权限」
 ##   ⚠️ 显式指定 --user-file 指向临时文件：否则测试会写进你真实的
 ##      <用户配置目录>/gofs/users.json，那里面可能有你在用的账号。
 run-auth: build
-	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'admin:secret@/:rw' -a 'test:test@/' \
+	./$(BINARY) -A -b 127.0.0.1 -p 5000 -a 'boss:secret@/:rw' -a 'test:test@/' \
 	  --user-file /tmp/gofs-run-auth-users.json ./data
 
 ## settings-check: 端到端校验「服务设置」（权限 / 范围约束 / CSRF / 上限生效）

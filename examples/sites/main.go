@@ -12,7 +12,7 @@
 //	go build -o /tmp/gofs-sites ./examples/sites
 //	/tmp/gofs-sites -root ./data -site ./backup -site /srv/projects
 //
-//	# 打开页面用 admin / admin123 登录 →
+//	# 打开页面用 gofs / gofs123 登录 →
 //	# 「设置 → 常规 → 附加站点」里可以随时加/删站点
 //
 //	# 只想静态挂几个目录、不许页面上改：
@@ -76,7 +76,7 @@ func main() {
 	}
 	srv.Banner(os.Stdout)
 
-	fmt.Printf("\n打开 %s ，用 admin / admin123 登录。\n", srv.URL())
+	fmt.Printf("\n打开 %s ，用 gofs / gofs123 登录。\n", srv.URL())
 	for _, m := range srv.Mounts() {
 		if m.Primary {
 			fmt.Printf("  主目录 %-14s →  %s\n", m.Root, m.URLPath)
@@ -143,7 +143,7 @@ func build(o buildOptions) (*gofs.Server, error) {
 	}
 
 	// 两个账号演示「按站点分权限」：
-	//   admin    —— 整个服务读写；
+	//   gofs    —— 整个服务读写；
 	//   uploader —— 只在自己那个站点的路径下有权限。
 	//
 	// ⚠️ 权限规则里的路径要**带上标签**：站点挂在 /<标签>/ 下，所以
@@ -152,7 +152,7 @@ func build(o buildOptions) (*gofs.Server, error) {
 	//
 	// 标签默认就是目录名，所以这里按第一个站点的目录名推导；重名时会加
 	// -2/-3 后缀，那时这条规则要跟着改（示例只覆盖常见情况）。
-	rules := []string{"admin:admin123@/:rw"}
+	rules := []string{"gofs:gofs123@/:rw"}
 	if len(o.roots) > 1 {
 		rules = append(rules, "uploader:upload123@"+sitePath(o.roots[1])+":rw")
 	}

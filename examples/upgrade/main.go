@@ -75,7 +75,7 @@ func main() {
 		gofs.WithPort(*port),
 		gofs.WithVersion(*version),
 		gofs.WithAllowAll(),
-		gofs.WithAuth("admin:admin123@/:rw"),
+		gofs.WithAuth("gofs:gofs123@/:rw"),
 		// 密钥 / 用户表 / 运行期设置都放内存，别碰开发者本机的真实配置。
 		// 少了 settings 那一项的话，示例会读到（并写坏）你真实环境里存的
 		// 站点标题、访问前缀、监听地址 —— 表现为「示例一启动就在 /files 下」。
@@ -108,7 +108,7 @@ func main() {
 		log.Fatalf("启动失败: %v", err)
 	}
 	srv.Banner(os.Stdout)
-	fmt.Printf("\n打开 %s ，用 admin / admin123 登录，\n", srv.URL())
+	fmt.Printf("\n打开 %s ，用 gofs / gofs123 登录，\n", srv.URL())
 	fmt.Printf("在「设置 → 升级与重启」里点「检查更新」。%s\n\n", dryRunNote(*dryRun))
 
 	if err := srv.Run(ctx); err != nil {

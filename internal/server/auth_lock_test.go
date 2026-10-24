@@ -11,12 +11,15 @@ import (
 	"github.com/xxl6097/gofs/internal/config"
 )
 
-// lockStateOf 读取某个账号锁定记录（测试内部用）。
-func lockStateOf(t *testing.T, s *Server, user string) (time.Time, int) {
+// testClientIP 是 httptest.NewRequest 的默认 RemoteAddr 主机地址。
+const testClientIP = "192.0.2.1"
+
+// lockStateOf 读取某个「来源 IP + 账号」的锁定记录（测试内部用）。
+func lockStateOf(t *testing.T, s *Server, ip, user string) (time.Time, int) {
 	t.Helper()
 	s.guard.mu.Lock()
 	defer s.guard.mu.Unlock()
-	rec := s.guard.fails[authLockKey(user)]
+	rec := s.guard.fails[authLockKey(ip, user)]
 	if rec == nil {
 		return time.Time{}, 0
 	}
@@ -39,8 +42,10 @@ func TestAuthLockNoRenewalOnPolling(t *testing.T) {
 		"-a", "alice:apw@/:rw",
 		"-a", "bob:bpw@/:rw",
 		"--auth-fail-limit", "3",
-		"--auth-lock-base-delay", "400ms",
-		"--auth-lock-max-delay", "2s",
+		// 退避期必须明显长于 20 次轮询的耗时：短到几百毫秒时，
+		// 机器一慢（-race / CI）轮询就会落在解封之后，测试变成 flaky。
+		"--auth-lock-base-delay", "5s",
+		"--auth-lock-max-delay", "10s",
 		// 把 IP / 全局维度调高，避免它们干扰本测试。
 		"--auth-fail-ip-limit", "1000",
 		"--auth-fail-global-limit", "10000"))
@@ -52,12 +57,12 @@ func TestAuthLockNoRenewalOnPolling(t *testing.T) {
 	}
 
 	lock("alice")
-	aUntil, aFails := lockStateOf(t, s, "alice")
+	aUntil, aFails := lockStateOf(t, s, testClientIP, "alice")
 	if aUntil.IsZero() {
 		t.Fatal("alice 未进入锁定")
 	}
 	lock("bob")
-	bUntil, bFails := lockStateOf(t, s, "bob")
+	bUntil, bFails := lockStateOf(t, s, testClientIP, "bob")
 	if bUntil.IsZero() {
 		t.Fatal("bob 未进入锁定")
 	}
@@ -71,18 +76,18 @@ func TestAuthLockNoRenewalOnPolling(t *testing.T) {
 		if r.code != http.StatusTooManyRequests {
 			t.Fatalf("锁定期间第 %d 次轮询返回 %d，期望 429", i+1, r.code)
 		}
-		if got, _ := lockStateOf(t, s, "alice"); !got.Equal(aUntil) {
+		if got, _ := lockStateOf(t, s, testClientIP, "alice"); !got.Equal(aUntil) {
 			t.Fatalf("第 %d 次轮询续期了锁定：原 %s，现 %s", i+1, aUntil, got)
 		}
 	}
-	aAfter, aFailsAfter := lockStateOf(t, s, "alice")
+	aAfter, aFailsAfter := lockStateOf(t, s, testClientIP, "alice")
 	if !aAfter.Equal(aUntil) {
 		t.Fatalf("轮询后续期：alice 解锁时间 %s -> %s", aUntil, aAfter)
 	}
 	if aFailsAfter != aFails {
 		t.Fatalf("轮询后失败计数被累加：%d -> %d", aFails, aFailsAfter)
 	}
-	bAfter, bFailsAfter := lockStateOf(t, s, "bob")
+	bAfter, bFailsAfter := lockStateOf(t, s, testClientIP, "bob")
 	if !bAfter.Equal(bUntil) || bFailsAfter != bFails {
 		t.Fatalf("未请求的 bob 状态发生了变化：until %s -> %s, fails %d -> %d",
 			bUntil, bAfter, bFails, bFailsAfter)
@@ -130,8 +135,9 @@ func TestAuthLockRetryAfterCountsDown(t *testing.T) {
 	s := newTestServer(t, testConfig(t, t.TempDir(),
 		"-a", "admin:secret@/:rw",
 		"--auth-fail-limit", "2",
-		"--auth-lock-base-delay", "3s",
-		"--auth-lock-max-delay", "10s",
+		// 留足余量，避免 -race / CI 下校验耗时把退避期吃掉。
+		"--auth-lock-base-delay", "10s",
+		"--auth-lock-max-delay", "30s",
 		"--auth-fail-ip-limit", "1000",
 		"--auth-fail-global-limit", "10000"))
 
@@ -161,10 +167,9 @@ func TestAuthLockRetryAfterCountsDown(t *testing.T) {
 	}
 }
 
-// TestAuthLockAdminExemptRecovery 验证本机管理通道：
-// 远程来源被锁后，从 127.0.0.1 用正确口令登录可以立即恢复，
-// 并把该账号在远程来源上的锁定状态一并清零。
-func TestAuthLockAdminExemptRecovery(t *testing.T) {
+// TestAuthLockCorrectPasswordBypassesLock 验证新策略的核心语义：
+// 锁定只影响错误口令的响应；正确口令照常登录，并在成功后清除该来源的锁。
+func TestAuthLockCorrectPasswordBypassesLock(t *testing.T) {
 	s := newTestServer(t, testConfig(t, t.TempDir(),
 		"-a", "admin:secret@/:rw",
 		"--auth-fail-limit", "3",
@@ -173,25 +178,81 @@ func TestAuthLockAdminExemptRecovery(t *testing.T) {
 		"--auth-fail-ip-limit", "1000",
 		"--auth-fail-global-limit", "10000"))
 
+	remote := testClientIP + ":1234"
 	for i := 0; i < 3; i++ {
-		do(t, s, http.MethodGet, "/?json", nil, badBasic("admin"))
+		doFrom(t, s, remote, http.MethodGet, "/?json", badBasic("admin"))
 	}
-	remote := "192.0.2.1:1234"
-	if r := doFrom(t, s, remote, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusTooManyRequests {
-		t.Fatalf("远程来源在锁定期间正确密码返回 %d，期望 429", r.code)
+	if locked, _ := s.authThrottled(testClientIP, authClassBasic, "admin"); !locked {
+		t.Fatal("3 次失败后该来源+账号未进入锁定")
+	}
+	// 锁定期内继续输错：口令仍会被验证，失败后回 429。
+	if r := doFrom(t, s, remote, http.MethodGet, "/?json", badBasic("admin")); r.code != http.StatusTooManyRequests {
+		t.Fatalf("锁定期内错误口令返回 %d，期望 429", r.code)
+	}
+	// 锁定期内正确口令：不受 429 影响。
+	if r := doFrom(t, s, remote, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusOK {
+		t.Fatalf("锁定期内正确密码返回 %d，期望 200", r.code)
+	}
+	// 成功登录清除了当前来源的锁定记录。
+	if locked, _ := s.authThrottled(testClientIP, authClassBasic, "admin"); locked {
+		t.Fatal("正确登录后当前来源的锁定未清除")
+	}
+}
+
+// TestAuthLockIsolatedBySourceIP 验证失败计数按「IP + 用户名」隔离：
+// 另一个来源 IP 不会因为别人猜错而看到 429，也不需要等退避期。
+func TestAuthLockIsolatedBySourceIP(t *testing.T) {
+	s := newTestServer(t, testConfig(t, t.TempDir(),
+		"-a", "admin:secret@/:rw",
+		"--auth-fail-limit", "3",
+		"--auth-lock-base-delay", "5m",
+		"--auth-lock-max-delay", "30m",
+		"--auth-fail-ip-limit", "1000",
+		"--auth-fail-global-limit", "10000"))
+
+	attacker := "198.51.100.7:1234"
+	for i := 0; i < 3; i++ {
+		doFrom(t, s, attacker, http.MethodGet, "/?json", badBasic("admin"))
+	}
+	if locked, _ := s.authThrottled("198.51.100.7", authClassBasic, "admin"); !locked {
+		t.Fatal("攻击来源未进入锁定")
 	}
 
-	// 管理员从本机回环直连：豁免锁定，正确口令立即登录成功。
-	local := doFrom(t, s, "127.0.0.1:4321", http.MethodGet, "/?json", goodBasic("admin", "secret"))
-	if local.code != http.StatusOK {
-		t.Fatalf("本机恢复通道登录返回 %d，期望 200", local.code)
+	// 同一账号、另一个来源：错误口令仍回 401，而不是 429。
+	other := "203.0.113.9:1234"
+	if r := doFrom(t, s, other, http.MethodGet, "/?json", badBasic("admin")); r.code != http.StatusUnauthorized {
+		t.Fatalf("其它来源首次错误口令返回 %d，期望 401", r.code)
 	}
-	if locked, _ := s.authThrottled("192.0.2.1", authClassBasic, "admin"); locked {
-		t.Fatal("本机登录成功后远程来源的锁定未被清除")
+	// 另一个来源的正确口令当然也能登录。
+	if r := doFrom(t, s, other, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusOK {
+		t.Fatalf("其它来源正确密码返回 %d，期望 200", r.code)
 	}
-	// 远程来源随即恢复。
-	if r := doFrom(t, s, remote, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusOK {
-		t.Fatalf("恢复后远程来源正确密码返回 %d，期望 200", r.code)
+	// 攻击来源自己用正确密码也能立即登录（锁定不阻止正确凭据）。
+	if r := doFrom(t, s, attacker, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusOK {
+		t.Fatalf("锁定来源的正确密码返回 %d，期望 200", r.code)
+	}
+}
+
+// TestAuthLockExemptSourceNotCounted 验证管理员恢复通道：豁免来源的失败
+// 不进入锁定记录，因此本机不会因为反复输错而被账号锁拖慢。
+func TestAuthLockExemptSourceNotCounted(t *testing.T) {
+	s := newTestServer(t, testConfig(t, t.TempDir(),
+		"-a", "admin:secret@/:rw",
+		"--auth-fail-limit", "2",
+		"--auth-lock-base-delay", "5m",
+		"--auth-lock-max-delay", "30m",
+		"--auth-fail-ip-limit", "1000",
+		"--auth-fail-global-limit", "10000"))
+
+	local := "127.0.0.1:4321"
+	for i := 0; i < 5; i++ {
+		doFrom(t, s, local, http.MethodGet, "/?json", badBasic("admin"))
+	}
+	if locked, _ := s.authThrottled("127.0.0.1", authClassBasic, "admin"); locked {
+		t.Fatal("豁免来源不应进入锁定")
+	}
+	if r := doFrom(t, s, local, http.MethodGet, "/?json", goodBasic("admin", "secret")); r.code != http.StatusOK {
+		t.Fatalf("豁免来源正确密码返回 %d，期望 200", r.code)
 	}
 }
 
@@ -239,7 +300,7 @@ func TestAuthLockSuccessClearsState(t *testing.T) {
 	if r := do(t, s, http.MethodGet, "/?json", nil, goodBasic("admin", "secret")); r.code != http.StatusOK {
 		t.Fatalf("成功登录返回 %d，期望 200", r.code)
 	}
-	if until, fails := lockStateOf(t, s, "admin"); !until.IsZero() || fails != 0 {
+	if until, fails := lockStateOf(t, s, testClientIP, "admin"); !until.IsZero() || fails != 0 {
 		t.Fatalf("成功登录后状态未清零：until=%s fails=%d", until, fails)
 	}
 	// 重新累计两次仍不应锁定（计数从 0 开始）。

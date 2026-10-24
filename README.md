@@ -61,8 +61,9 @@
 - **面向大文件与恶意使用的防护**：流式传输（内存与文件大小无关）、
   「无进展」超时（慢速大文件不被误杀）、断点续传、CSRF / 暴力破解 /
   慢速攻击 / 资源耗尽防护、存储型 XSS 与日志注入防护；
-  **转发头默认不采信**（只认可信代理）、所有能验口令的接口共用账号锁定
-  （按账号计数、指数退避；另有 IP / 全局维度拦截口令喷洒）、
+  **转发头默认不采信**（只认可信代理）、所有能验口令的接口共用
+  「IP + 账号」失败计数（先验口令，正确密码不受 429 影响；指数退避，
+  另有 IP / 全局维度拦截口令喷洒）、
   访问日志自动脱敏凭据（含上传密钥头）、软链逃逸与真实路径复核、编码 `..` 越权防护、
   大小写别名规范化、无鉴权部署的管理接口默认关闭、
   路径前缀注入与监听路径误删防护、可写部署的 index.html 默认沙箱化、
@@ -145,14 +146,15 @@ go build -o gofs ./cmd/gofs
 # 明确只开解压，不开上传删除
 ./gofs --allow-extract ./uploads
 
-# 需要账号密码：admin 全目录读写，guest 只读
-./gofs -a admin:123@/:rw -a guest:guest@/ -A ./data
+# 需要账号密码：boss 全目录读写，guest 只读
+# 别用 admin / root 这类默认名：定向攻击只需要知道用户名
+./gofs -a boss:123@/:rw -a guest:guest@/ -A ./data
 
 # 只开在线编辑，不开上传删除
 ./gofs --allow-edit ./docs
 
 # 完整示例：鉴权 + 编辑 + 解压 + 密钥
-./gofs -A -a admin:123@/:rw -b 127.0.0.1 -p 5000 ./data
+./gofs -A -a boss:123@/:rw -b 127.0.0.1 -p 5000 ./data
 ```
 
 启动后会打印当前生效的配置：
@@ -266,15 +268,18 @@ gofs [选项] [serve-path ...]
       --max-concurrent-jobs <n>
                              同时进行的重任务数上限，默认 64
                              （上传 / 解压 / 打包 / Office 预览 / ?hash 摘要）
-      --auth-fail-limit <n>  同一账号连续失败多少次后锁定，默认 10
+      --auth-fail-limit <n>  同一「来源 IP + 账号」连续失败多少次后
+                             错误口令改为回 429，默认 10；0 表示关闭
       --auth-lock-base-delay <d>
-                             账号锁定的基础退避时长，默认 1m（首次锁定）
+                             失败退避的基础时长，默认 1m（首次）
                              之后每次再触发翻倍
       --auth-lock-max-delay <d>
                              指数退避的封顶时长，默认 30m
       --auth-lock-exempt <ips>
-                             豁免账号锁定的来源 IP/CIDR，默认仅 127.0.0.1/32,::1/128
-                             管理员可从本机直连并用正确口令解锁
+                             豁免「来源 IP + 账号」失败计数的来源 IP/CIDR，
+                             默认仅 127.0.0.1/32,::1/128
+                             本机反复输错也不会被拖入账号退避
+                             （IP / 全局喷洒维度不受影响）
       --auth-fail-window <d> 已弃用，等价于 --auth-lock-base-delay
       --auth-fail-ip-limit <n>
                              单个来源 IP 在窗口内允许的认证失败次数，默认 10
@@ -306,7 +311,7 @@ gofs [选项] [serve-path ...]
 多条鉴权规则在环境变量里用 `|` 分隔：
 
 ```bash
-GOFS_AUTH='admin:123@/:rw|guest:guest@/' ./gofs ./data
+GOFS_AUTH='boss:123@/:rw|guest:guest@/' ./gofs ./data
 ```
 
 ## 移动文件或文件夹
@@ -523,27 +528,30 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 | Secure | HTTPS 下附加（含可信代理声明的 HTTPS）；默认允许明文认证时，纯 HTTP 也会发会话 cookie（不加 Secure，可被抓包复用）；用 `--allow-insecure-auth=false` 收紧后，明文 HTTP 不再发/不认会话；反代终止 TLS 且未配置可信代理时用 `--cookie-secure` |
 | 路径 | 跟随 `--path-prefix`，前缀部署下依然生效 |
 
-登录接口（`GET/POST /fs/auth`）与其它接口一样受账号锁定约束
+登录接口（`GET/POST /fs/auth`）与其它接口一样受失败计数约束
 （`--auth-fail-limit` / `--auth-lock-base-delay` / `--auth-lock-max-delay`）——
 它会发一张 30 天有效的通行证，不限速等于把口令交给字典攻击。
 
-账号锁定的状态机：
+失败计数的状态机：
 
-- 同一账号连续失败达到阈值（默认 10）后锁定（不区分来源 IP 与验口令接口）；
-- 首次锁定 `--auth-lock-base-delay`（默认 1m），之后每次再触发翻倍，
+- 计数键是**来源 IP + 账号**（不区分验口令接口）：只按用户名计数会让
+  知道账号名的人从任何地方把账号锁死；加上 IP 后，换个来源就是另一条记录；
+- 同一来源上的同一账号连续失败达到阈值（默认 10）后进入退避期；
+- 首次退避 `--auth-lock-base-delay`（默认 1m），之后每次再触发翻倍，
   封顶 `--auth-lock-max-delay`（默认 30m）；
-- **锁定期内直接 429**：不验密码、不累加计数、不延长锁定，`Retry-After`
-  返回真实剩余秒数；因此「每分钟探活一次」不再能无限续期；
-- **认证成功后立即清零**该账号的计数与锁定状态（包括其它来源/类别）；
-- 锁定触发时输出结构化日志（`auth_account_locked`，含用户名、来源、失败次数、
-  锁定截止时间）。
+- **先校验口令、再判断退避**：正确密码永远可以登录，退避只影响错误口令的
+  响应 —— 输入正确时正常放行，输入错误时才回 429，`Retry-After` 返回真实
+  剩余秒数；退避期内反复输错不会累加计数、也不会延长截止时间；
+- **认证成功后立即清零**当前「来源 + 账号」的计数与退避状态；
+- 触发时输出结构化日志（`auth_account_locked`，含用户名、来源、失败次数、
+  退避截止时间）。
 
-管理员恢复通道：`--auth-lock-exempt` 默认豁免 `127.0.0.1/32,::1/128`。
-从服务器本机**直连 gofs 端口**（不要经过 nginx 等代理）用正确口令登录一次，
-即可绕过锁定；登录成功会清除该账号在所有来源上的锁。也可以把管理网段
+`--auth-lock-exempt` 默认豁免 `127.0.0.1/32,::1/128` 的「来源 IP + 账号」
+失败计数：从服务器本机**直连 gofs 端口**（不要经过 nginx 等代理）反复输错
+也不会被拖入账号退避；IP / 全局喷洒维度不受它影响。也可以把管理网段
 （如 `10.0.0.0/8`）加入该列表。
 
-除账号锁定外，认证入口（`GET /` 的 Basic 校验与 `/fs/auth`）还按「单个来源 IP」
+除上述失败计数外，认证入口（`GET /` 的 Basic 校验与 `/fs/auth`）还按「单个来源 IP」
 （`--auth-fail-ip-limit`，默认 10/分钟）与「全局」（`--auth-fail-global-limit`，
 默认 200/分钟）计数，用来堵住「换用户名、同一个口令」的口令喷洒。这两个维度
 是**减速而非锁定**：超限后先等一个 500ms 节流步长再校验，正确密码仍可登录
@@ -552,12 +560,12 @@ SYSTEM "file:///etc/passwd">`）在这里天然不成立 —— 这是不用第�
 鉴权，也不计数。IP 维度超过阈值时会输出一条结构化告警日志（含来源 IP、
 失败次数与脱敏后的最近用户名）。
 
-账号锁定按用户名计数（不区分来源/类别），这样同一个账号从另一个 IP 或另一个
-验口令接口看到的都是同一把锁；成功登录只清除该账号自己的锁。IP / 全局维度有
-各自独立的滑动窗口，成功登录**不会**清零它们（否则攻击者可以穿插自己的合法
-请求，把针对别人的喷洒计数抹掉）。失败记录表的键是固定长度的用户名摘要、
-并有 65536 条硬上限，用户名再长也不会撑大内存；淘汰时会跳过仍在锁定期的记录，
-避免攻击者灌满表把针对自己的锁定记录挤掉。
+失败记录按「来源 IP + 账号」隔离，成功登录只清除当前来源的锁；知道账号名
+的人无法从自己的来源把别人锁在外面。IP / 全局维度有各自独立的滑动窗口，
+成功登录**不会**清零它们（否则攻击者可以穿插自己的合法请求，把针对别人的
+喷洒计数抹掉）。失败记录表的键是固定长度的摘要、并有 65536 条硬上限，
+用户名再长也不会撑大内存；淘汰时会跳过仍在退避期的记录，避免攻击者灌满表
+把针对自己的记录挤掉。
 
 ⚠️ **明文 HTTP 默认可用，但它不安全**：Basic 只是 Base64，同网段抓包即可
 还原密码；会话 Cookie 是 bearer 凭据，抓包后可以原样复用。默认允许明文
@@ -593,9 +601,9 @@ GET + Basic 也只有带 `X-Gofs-Ajax: 1`（应用自己的登录框）时才建
 （登录 CSRF）。需要 cookie 的非浏览器客户端请走 `POST /fs/auth`，或带
 `Authorization` 头。
 
-跨站请求里的查询串凭据（`?user=&pass=`）会被直接忽略，且不计入认证失败锁定 ——
-否则攻击页面可以用十个 `<img src="…?user=admin&pass=wrong">` 把 admin 账号
-打进锁定名单。
+跨站请求里的查询串凭据（`?user=&pass=`）会被直接忽略，且不计入失败计数 ——
+否则攻击页面可以用十个 `<img src="…?user=admin&pass=wrong">` 把目标账号
+拖入退避状态。
 
 登出走 `DELETE /fs/auth`：cookie 是 HttpOnly 的，JS 删不掉，
 必须由服务端撤销会话再清 cookie，否则「退出登录」只是把界面上的名字抹掉。
@@ -692,15 +700,15 @@ UTF-16 编码的文件直接拒绝编辑（客户端无法正确处理）。
 
 ```bash
 # 读取
-curl -u admin:123 'http://127.0.0.1:5000/fs/text?path=/README.md'
+curl -u boss:123 'http://127.0.0.1:5000/fs/text?path=/README.md'
 
 # 保存（base_hash 来自读取响应）
-curl -u admin:123 -X PUT http://127.0.0.1:5000/fs/text \
+curl -u boss:123 -X PUT http://127.0.0.1:5000/fs/text \
   -H 'Content-Type: application/json' \
   -d '{"path":"/README.md","content":"# 新内容\n","base_hash":"3bca2438f174ef9a"}'
 
 # 冲突时强制覆盖
-curl -u admin:123 -X PUT http://127.0.0.1:5000/fs/text \
+curl -u boss:123 -X PUT http://127.0.0.1:5000/fs/text \
   -H 'Content-Type: application/json' \
   -d '{"path":"/README.md","content":"...","base_hash":"...","force":true}'
 ```
@@ -815,7 +823,7 @@ chmod +x gofs-up.sh
   Unix 上 `\` 是合法的文件名字符，不会在鉴权层被当成路径分隔符
   （Windows 上落盘解析会把它当分隔符，那时只会更严格）。
 - **管理接口同样限速**：`/fs/keys` 能验口令，因此与其它认证入口共用
-  账号级锁定（`--auth-fail-limit` / `--auth-lock-base-delay` /
+  「IP + 账号」失败计数（`--auth-fail-limit` / `--auth-lock-base-delay` /
   `--auth-lock-max-delay`）。
 
 ### 用法
@@ -1010,8 +1018,8 @@ Cookie，XSS 读不到 Cookie，也偷不到密码。本地只保留一个用户
   密码，覆盖值会自动失效并以新命令行密码为准，不会出现「改了命令行却登不上」。
 - **没有持久化用户表时只存内存**：`--user-file` 为空时，改密只对本次运行有效，
   重启后回到命令行密码；改密弹窗会明确提示这一点。
-- **失败有限速**：当前密码输错会计入该账号的连续失败次数；达到阈值后
-  登录与改密一起进入指数退避锁定，认证成功后立即清零。
+- **失败有限速**：当前密码输错会计入该「来源 + 账号」的连续失败次数；
+  达到阈值后错误口令改为回 429（指数退避），正确密码仍可登录，成功后立即清零。
 
 对应接口是 `POST /fs/auth/password`，见下面的 API 示例。
 
@@ -1098,33 +1106,33 @@ HTTP Basic 意味着**每个请求都要验一次密码**，而 PBKDF2 是按「
 
 ### 启动时的账号口令
 
-- **`cmd/app`** 是给人上手看的示例入口：账号固定为 `admin / admin123`，
+- **`cmd/app`** 是给人上手看的示例入口：账号固定为 `gofs / gofs123`，
   并且只监听 `127.0.0.1`。它还**强制锁定监听地址与端口、只使用内存存储**，
   不会读取或写入真实的 `keys.json` / `users.json` / `settings.json` ——
   否则设置文件里一条旧的 `0.0.0.0` 记录就能把固定口令的示例推到公网。
   不要把它直接对外部署 —— 对外请用 `cmd/gofs` 并显式用 `-a` 配置账号。
-- **库里的 `gofs.Run`** 不带默认口令：每次启动随机生成管理员口令并打印
-  一次，同样只监听 `127.0.0.1`。
+- **库里的 `gofs.Run`** 不带默认凭据：每次启动随机生成管理员账号名与
+  口令并打印一次，同样只监听 `127.0.0.1`；不要依赖任何固定的默认账号。
 
 ### API
 
 ```bash
 # 列出账号（管理员）
-curl -u admin:secret http://127.0.0.1:5000/fs/users
+curl -u boss:secret http://127.0.0.1:5000/fs/users
 
 # 新建：alice 在 /docs 可读写、其他位置只读
-curl -u admin:secret -X POST -H 'Content-Type: application/json' \
+curl -u boss:secret -X POST -H 'Content-Type: application/json' \
   -d '{"name":"alice","password":"alice123","rules":[
         {"path":"/docs","perm":"rw"},{"path":"/","perm":"r"}]}' \
   http://127.0.0.1:5000/fs/users
 
 # 改权限（省略 password 就是不改密码）
-curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
+curl -u boss:secret -X PUT -H 'Content-Type: application/json' \
   -d '{"name":"alice","rules":[{"path":"/docs","perm":"r"}]}' \
   http://127.0.0.1:5000/fs/users
 
 # 删除
-curl -u admin:secret -X DELETE \
+curl -u boss:secret -X DELETE \
   'http://127.0.0.1:5000/fs/users?name=alice'
 
 # 账号自助改密（普通账号即可，不需要管理员；成功后该账号所有会话与密钥作废）
@@ -1158,7 +1166,7 @@ curl -u alice:alice123 -X POST -H 'Content-Type: application/json' \
     }
   ],
   "startup_passwords": {
-    "admin": {
+    "boss": {
       "salt": "UgIOrzIBDykl4MZYN+Bu9Q==",
       "hash": "P5QY6RQ26XlxMGEpwqGCwGLYpB/viPfJiKqrAvAcDZk=",
       "iter": 210000,
@@ -1391,7 +1399,7 @@ gofs -A --root-allow /srv --root-allow /mnt /srv/data
 ⚠️ **有附加站点时不能切换主目录**（设置里那一栏变只读）。想换就先移除站点。
 
 ⚠️ **权限规则 / 上传密钥 / 分享链接的路径范围要带上标签**：
-`-a admin:123@/backup:rw` 才管得到那个站点；一条绑在 `/` 上的旧上传密钥
+`-a boss:123@/backup:rw` 才管得到那个站点；一条绑在 `/` 上的旧上传密钥
 **不会**覆盖 `/backup/…`。从单根迁到多站点时要一并检查这些范围。
 
 ### 可切换的范围
@@ -1427,14 +1435,14 @@ gofs --no-root-switch -A /srv/data           # 完全禁止运行期切换
 
 ```bash
 # 读取当前设置
-curl -u admin:secret http://127.0.0.1:5000/fs/settings
+curl -u boss:secret http://127.0.0.1:5000/fs/settings
 
 # 切换根目录
-curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
+curl -u boss:secret -X PUT -H 'Content-Type: application/json' \
      -d '{"root":"/srv/other"}' http://127.0.0.1:5000/fs/settings
 
 # 上传上限改成 2 GiB（0 表示不限制）
-curl -u admin:secret -X PUT -H 'Content-Type: application/json' \
+curl -u boss:secret -X PUT -H 'Content-Type: application/json' \
      -d '{"upload_max_size":2147483648}' http://127.0.0.1:5000/fs/settings
 ```
 
@@ -1905,22 +1913,31 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 视为进程已经回来，因此重启后拿到 401 也能正确提示重新登录；外部探针需要
 自带账号凭据并通过 HTTPS（或本机回环）访问。
 
-**认证暴力破解与账号锁定。** Basic 认证可以被无限次尝试，按用户名统计连续
-失败次数（不区分来源 IP 与验口令接口）。达到阈值（默认 10 次）后账号进入锁定：
+**认证暴力破解与失败退避。** Basic 认证可以被无限次尝试，失败次数按
+「来源 IP + 用户名」统计（不区分验口令接口）。达到阈值（默认 10 次）后
+该组合进入退避状态：
 
-- 首次锁 1 分钟，之后每次再触发翻倍（2m、4m、8m…），封顶 30 分钟；
+- 首次 1 分钟，之后每次再触发翻倍（2m、4m、8m…），封顶 30 分钟；
   基础时长与封顶分别由 `--auth-lock-base-delay` / `--auth-lock-max-delay` 控制。
-- 锁定期内**直接 429**，不验密码、不累加计数、不延长锁定；`Retry-After`
-  是真实剩余秒数。锁定期间反复探活不会续期。
+- **先校验口令、再判断退避**：正确密码不受影响，照常登录；只有错误口令
+  才可能拿到 429，`Retry-After` 是真实剩余秒数。退避期内反复探活不会续期，
+  也不会累加计数。
 - 只有「带了凭据但不对」才算失败 —— 完全没带凭据只是未登录，否则一个
-  不带凭据的爬虫就能把正常用户的来源锁掉。
-- 认证成功后立即清零计数与锁定状态。
+  不带凭据的爬虫就能把正常用户的来源拖进退避。
+- 认证成功后立即清零当前「来源 + 账号」的计数与退避状态。
+- 计数按 IP 隔离：知道账号名的人无法从自己的来源把别人锁在外面；同一
+  账号从另一个 IP 看到的是另一条独立记录。
 
 **管理员恢复通道。** `--auth-lock-exempt`（默认 `127.0.0.1/32,::1/128`）
-豁免账号锁定。管理员可从服务器本机直连 gofs 端口，用正确口令登录一次；
-成功后该账号在所有来源/类别下的锁都会被清除。管理网段也可以显式加入。
+豁免「来源 IP + 账号」维度的失败计数。管理员从服务器本机直连 gofs 端口时，
+反复输错也不会被拖入账号退避（IP / 全局喷洒维度不受它影响）；正常登录本来
+就不受退避影响。管理网段也可以显式加入。
 注意：必须在 `--trusted-proxies` 之外直连，否则 `clientIP` 看到的可能是
 代理转发的客户端地址。
+
+**不要使用 `admin` 这类常见默认账号名。** 定向攻击只需要知道用户名；
+换成组织内特有的名字（或使用每次启动随机生成账号名的便捷入口）能
+显著降低被定向猜口令/拖入退避的概率。
 
 IP / 全局限速是另一个独立维度，保持「先减速再校验」：超限只拖慢猜测，
 正确密码仍可登录，不会把账号锁死（见 `--auth-fail-ip-limit` /
@@ -1930,11 +1947,11 @@ IP / 全局限速是另一个独立维度，保持「先减速再校验」：超
 `/fs/health`、`/fs/settings`、`/fs/users`、`/fs/keys`、`/fs/upgrade` 也会验证凭据。
 漏掉其中任何一个，它就成了不限速的口令猜测入口。应用外壳导航（`Accept:
 text/html`）的权限预检同样验口令，因此也走同一套计数。无效/过期的会话
-Cookie 不计入账号锁定；合法但非管理员的会话只回 403，不会锁账号。
+Cookie 不计入失败计数；合法但非管理员的会话只回 403，不会被拖入退避。
 
 **来源地址与转发头（`--trusted-proxies`）。** `X-Forwarded-For` / `X-Real-IP` /
 `X-Forwarded-Proto` 默认**一概不采信**。否则任何客户端都能随手伪造来源，
-绕过账号锁定与 IP 限速、在日志里冒充别的地址，甚至故意把某个 IP
+绕过失败计数与 IP 限速、在日志里冒充别的地址，甚至故意把某个 IP
 拖进限速窗口。
 只有在启动时显式配置了可信代理（IP 或 CIDR）后，且**直连对端**落在列表中，
 才会解析转发头：
@@ -2057,10 +2074,10 @@ Linux 上文件名可以含换行，于是 `rm -rf $'a\n127.0.0.1 - - "GET /admi
 --max-concurrent <n>       同时处理的请求数上限，默认 512
 --max-concurrent-jobs <n>  同时进行的重任务上限，默认 64
                            （上传 / 解压 / 打包 / Office 预览 / ?hash）
---auth-fail-limit <n>      同一账号连续失败多少次后锁定，默认 10；0 表示关闭
---auth-lock-base-delay <d> 账号锁定基础退避，默认 1m；之后每次翻倍
+--auth-fail-limit <n>      同一「来源 IP + 账号」失败多少次后错误口令回 429，默认 10；0 表示关闭
+--auth-lock-base-delay <d> 失败退避的基础时长，默认 1m；之后每次翻倍
 --auth-lock-max-delay <d>  指数退避封顶，默认 30m
---auth-lock-exempt <ips>   豁免账号锁定的来源 IP/CIDR，默认仅本机回环
+--auth-lock-exempt <ips>   豁免失败计数的来源 IP/CIDR，默认仅本机回环
 --auth-fail-window <d>     已弃用，等价于 --auth-lock-base-delay
 --auth-fail-ip-limit <n>   单个来源 IP 的失败阈值，默认 10/分钟；0 表示关闭
 --auth-fail-ip-window <d>  单 IP 失败统计的滑动窗口，默认 1m
@@ -2114,7 +2131,7 @@ gofs 自己会限速、限大小、限并发（见上一节），把缓冲交给
 gofs 这一侧还要显式声明谁可以给转发头（nginx 与 gofs 同机时是回环地址）：
 
 ```bash
-gofs -b 127.0.0.1 -p 5000 --trusted-proxies 127.0.0.1,::1 -a 'admin:密码@/:rw' /data
+gofs -b 127.0.0.1 -p 5000 --trusted-proxies 127.0.0.1,::1 -a 'boss:密码@/:rw' /data
 ```
 
 没这一行时，上面的 `X-Real-IP` / `X-Forwarded-For` / `X-Forwarded-Proto`
@@ -2161,7 +2178,7 @@ server {
 nginx 侧 `proxy_pass` **结尾不要带斜杠**：
 
 ```bash
-gofs -b 127.0.0.1 -p 5000 --path-prefix /files /data -a 'admin:密码@/data:rw'
+gofs -b 127.0.0.1 -p 5000 --path-prefix /files /data -a 'boss:密码@/data:rw'
 ```
 
 ```nginx
@@ -2179,7 +2196,7 @@ location /files/ {
 同机部署时用 socket 更干净，不占端口，也不会把服务暴露到局域网：
 
 ```bash
-gofs -b /run/gofs.sock --trusted-proxies 127.0.0.1 /data -a 'admin:密码@/data:rw'
+gofs -b /run/gofs.sock --trusted-proxies 127.0.0.1 /data -a 'boss:密码@/data:rw'
 ```
 
 ```nginx
@@ -2858,7 +2875,7 @@ err := gofs.Serve(ctx, "./data",
 srv, err := gofs.New(
     gofs.WithRoot("./data"),
     gofs.WithPort(0),                      // 0 = 由系统分配
-    gofs.WithAuth("admin:123@/:rw"),
+    gofs.WithAuth("boss:123@/:rw"),
     gofs.WithPermissions(gofs.Permissions{
         Upload: true, Edit: true, Extract: true,
     }),
@@ -2905,7 +2922,7 @@ mux.HandleFunc("/api/", myOwnAPI)
 
 - **默认只读**。`gofs.Default()` 不开上传、删除、编辑、解压 ——
   需要哪项就用 `WithAllowAll` 或 `WithPermissions` 显式打开。
-- **默认无鉴权**。要账号密码用 `WithAuth("admin:123@/:rw")` 配规则。
+- **默认无鉴权**。要账号密码用 `WithAuth("boss:123@/:rw")` 配规则。
   未启用鉴权时管理接口默认关闭；库方式要让匿名调用者管理服务，
   需把 `Config.AllowAnonymousAdmin` 显式设为 `true`。
 - **库不装信号处理器**。什么时候退出由你通过 ctx 决定，
@@ -3027,10 +3044,10 @@ make touch-modals       # 编辑器 / 操作菜单 / 服务设置面板的触摸
 所以另有一个用 jsdom 跑真实页面的脚本：
 
 ```bash
-# 终端 A：以鉴权模式启动（admin 可写根，test 只读）
+# 终端 A：以鉴权模式启动（boss 可写根，test 只读）
 # ⚠️ 带上 --user-file 指向临时文件：UI 测试会打开「用户」面板，
 #    没有它就可能写进你真实的 <用户配置目录>/gofs/users.json
-./gofs -A -a admin:secret@/:rw -a test:test@/ \
+./gofs -A -a boss:secret@/:rw -a test:test@/ \
   --user-file /tmp/gofs-run-auth-users.json ./data
 
 # 终端 B：跑一遍用户视角的交互
@@ -3130,7 +3147,7 @@ Zip Slip / 软链 / 炸弹 / 配额 / 路径穿越防护、上传与追加、**�
 最后一个根管理员的防呆）、
 MKCOL/MOVE/DELETE、隐藏路径、路径前缀、HTML 页面注入、
 **服务端防护**（上传超限与残片清理 / 追加超限保留续传点 / 跨站写请求拦截与同源放行 /
-账号锁定与指数退避恢复 / IP 与全局喷洒限速 / 目录截断 / 打包上限 / 超长文件名 /
+按「IP + 账号」的失败计数与指数退避 / IP 与全局喷洒限速 / 目录截断 / 打包上限 / 超长文件名 /
 CSP sandbox 与 nosniff / 摘要大小上限 / 并发闸门 / 日志控制字符清理）等。
 
 ### 手机端适配

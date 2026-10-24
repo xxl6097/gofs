@@ -86,12 +86,10 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 	fromSession := false
 	if s.auth.Enabled() {
 		if hasCred && user != "" {
-			// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数/节流；
+			// 这个接口同样能验证口令，必须与 authorize 用同一套失败计数；
 			// 否则 /fs/keys 会成为一条不限速的密码猜测入口。
-			ip, ok := s.checkAuthLimit(w, r, class, user)
-			if !ok {
-				return
-			}
+			// 先验口令，失败后才由 noteAuthFailureAndReply 决定 401/429。
+			ip := s.clientIP(r)
 			if !s.auth.Verify(user, pass) {
 				if s.noteAuthFailureAndReply(w, ip, class, user) {
 					return

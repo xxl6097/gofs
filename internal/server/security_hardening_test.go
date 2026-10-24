@@ -209,11 +209,18 @@ func TestFormUploadDoesNotCreateDirBeforeRealPermCheck(t *testing.T) {
 	}
 }
 
-// TestAuthLockKeyIsFixedLength 确认超长用户名不会直接变成超长 map 键。
+// TestAuthLockKeyIsFixedLength 确认超长用户名不会直接变成超长 map 键，
+// 且同一用户名在不同来源 IP 下得到不同的键。
 func TestAuthLockKeyIsFixedLength(t *testing.T) {
-	key := authLockKey(strings.Repeat("a", 60_000))
+	key := authLockKey(testClientIP, strings.Repeat("a", 60_000))
 	if len(key) != 64 {
 		t.Fatalf("锁定键长度 = %d，期望固定 64（SHA-256 hex）", len(key))
+	}
+	if same := authLockKey(testClientIP, "alice"); same == authLockKey("198.51.100.7", "alice") {
+		t.Fatal("不同来源 IP 的同一用户名不应共用锁定键")
+	}
+	if same := authLockKey("1.2.3.4a", "bc"); same == authLockKey("1.2.3.4", "abc") {
+		t.Fatal("IP 与用户名拼接出现歧义碰撞")
 	}
 }
 

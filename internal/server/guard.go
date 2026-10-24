@@ -39,26 +39,30 @@ type guard struct {
 	fails map[string]*failRecord
 
 	// ipFails / globalFails 是「单 IP」与「全局」两个维度的失败窗口。
-	// 它们与上面的 fails（来源+账号维度）相互独立：后者是既有的账号锁定
-	// 逻辑，本次不改；前者专门堵跨用户名的口令喷洒。
+	// 它们与上面的 fails（来源 IP + 账号维度）相互独立：后者只影响
+	// 「密码输错之后回 429 还是 401」，前者专门堵跨用户名的口令喷洒。
 	ipFails     *authSprayWindow
 	globalFails *authSprayWindow
 }
 
-// failRecord 记录一个账号的锁定状态。
+// failRecord 记录一个「来源 IP + 账号」组合的锁定状态。
 //
-// 注意这是**账号级**状态：键是用户名的摘要，不区分来源 IP 或凭据类别。
+// 键是「IP + 用户名」的摘要，不区分凭据类别。按 IP 隔离是刻意的：
+// 只知道用户名的人无法从别处把这个账号锁死；换个来源 IP 就是另一把锁。
 // 用户名原文不落 map，避免超长用户名（请求头可达 64 KiB）撑大内存。
 //
 // 状态机有三条硬规则（见 noteAuthFailure / authThrottled）：
 //   - 锁定期间只读，任何新请求都不得累加计数或延长 lockedUntil；
 //   - 锁定时长按指数退避增长，封顶 maxDelay；
 //   - 认证成功后立即清零。
+//
+// ⚠️ 锁定状态**只在密码校验之后**参与决策：正确密码永远可以登录，
+// 锁定只决定一次失败的响应是 401 还是 429（附带 Retry-After）。
 type failRecord struct {
 	// fails 是连续失败次数。成功登录后归零；锁定期间不增长。
 	fails int
-	// lockedUntil 是锁定截止时间。锁定只由「Check 放行后的失败」设置，
-	// 锁定期内的请求不会改写它。
+	// lockedUntil 是退避截止时间。锁定只由「密码验证失败」设置，
+	// 退避期内的请求不会改写它。
 	lockedUntil time.Time
 	// last 是最后一次**计入**失败的时间，仅用于清理过期记录。
 	last time.Time
@@ -66,8 +70,9 @@ type failRecord struct {
 
 // authThrottleStep 是 IP/全局维度在超限时的减速步长。
 //
-// ⚠️ 账号锁定（username 维度）已经改为直接 429，不再使用这个等待；
-// 这里只服务于上一项工作引入的 IP/全局滑动窗口。
+// 它发生在**验证密码之前**，只拖慢猜测，不拒绝请求：正确密码仍会
+// 在同一次请求里走到校验。IP+账号维度的锁定不使用这个等待，
+// 它的语义是「密码错误后才返回 429」。
 const authThrottleStep = 500 * time.Millisecond
 
 // newGuard 依据配置构造防护器。
@@ -356,35 +361,39 @@ func truncateAuthUser(user string) string {
 	return user[:cut] + "…"
 }
 
-// authLockKey 是账号锁定的键：只按用户名，不区分来源与凭据类别。
+// authLockKey 是锁定记录的键：来源 IP + 用户名，不区分凭据类别。
 //
-// 用 SHA-256 而不是直接拿用户名当 map 键：用户名长度由请求头决定
+// 用 SHA-256 而不是直接拼接后当 map 键：用户名长度由请求头决定
 // （可达 64 KiB），摘要键能避免少量请求就占掉大量内存，也不会因为
-// 用户名里的控制字符污染诊断信息。
+// 用户名里的控制字符污染诊断信息。NUL 分隔 IP 与用户名，避免
+// "1.2.3.4a"+"bc" 与 "1.2.3.4"+"abc" 撞到同一个键。
 //
-// 账号锁定是账号级状态：同一个账号从另一个 IP、或走另一个验口令接口，
-// 都应看到同一把锁。IP / 全局维度有各自独立的滑动窗口，不受这里影响。
-func authLockKey(user string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(user)))
+// 按 IP + 用户名隔离，而不是只按用户名：知道账号名的人无法从自己的
+// 来源把别人锁死；同一账号从另一个 IP 看到的是另一条独立记录。
+// IP / 全局维度有各自的滑动窗口，不受这里影响。
+func authLockKey(ip, user string) string {
+	raw := strings.TrimSpace(ip) + "\x00" + strings.TrimSpace(user)
+	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }
 
-// authThrottled 是账号锁定的 Check：只读，锁定期内绝不写状态。
+// authThrottled 是锁定状态的 Check：只读，锁定期内绝不写状态。
 //
-// 返回值 true 表示「现在不放行」，调用方必须直接返回剩余等待时间，
-// 不能再调用 noteAuthFailure —— 那会把锁定期往后推，正是本次要修的问题。
+// ⚠️ 它不负责在验密码前拒绝请求。调用方必须先验证口令，只在密码错误
+// 之后才用这里的返回值决定回 401 还是 429。正确密码不受任何影响。
+// 返回值 true 表示响应应带 429 + 真实剩余时间。
 func (s *Server) authThrottled(ip, class, user string) (bool, time.Duration) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return false, 0
 	}
-	// 管理员恢复通道：豁免来源不受账号锁定约束（IP/全局维度不受影响）。
+	// 管理员恢复通道：豁免来源的失败不计数，因此这里也不会看到锁。
 	if s.isAuthLockExempt(ip) {
 		return false, 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	rec := g.fails[authLockKey(user)]
+	rec := g.fails[authLockKey(ip, user)]
 	if rec == nil {
 		return false, 0
 	}
@@ -395,7 +404,7 @@ func (s *Server) authThrottled(ip, class, user string) (bool, time.Duration) {
 	return false, 0
 }
 
-// waitAuthThrottle 在节流窗口内等一小段时间再继续验证密码。
+// waitAuthThrottle 在 IP/全局节流窗口内等一小段时间再继续验证密码。
 //
 // ⚠️ 这里是「等待」而不是「拒绝」：拒绝会让攻击者仅凭用户名就能把
 // 合法账号锁死。等待把每次猜测压慢，但正确密码永远能走到校验。
@@ -418,21 +427,11 @@ func (s *Server) waitAuthThrottle(r *http.Request, remain time.Duration) bool {
 	}
 }
 
-// writeAuthLocked 写账号锁定的 429 响应（普通文本格式）。
+// writeAuthLocked 写认证失败的 429 响应（普通文本格式）。
 func writeAuthLocked(w http.ResponseWriter, remain time.Duration) {
 	w.Header().Set("Retry-After", retryAfterSeconds(remain))
 	http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
 		http.StatusTooManyRequests)
-}
-
-// throttledReply 在账号仍处于锁定状态时写 429，返回 true 表示已写响应。
-func (s *Server) throttledReply(w http.ResponseWriter, ip, class, user string) bool {
-	locked, remain := s.authThrottled(ip, class, user)
-	if !locked {
-		return false
-	}
-	writeAuthLocked(w, remain)
-	return true
 }
 
 // retryAfterSeconds 把剩余等待时长换算成 Retry-After 的秒数（向上取整）。
@@ -453,18 +452,37 @@ func retryAfterSeconds(remain time.Duration) string {
 	return strconv.FormatInt(secs, 10)
 }
 
-// noteAuthFailureAndReply 记录一次账号失败。
+// noteAuthFailureState 记录一次**已经验证失败**的凭据尝试，并判断响应
+// 是否应回 429。调用方必须已经确认密码错误；正确密码永远不会走到这里，
+// 所以锁定状态不会挡住正确凭据。
 //
-// 正常情况下调用方已经过了 Check（未锁定），所以这里不会写 429：
-// 达到阈值的那一次仍回 401，下一次请求会在 checkAuthLimit 里直接拿到 429。
-// 并发请求可能在记录前已看到锁定状态，此时补写 429。
-func (s *Server) noteAuthFailureAndReply(w http.ResponseWriter, ip, class, user string) bool {
+// already 必须在记录前读取：达到阈值的那一次仍回 401，下一次失败才 429。
+// spray 为 true 时同时计入单 IP / 全局维度（仅认证入口使用）。
+func (s *Server) noteAuthFailureState(ip, class, user string, spray bool) (bool, time.Duration) {
 	already, _ := s.authThrottled(ip, class, user)
-	s.noteAuthFailure(ip, class, user)
-	if !already {
+	var sprayOver bool
+	var retry time.Duration
+	if spray {
+		sprayOver, retry = s.noteSprayFailure(ip, user)
+	}
+	_, lockRetry, _ := s.noteAuthFailure(ip, class, user)
+	if !already && !sprayOver {
+		return false, 0
+	}
+	if already && lockRetry > retry {
+		retry = lockRetry
+	}
+	return true, retry
+}
+
+// noteAuthFailureAndReply 记录一次账号失败，必要时补写 429。
+func (s *Server) noteAuthFailureAndReply(w http.ResponseWriter, ip, class, user string) bool {
+	limited, retry := s.noteAuthFailureState(ip, class, user, false)
+	if !limited {
 		return false
 	}
-	return s.throttledReply(w, ip, class, user)
+	writeAuthLocked(w, retry)
+	return true
 }
 
 // isAuthLockExempt 判断来源 IP 是否在管理员恢复通道的豁免网段内。
@@ -542,13 +560,14 @@ func (s *Server) authLockDelay(fails int) time.Duration {
 	return d
 }
 
-// noteAuthFailure 是账号锁定的 OnFailure：**只在 Check 放行后调用**。
+// noteAuthFailure 是锁定的 OnFailure：**只在密码验证失败后调用**。
 //
-// 锁定期间的请求必须由 authThrottled 直接拒绝，不能走到这里；即便因并发
-// 竞态走到了，这里也会在发现已锁定时立即返回，绝不累加计数、绝不延长
-// lockedUntil。这正是修复「攻击者每分钟探活一次就能永久锁死账号」的关键。
+// 锁定期间不再有新请求被提前拒绝，所有口令都会照常验证；即便并发的
+// 所有失败都走到这里，已锁定的记录也不会被累加计数、也不会延长
+// lockedUntil。这正是「攻击者每分钟探活一次就能永久锁死账号」的修复。
 //
-// 返回值 locked 表示本次失败是否让账号处于锁定状态；retry 是剩余时间。
+// 返回值 locked 表示本次失败是否让该「来源 IP + 账号」处于锁定状态；
+// retry 是剩余时间。
 func (s *Server) noteAuthFailure(ip, class, user string) (
 	locked bool, retry time.Duration, fails int,
 ) {
@@ -556,12 +575,12 @@ func (s *Server) noteAuthFailure(ip, class, user string) (
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
 		return false, 0, 0
 	}
-	// 管理员恢复通道：豁免来源的失败不计数，也就不会把账号锁上。
+	// 管理员恢复通道：豁免来源的失败不计数，也就不会形成锁定。
 	if s.isAuthLockExempt(ip) {
 		return false, 0, 0
 	}
 	limit := s.cfg.AuthFailLimit
-	key := authLockKey(user)
+	key := authLockKey(ip, user)
 	now := time.Now()
 
 	g.mu.Lock()
@@ -626,10 +645,11 @@ func (s *Server) noteAuthFailure(ip, class, user string) (
 	return true, d, fails
 }
 
-// noteAuthSuccess 是账号锁定的 OnSuccess：立刻清零该账号的计数与锁定状态。
+// noteAuthSuccess 是锁定的 OnSuccess：立刻清零该「来源 IP + 账号」的
+// 计数与锁定状态。
 //
-// 键就是用户名，所以一次成功登录会清掉该账号在任何来源、任何验口令接口
-// 上的锁。管理员恢复通道「从本机登录一次即解锁」正是依赖这一点。
+// 键包含 IP，所以一次成功登录只清掉当前来源的锁；别的来源即使还在
+// 退避期，也影响不到这里。成功登录本身不受锁定影响。
 func (s *Server) noteAuthSuccess(ip, class, user string) {
 	g := s.guard
 	if g == nil || s.cfg.AuthFailLimit <= 0 {
@@ -637,7 +657,7 @@ func (s *Server) noteAuthSuccess(ip, class, user string) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.fails, authLockKey(user))
+	delete(g.fails, authLockKey(ip, user))
 }
 
 // ---------------------------------------------------------------------------
@@ -950,23 +970,19 @@ func (s *Server) noteSprayFailure(ip, user string) (over bool, retry time.Durati
 	return over, retry
 }
 
-// checkAuthLimitScoped 与 checkAuthLimit 相同，但额外检查「全局」和
-// 「单 IP」两个维度，并取所有维度里最长的剩余时间只等待一次。
+// throttleAuthSpray 在认证入口按「单 IP / 全局」维度做「先减速、再验密码」。
+//
+// 它只拖慢猜测，不拒绝请求：超限时先等一个节流步长，正确密码随后仍会
+// 走到校验。账号锁定（IP + 账号维度）不在这里判断 —— 那条状态只决定
+// 密码错误之后回 401 还是 429（见 noteAuthFailureState）。
 //
 // 只有认证入口（GET / 的 Basic 校验、/fs/auth）才应该调用它；文件传输
-// 路径仍走 checkAuthLimit，避免一次喷洒把正常的传输请求拖慢。
-func (s *Server) checkAuthLimitScoped(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
+// 路径不参与这两个维度，避免一次喷洒把正常的传输请求拖慢。
+func (s *Server) throttleAuthSpray(r *http.Request, class string) (string, bool) {
 	ip := s.clientIP(r)
 	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
 		return ip, true
 	}
-	// 账号锁定是硬拒绝：直接 429，不验密码、不计新失败、不延长锁定。
-	if locked, remain := s.authThrottled(ip, class, user); locked {
-		writeAuthLocked(w, remain)
-		return ip, false
-	}
-	// IP / 全局维度（上一项工作）仍然保持「先减速、再验密码」的语义：
-	// 它只拖慢猜测，不阻止正确密码。
 	if over, remain := s.authSprayThrottled(ip); over {
 		if !s.waitAuthThrottle(r, remain) {
 			return ip, false
@@ -979,25 +995,13 @@ func (s *Server) checkAuthLimitScoped(w http.ResponseWriter, r *http.Request, cl
 // 就写 429 并返回 true。
 //
 // 与 noteAuthFailureAndReply 的区别只是多了「全局 / 单 IP」两个计数维度；
-// 用户名维度的语义（达到阈值的那一次仍回 401、下一次才 429）保持不变。
+// 「IP + 账号」维度达到阈值的那一次仍回 401、下一次才 429。
 func (s *Server) noteAuthFailureAndReplyScoped(w http.ResponseWriter, ip, class, user string) bool {
-	// 判定顺序：全局 -> 单 IP -> 用户名。already 必须在记录前取，
-	// 这样「用户名的第 N 次失败仍回 401、下一次才 429」的语义不变。
-	already, _ := s.authThrottled(ip, class, user)
-	sprayOver, retry := s.noteSprayFailure(ip, user)
-	s.noteAuthFailure(ip, class, user)
-
-	if already {
-		if _, d := s.authThrottled(ip, class, user); d > retry {
-			retry = d
-		}
-	}
-	if !already && !sprayOver {
+	limited, retry := s.noteAuthFailureState(ip, class, user, true)
+	if !limited {
 		return false
 	}
-	w.Header().Set("Retry-After", retryAfterSeconds(retry))
-	http.Error(w, "429 Too Many Requests: 认证失败次数过多，请稍后再试",
-		http.StatusTooManyRequests)
+	writeAuthLocked(w, retry)
 	return true
 }
 

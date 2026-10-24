@@ -2948,15 +2948,10 @@ func TestAuthFailLimitThrottlesBruteForce(t *testing.T) {
 		t.Errorf("429 响应缺少 Retry-After")
 	}
 
-	// 锁定期内正确密码也要被拒绝。
+	// 锁定期内正确密码不受影响：先验口令，验过即放行。
 	good := map[string]string{"Authorization": basicAuth("alice", "secret")}
-	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusTooManyRequests {
-		t.Errorf("锁定期内正确密码应返回 429，实际 = %d", r.code)
-	}
-	// 退避期后恢复。
-	time.Sleep(120 * time.Millisecond)
 	if r := do(t, s, http.MethodGet, "/?json", nil, good); r.code != http.StatusOK {
-		t.Errorf("退避期后正确密码应能登录，实际 = %d", r.code)
+		t.Errorf("锁定期内正确密码应能登录，实际 = %d", r.code)
 	}
 }
 

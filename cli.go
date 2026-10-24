@@ -20,6 +20,19 @@ func randomAdminPassword() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// randomAdminName 为便捷入口生成一个不可预测的管理员账号名。
+//
+// 固定用 admin 的代价不只是弱口令：只要知道默认账号名，攻击者就能
+// 对「IP + admin」这一个组合持续猜口令，把定向攻击的成本降到最低。
+// 账号名每次启动随机、并与口令一起打印，定向猜测就失去了锚点。
+func randomAdminName() (string, error) {
+	b := make([]byte, 9)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("生成管理员账号名失败: %w", err)
+	}
+	return "gofs_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // RunCLI 按命令行语义运行 gofs：解析参数与环境变量、启动服务、
 // 打印启动信息，并阻塞到 ctx 被取消。
 //
@@ -79,8 +92,12 @@ func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 }
 
 func Run(ctx context.Context, stdout, stderr io.Writer) error {
-	// 随机口令 + 仅监听回环：这是「起一个服务就完事」的便捷入口，
-	// 不能带一个已知口令，也不该默认暴露到所有网卡。
+	// 随机账号名 + 随机口令 + 仅监听回环：这是「起一个服务就完事」
+	// 的便捷入口，不能带已知凭据，也不该默认暴露到所有网卡。
+	name, err := randomAdminName()
+	if err != nil {
+		return err
+	}
 	password, err := randomAdminPassword()
 	if err != nil {
 		return err
@@ -88,7 +105,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 	srv, err := New(WithRoot("."),
 		WithBind("127.0.0.1"),
 		WithPort(5000),
-		WithAuth("admin:"+password+"@/:rw"),
+		WithAuth(name+":"+password+"@/:rw"),
 		WithAllowAll(),
 		WithTune(func(c *Config) { // 逃生舱：改任意字段
 			c.MaxConcurrent = 128
@@ -104,7 +121,7 @@ func Run(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 	srv.Banner(stdout)
-	fmt.Fprintf(stdout, "  管理员    : admin / %s（随机生成，仅本次启动有效）\n", password)
+	fmt.Fprintf(stdout, "  管理员    : %s / %s（随机生成，仅本次启动有效）\n", name, password)
 
 	select {
 	case <-ctx.Done():

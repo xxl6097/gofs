@@ -52,7 +52,7 @@ type Server struct {
 	logger   *Logger
 	// trustedProxies 是允许提供转发头的反向代理网段；空表示不信任。
 	trustedProxies []*net.IPNet
-	// authLockExempt 是豁免账号锁定的来源网段（管理员恢复通道）。
+	// authLockExempt 是豁免失败计数的来源网段（管理员恢复通道）。
 	authLockExempt []*net.IPNet
 
 	// assetTags 缓存内嵌资源的 ETag（按内容算，只算一次）。
@@ -952,36 +952,6 @@ func (s *Server) checkPermExact(r *http.Request, urlPath string) auth.Permission
 // clientIP 返回经可信代理校正后的客户端地址。
 func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trustedProxies) }
 
-// checkAuthLimit 在验证凭据前检查账号锁定。
-//
-// 所有会验证密码的入口都必须经过它：只在 authorize / handleAuth 里检查
-// 是不够的 —— /fs/settings、/fs/users、/fs/keys、/fs/upgrade 等接口同样
-// 能验证口令，漏掉任何一个都等于给字典攻击留了无限次入口。
-//
-// ⚠️ 账号锁定是硬拒绝：锁定期内直接 429，不验密码、不累加计数、不延长
-// 锁定。IP / 全局喷洒维度只在认证入口由 checkAuthLimitScoped 处理，仍是
-// 「先减速再验密码」。返回 false 表示响应已经写完，调用方必须立即返回。
-func (s *Server) checkAuthLimit(w http.ResponseWriter, r *http.Request, class, user string) (string, bool) {
-	ip := s.clientIP(r)
-	// 只有可以主动提交口令的凭据类别才需要节流。会话 Cookie 是
-	// 服务端签发的随机 token，无效值不构成口令猜测；匿名请求更不应被
-	// 别人的失败记录连坐。早先所有类别共用空用户名桶，10 个坏 Cookie
-	// 就能锁死同一 IP 上的全部有效会话/匿名访问。
-	//
-	// authClassPassword 也在这里：改密接口要求提交当前密码，会话被窃取时
-	// 它就是一条可以反复尝试的口令入口，必须和登录用同一套闸门。
-	if class != authClassBasic && class != authClassQuery && class != authClassPassword {
-		return ip, true
-	}
-	// 账号锁定：锁定期内直接 429，不验密码、不计新失败、不延长锁定。
-	// 返回 false 表示响应已经写完，调用方必须立即返回。
-	if locked, remain := s.authThrottled(ip, class, user); locked {
-		writeAuthLocked(w, remain)
-		return ip, false
-	}
-	return ip, true
-}
-
 // authorize 解析请求凭据并计算对 urlPath 的权限。
 // 需要质询时直接写响应并返回 false。
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath string) (permResult, bool) {
@@ -1000,18 +970,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	// 交给字典攻击。计数按「来源 + 凭据类别 + 尝试的账号」隔离：只按来源
 	// 统计的话，持有任意合法账号的人可以穿插自己的成功请求把别人的失败
 	// 计数清零；不分类别的话，坏 Cookie/匿名请求会把有效会话一并锁死。
+	//
+	// ⚠️ 这里**不判断锁定**。先让下面的身份计算去验口令：正确密码永远
+	// 放行；只有密码错误时，noteAuthFailure* 才会决定回 401 还是 429。
 	limitUser, _, hasCred, limitClass := credentialsWithSource(r)
 	ip := s.clientIP(r)
 	// IP / 全局维度只对认证入口计数；上传、下载、解压、预览等带着具体
-	// 文件路径的请求仍然只受原有的「来源+账号」限速约束（本次不改）。
+	// 文件路径的请求不参与，避免一次喷洒把正常的传输请求拖慢。
 	spray := authSprayScope(r, urlPath)
-	if hasCred {
+	if hasCred && spray {
 		var ok bool
-		if spray {
-			ip, ok = s.checkAuthLimitScoped(w, r, limitClass, limitUser)
-		} else {
-			ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser)
-		}
+		ip, ok = s.throttleAuthSpray(r, limitClass)
 		if !ok {
 			return permResult{}, false
 		}
@@ -1202,13 +1171,9 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		limitUser, _, hasCred, limitClass := credentialsWithSource(r)
 		ip := s.clientIP(r)
 		spray := authSprayScope(r, urlPath)
-		if hasCred {
+		if hasCred && spray {
 			var ok bool
-			if spray {
-				ip, ok = s.checkAuthLimitScoped(w, r, limitClass, limitUser)
-			} else {
-				ip, ok = s.checkAuthLimit(w, r, limitClass, limitUser)
-			}
+			ip, ok = s.throttleAuthSpray(r, limitClass)
 			if !ok {
 				return
 			}
@@ -1219,7 +1184,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			// （例如只被授予 /docs 的账号访问 /）不应把账号打进节流桶。
 			// 无效会话 Cookie 同样不再计数：它不是可猜测的口令。
 			//
-			// 注意先验密码再回 429：正确密码不会走到这里，所以不会被锁死。
+			// 注意这里已经先验过密码：正确密码不会走到这个分支，
+			// 锁定状态只影响错误口令的响应（401 还是 429）。
 			if hasCred && !idAuthenticated {
 				var limited bool
 				if spray {

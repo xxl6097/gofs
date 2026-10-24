@@ -6,7 +6,7 @@
 //	gofs                         以只读模式服务当前目录
 //	gofs -A ./data               服务 ./data 并允许所有操作
 //	gofs -A --allow-extract .    开放 zip / tar / tar.gz / gz 的在线解压
-//	gofs -a admin:123@/:rw -A .  启用账号密码
+//	gofs -a boss:123@/:rw -A .   启用账号密码（别用 admin 这类默认名）
 //
 // 想把文件服务嵌进自己的程序里，直接 import github.com/xxl6097/gofs。
 package main

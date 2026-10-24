@@ -10,7 +10,7 @@
 //	go build -o /tmp/gofs-uninstall-demo ./examples/uninstall
 //	/tmp/gofs-uninstall-demo -root ./data -port 8080
 //
-//	# 打开 http://127.0.0.1:8080 ，用 admin / admin123 登录，
+//	# 打开 http://127.0.0.1:8080 ，用 gofs / gofs123 登录，
 //	# 进「设置 → 升级、重启与卸载」，点「卸载」。
 //
 // ⚠️ 默认**什么都不删**：本示例只演示流程，以及「进程退出 → 页面判定
@@ -66,7 +66,7 @@ func main() {
 		gofs.WithBind("127.0.0.1"),
 		gofs.WithPort(*port),
 		gofs.WithAllowAll(),
-		gofs.WithAuth("admin:admin123@/:rw"),
+		gofs.WithAuth("gofs:gofs123@/:rw"),
 		// 密钥 / 用户表 / 运行期设置都放内存，别碰开发者本机的真实配置。
 		gofs.WithKeyFile(""),
 		gofs.WithUserFile(""),
@@ -84,7 +84,7 @@ func main() {
 		log.Fatalf("启动失败: %v", err)
 	}
 	srv.Banner(os.Stdout)
-	fmt.Printf("\n打开 %s ，用 admin / admin123 登录，\n", srv.URL())
+	fmt.Printf("\n打开 %s ，用 gofs / gofs123 登录，\n", srv.URL())
 	fmt.Printf("在「设置 → 升级、重启与卸载」里点「卸载」。\n")
 	fmt.Printf("本次会做的事（%s）：\n", opts.exitNote())
 	for _, s := range opts.steps() {

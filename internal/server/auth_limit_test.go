@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestAuthFailLimitNotResetByOtherAccount 确认「持有任意有效账号」不能清零
@@ -14,6 +13,8 @@ import (
 // 账号发一次请求，整个 IP 的失败记录被删除，限速永远不触发 —— 相当于
 // 对 boss 拥有无限次口令猜测机会。
 func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
+	// 锁定键是「来源 IP + 用户名」，所以 alice 的成功请求只清 alice 那一条，
+	// 不会碰 boss 的计数。
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "-A",
 		"-a", "alice:apw@/:r",
@@ -50,15 +51,15 @@ func TestAuthFailLimitNotResetByOtherAccount(t *testing.T) {
 		t.Fatalf("锁定误伤了同 IP 的其它账号：alice 返回 %d", r.code)
 	}
 
-	// 锁定期内正确密码也要被拒绝（这是锁定的语义）。
-	if r := do(t, s, http.MethodGet, "/?json", nil,
-		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusTooManyRequests {
-		t.Fatalf("锁定期内 boss 的正确密码返回 %d，期望 429", r.code)
-	}
-	// 退避期过后恢复。
-	time.Sleep(150 * time.Millisecond)
+	// 新语义：锁定只影响错误口令的响应，正确密码仍然可以登录，
+	// 成功后该「来源 + 账号」的计数与锁定状态被清除。
 	if r := do(t, s, http.MethodGet, "/?json", nil,
 		map[string]string{"Authorization": basicAuth("boss", "boss-secret")}); r.code != http.StatusOK {
-		t.Fatalf("退避期后 boss 的正确密码返回 %d，期望 200", r.code)
+		t.Fatalf("锁定期内 boss 的正确密码返回 %d，期望 200", r.code)
+	}
+	// 清除后重新计数：错误口令回到 401，而不是继续 429。
+	if r := do(t, s, http.MethodGet, "/?json", nil,
+		map[string]string{"Authorization": basicAuth("boss", "wrong-again")}); r.code != http.StatusUnauthorized {
+		t.Fatalf("成功清零后 boss 的错误口令返回 %d，期望 401", r.code)
 	}
 }
