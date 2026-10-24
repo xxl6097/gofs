@@ -467,8 +467,14 @@ type permResult struct {
 	Perm auth.Permission
 	// User 为登录用户名（匿名时为空）。
 	User string
-	// Authenticated 表示是否携带并通过了具名账号校验。
+	// Authenticated 表示请求是否已获授权。
+	//
+	// ⚠️ 分享令牌也会把它置为 true（“拿着链接的人可以访问”），
+	// 所以它**不能**用来判断「背后是否真的有一个登录账号」。区分登录态请用
+	// Account，页面数据也据此决定下发完整配置还是分享范围。
 	Authenticated bool
+	// Account 表示本次请求由具名账号（Basic 或会话 Cookie）认证。
+	Account bool
 	// UploadKey 非 nil 表示本次请求由上传密钥授权，而非账号密码。
 	UploadKey *uploadkey.Key
 	// Share 表示本次请求由分享令牌授权。
@@ -1024,7 +1030,10 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 	}
 
 	idPerm, idUser, idAuthenticated := s.identityPermOf(r, urlPath)
-	if shareOK && sharePerm(shareKey) > idPerm {
+	// 匿名访问带有效分享令牌时，**始终**按分享范围处理：即使匿名规则
+	// 恰好给了同级或更高权限，也不能把全局配置下发出去。已登录账号仍按
+	// 「身份与分享取较高权限」处理，页面数据会在下面按 Account 区分。
+	if shareOK && (!idAuthenticated || sharePerm(shareKey) > idPerm) {
 		// 首次拿到令牌的那一次就下发 cookie，之后靠它认人。
 		//
 		// ⚠️ 判据不能只看 `?share=`。分享地址有**两种形式**，而「分享」
@@ -1043,6 +1052,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 			Perm:          sharePerm(shareKey),
 			User:          "share:" + shareKey.Prefix,
 			Authenticated: true,
+			Account:       idAuthenticated,
 			Share:         true,
 		}, true
 	}
@@ -1055,7 +1065,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, urlPath strin
 			s.noteAuthSuccess(ip, limitClass, limitUser)
 		}
 		// 会话身份也算「已认证」—— 否则登录后每个请求都会被当成匿名。
-		return permResult{Perm: perm, User: idUser, Authenticated: idAuthenticated}, true
+		return permResult{
+			Perm: perm, User: idUser,
+			Authenticated: idAuthenticated,
+			Account:       idAuthenticated,
+		}, true
 	}
 
 	// 只有「带了凭据但不对」才算一次失败；完全没带凭据只是未登录，
@@ -1301,8 +1315,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs 
 					Name:  path.Base(urlPath),
 					IsDir: true,
 				}
-				data := s.newPageData(p, listing, "", s.isAdminRequest(r))
-				data.NotFound = true
+				data := s.pageFor(p, listing, "", s.isAdminRequest(r), true)
 				s.writeHTMLStatus(w, data, http.StatusNotFound)
 				return
 			}

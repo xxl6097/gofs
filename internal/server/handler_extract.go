@@ -78,6 +78,21 @@ func (s *Server) handleExtract(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requireExtractLimits 确认三个解压上限都已配置，否则写 503 并返回 false。
+//
+// 0 在这里是「未配置」，不是「无限制」。配置校验通常已经拦住这种部署，
+// 但库调用方 / 测试 / 运行期改配置都可能绕过 CLI 校验；解压是写盘操作，
+// 必须在真正动手前再 fail-closed 一次。
+func (s *Server) requireExtractLimits(w http.ResponseWriter, action string) bool {
+	if s.extractLimitsConfigured() {
+		return true
+	}
+	http.Error(w, "503 Service Unavailable: 解压安全上限未配置"+
+		"（--extract-max-files / --extract-max-total / --extract-max-ratio 必须为正数），已拒绝"+action,
+		http.StatusServiceUnavailable)
+	return false
+}
+
 // resolveArchive 解析并校验压缩包路径，返回 Reader 供调用方使用。
 //
 // ⚠️ 这里必须做**读权限**校验，不能只靠调用方记得做。
@@ -89,6 +104,9 @@ func (s *Server) resolveArchive(w http.ResponseWriter, r *http.Request, urlPath 
 	noop := func() {}
 	if !s.cfg.AllowExtract {
 		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
+		return nil, "", noop, false
+	}
+	if !s.requireExtractLimits(w, "读取压缩包") {
 		return nil, "", noop, false
 	}
 	if fsutil.HasParentSegment(urlPath) {
@@ -288,6 +306,9 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	// JSON 请求体长期占住并发名额（未认证 DoS）。
 	if !s.cfg.AllowExtract {
 		http.Error(w, "403 Forbidden: 未开启在线解压（--allow-extract）", http.StatusForbidden)
+		return
+	}
+	if !s.requireExtractLimits(w, "解压") {
 		return
 	}
 

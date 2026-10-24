@@ -90,8 +90,13 @@
         }
       }
     }
+    if (typeof info.version === 'string') DATA.version = info.version;
     if (typeof info.upload_dated === 'boolean') DATA.upload_dated = info.upload_dated;
     if (typeof info.upload_date_dir === 'string') DATA.upload_date_dir = info.upload_date_dir;
+    if (typeof info.upload_date_layout === 'string') DATA.upload_date_layout = info.upload_date_layout;
+    if (info.extract_limits && typeof info.extract_limits === 'object') {
+      DATA.extract_limits = info.extract_limits;
+    }
     if (typeof info.allow_keys === 'boolean') DATA.allow_keys = info.allow_keys;
     if (typeof info.allow_settings === 'boolean') DATA.allow_settings = info.allow_settings;
     // allow_users 必须在这里补齐：未登录外壳里刻意不下发它，
@@ -6117,13 +6122,21 @@
     owWrap.appendChild(ow);
     owWrap.appendChild(owText);
 
-    var limits = DATA.extract_limits || {};
+    var limits = DATA.extract_limits;
+    var limitText;
+    if (limits && limits.max_files > 0 && limits.max_total_bytes > 0 && limits.max_ratio > 0) {
+      limitText = '安全上限：最多 ' + limits.max_files + ' 个条目 / ' +
+        fmtSize(limits.max_total_bytes) + ' 总量 / 压缩比 ' + limits.max_ratio + 'x。' +
+        '包含软链接的条目会被自动跳过。';
+    } else {
+      // 匿名分享页不下发全局配置；0 也代表「未配置」，不能显示成无限制。
+      limitText = '安全上限由服务端控制；未配置完整上限时服务端会拒绝解压。' +
+        '包含软链接的条目会被自动跳过。';
+    }
     var limitBox = document.createElement('div');
     limitBox.className = 'hint-box';
     limitBox.style.marginTop = '14px';
-    limitBox.textContent = '安全上限：最多 ' + (limits.max_files || '-') + ' 个条目 / ' +
-      fmtSize(limits.max_total_bytes || 0) + ' 总量 / 压缩比 ' + (limits.max_ratio || '-') + 'x。' +
-      '包含软链接的条目会被自动跳过。';
+    limitBox.textContent = limitText;
 
     var wrap = document.createElement('div');
     wrap.appendChild(field);

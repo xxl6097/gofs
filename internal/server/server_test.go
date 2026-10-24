@@ -2349,13 +2349,30 @@ func TestAuthShellRestoresIdentity(t *testing.T) {
 	s := newTestServer(t, testConfig(t, root, "-A", "-a", "admin:pw@/:rw"))
 	hdr := map[string]string{"Authorization": basicAuth("admin", "pw")}
 
-	// 1) 未登录导航：外壳里没有用户名，权限位全 false
+	// 1) 未登录导航：只下发渲染登录页所需的最小字段。
 	shell := do(t, s, http.MethodGet, "/", nil, htmlNav)
-	if !strings.Contains(shell.body, `"user":""`) {
-		t.Errorf("外壳不应包含用户名: %s", shell.body)
+	data := pageJSON(t, shell.body)
+	allowed := map[string]bool{
+		"title": true, "path_prefix": true, "path": true,
+		"auth_on": true, "auth_required": true,
 	}
-	if !strings.Contains(shell.body, `"write":false`) {
-		t.Errorf("外壳的权限位应全为 false: %s", shell.body)
+	for k := range data {
+		if !allowed[k] {
+			t.Errorf("未登录外壳泄露了字段 %q：%v", k, data[k])
+		}
+	}
+	for _, k := range []string{
+		"user", "perms", "listing", "version", "extract_limits",
+		"edit_max_size", "upload_dated", "upload_date_layout",
+		"allow_keys", "allow_settings", "allow_users",
+		"user_from_startup", "password_persistent",
+	} {
+		if _, ok := data[k]; ok {
+			t.Errorf("未登录外壳不应下发 %q", k)
+		}
+	}
+	if data["auth_required"] != true {
+		t.Errorf("登录页外壳缺少 auth_required: %s", shell.body)
 	}
 
 	// 2) 拿本地凭据换身份：应当拿到用户名与真实权限

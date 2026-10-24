@@ -104,10 +104,52 @@ type pageData struct {
 }
 
 // extractLimits 把解压安全上限透给前端展示。
+//
+// ⚠️ 三个值必须都为正。任一为 0 视为「未配置」：服务端会拒绝解压，
+// 页面上的 perms.extract 也会是 false —— 绝不能把 0 当成无限制。
 type extractLimits struct {
 	MaxTotalBytes int64 `json:"max_total_bytes"`
 	MaxFiles      int   `json:"max_files"`
 	MaxRatio      int   `json:"max_ratio"`
+}
+
+// authGateData 是「未登录且没有有效分享令牌」时下发的最小外壳。
+//
+// 只包含渲染登录页真正需要的字段：站点标题、路径前缀（拼 API 地址）、
+// 当前路径、鉴权标记。**不要**往这里加任何服务端配置（版本、上传上限、
+// 归档布局、解压上限、密钥/设置开关…）—— 未认证访问者能读到源码里
+// 所有 JSON 字段。
+type authGateData struct {
+	Title        string `json:"title"`
+	PathPrefix   string `json:"path_prefix"`
+	Path         string `json:"path"`
+	AuthOn       bool   `json:"auth_on"`
+	AuthRequired bool   `json:"auth_required"`
+}
+
+// restrictedPageData 是匿名访问（分享链接或匿名规则）时下发的页面数据。
+//
+// 只含当前范围内的列表、权限与导航字段；不含任何全局配置。
+// 它既用于匿名分享，也用于 `-a @/:r` 这类匿名规则 —— 两者都没有
+// 登录账号，页面只需要能列出/操作范围内的东西。
+type restrictedPageData struct {
+	PathPrefix string          `json:"path_prefix"`
+	Path       string          `json:"path"`
+	Name       string          `json:"name"`
+	Query      string          `json:"query,omitempty"`
+	Listing    *fsutil.Listing `json:"listing"`
+	Perms      permsData       `json:"perms"`
+	NotFound   bool            `json:"not_found,omitempty"`
+}
+
+// extractLimitsConfigured 表示三个解压上限都已配置。
+//
+// 任一为 0 都视为「未配置」，而不是「无限制」：解压是破坏性写操作，
+// 缺少限额时宁可拒绝，也不能静默退化成无上限。
+func (s *Server) extractLimitsConfigured() bool {
+	return s.cfg.ExtractMaxFiles > 0 &&
+		s.cfg.ExtractMaxTotal > 0 &&
+		s.cfg.ExtractMaxRatio > 0
 }
 
 // buildPerms 依据授权结果与全局开关计算页面可用能力。
@@ -120,7 +162,8 @@ func (s *Server) buildPerms(p permResult) permsData {
 		Delete:  rw && s.cfg.AllowDelete,
 		Search:  canRead && s.cfg.AllowSearch,
 		Archive: canRead && s.cfg.AllowArchive,
-		Extract: rw && s.cfg.AllowExtract,
+		// 上限未配置时不能把解压入口画出来：服务端会直接拒绝。
+		Extract: rw && s.cfg.AllowExtract && s.extractLimitsConfigured(),
 		// Edit 必须跟 Write/Delete/Extract 一样用 rw，不能只要求 canRead。
 		// 漏了这一条，只读账号会看到「编辑」按钮，点下去必然被
 		// textSave 的 403（它要求读写权限）挡回来 —— 按钮等于骗人。
@@ -168,9 +211,33 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 	}
 }
 
+// pageFor 依据请求身份选择下发哪一档页面数据。
+//
+//   - 未启用鉴权：没有账号可登录，页面就是全部功能；
+//   - 具名账号（Basic / 会话）：完整配置（功能零回归）；
+//   - 匿名分享 / 匿名规则：只有当前范围的列表与权限，不含全局配置。
+//
+// 登录页外壳不走这里，见 renderAuthGate。
+func (s *Server) pageFor(p permResult, listing *fsutil.Listing, query string, admin, notFound bool) any {
+	if !s.auth.Enabled() || p.Account {
+		data := s.newPageData(p, listing, query, admin)
+		data.NotFound = notFound
+		return data
+	}
+	return restrictedPageData{
+		PathPrefix: s.PathPrefix(),
+		Path:       listing.Path,
+		Name:       listing.Name,
+		Query:      query,
+		Listing:    listing,
+		Perms:      s.buildPerms(p),
+		NotFound:   notFound,
+	}
+}
+
 // renderIndex 渲染目录页面。
 func (s *Server) renderIndex(w http.ResponseWriter, r *http.Request, listing *fsutil.Listing, p permResult) {
-	s.writeHTML(w, s.newPageData(p, listing, "", s.isAdminRequest(r)))
+	s.writeHTML(w, s.pageFor(p, listing, "", s.isAdminRequest(r), false))
 }
 
 // searchMaxEntries 是单次搜索最多回多少条。
@@ -247,17 +314,18 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, abs, urlPat
 		s.writeJSON(w, listing)
 		return
 	}
-	s.writeHTML(w, s.newPageData(p, listing, pattern, s.isAdminRequest(r)))
+	s.writeHTML(w, s.pageFor(p, listing, pattern, s.isAdminRequest(r), false))
 }
 
 // writeHTML 把初始数据注入 index.html 后输出。
-func (s *Server) writeHTML(w http.ResponseWriter, data pageData) {
+func (s *Server) writeHTML(w http.ResponseWriter, data any) {
 	s.writeHTMLStatus(w, data, http.StatusOK)
 }
 
 // writeHTMLStatus 与 writeHTML 相同，但允许指定状态码：
-// 目录不存在时仍然返回完整外壳，只是 HTTP 状态为 404。
-func (s *Server) writeHTMLStatus(w http.ResponseWriter, data pageData, status int) {
+// 目录不存在时仍然返回可用的页面外壳（按身份决定完整/受限），
+// 只是 HTTP 状态为 404。
+func (s *Server) writeHTMLStatus(w http.ResponseWriter, data any, status int) {
 	// 目录页/搜索页可能带着上万条条目，同样需要「无进展超时」。
 	w, reset := withWriteProgress(w, s.cfg.DownloadTimeout)
 	defer reset()
@@ -393,26 +461,23 @@ func (s *Server) serveIndexFallback(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "index.html", st.ModTime(), f)
 }
 
-// renderAuthGate 渲染一张「尚未登录」的应用外壳。
+// renderAuthGate 渲染一张「尚未登录」的最小外壳。
 //
-// 页面里不含任何真实数据（listing 为空数组），只带 auth_required 标记，
-// 由前端弹出登录框；登录成功后前端自行 fetch 数据再渲染。
-// 这样未登录者拿不到任何文件名、目录结构或配置信息。
+// 只下发 authGateData 里的五个字段。绝不能退回 pageData：那个结构体会
+// 把版本、上传/编辑/解压上限、归档布局、密钥/设置/升级开关等配置
+// 以零值或默认值的形式整套写进页面 JSON，未认证访问者直接可读。
+//
+// 前端拿到 auth_required 后弹登录框；登录成功再通过 /fs/auth 拿到完整
+// 权限与配置。listing 刻意不下发（前端把 null 当作“还没读过目录”）。
 func (s *Server) renderAuthGate(w http.ResponseWriter, r *http.Request, urlPath string) {
 	clean := fsutil.CleanURLPath(urlPath)
-	s.writeHTML(w, pageData{
-		Version:    s.cfg.Version,
+	s.writeHTML(w, authGateData{
 		Title:      s.settings.Title(),
 		PathPrefix: s.PathPrefix(),
 		Path:       clean,
-		Name:       "/",
-		Listing:    &fsutil.Listing{Path: clean, Name: "/", IsDir: true, Entries: []fsutil.Entry{}},
-		Perms:      permsData{},
 		AuthOn:     true,
-		// 标题也要带上：登录页就在品牌名旁边，漏了它会让品牌名先显示
-		// 默认的 gofs、登录之后才跳成配置值。
+		// auth_required 是登录页的触发开关，必须保留。
 		AuthRequired: true,
-		EditMaxSize:  s.settings.EditMaxSize(),
 	})
 }
 

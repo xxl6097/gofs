@@ -936,7 +936,7 @@ document.getElementById('picker').addEventListener('change', async (e) => {
 | `413` | 超过单文件上传上限；multipart 表单总量超过 1 GiB |
 | `429` | 认证失败次数过多，看 `Retry-After`；限速只影响猜错的请求，正确凭据在短暂等待后仍可通过 |
 | `500` | 服务端写盘失败，具体原因只进服务端日志 |
-| `503` | 并发上传任务过多，响应带 `Retry-After: 2`，可稍后重试 |
+| `503` | 并发上传任务过多，响应带 `Retry-After: 2`，可稍后重试；或解压安全上限未配置（`--extract-max-files` / `--extract-max-total` / `--extract-max-ratio` 任一为 0 时拒绝解压） |
 
 常见错误文本：
 

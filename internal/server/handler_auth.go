@@ -169,12 +169,21 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"password_persistent": s.auth.UserFile() != "",
 		"anonymous":           false,
 		"perms":               s.buildPerms(permResult{Perm: perm, User: user, Authenticated: true}),
+		"version":             s.cfg.Version,
 		"upload_dated":        s.cfg.UploadDated(),
-		"allow_keys":          s.cfg.AllowKeys && perm == auth.PermReadWrite,
-		"edit_max_size":       s.settings.EditMaxSize(),
-		"upload_max_size":     s.settings.UploadMaxSize(),
-		"allow_settings":      admin,
-		"allow_users":         s.cfg.AllowUserManage && admin,
+		"upload_date_layout":  s.cfg.UploadDateLayout,
+		// 登录页外壳只下发最小字段；登录成功后由这里补齐，
+		// 保证「从登录框进来」与「直接带会话打开」拿到同一套配置。
+		"extract_limits": extractLimits{
+			MaxTotalBytes: s.cfg.ExtractMaxTotal,
+			MaxFiles:      s.cfg.ExtractMaxFiles,
+			MaxRatio:      s.cfg.ExtractMaxRatio,
+		},
+		"allow_keys":      s.cfg.AllowKeys && perm == auth.PermReadWrite,
+		"edit_max_size":   s.settings.EditMaxSize(),
+		"upload_max_size": s.settings.UploadMaxSize(),
+		"allow_settings":  admin,
+		"allow_users":     s.cfg.AllowUserManage && admin,
 		// 与 edit_max_size 同理：登录响应里必须补齐。页面外壳走的是
 		// renderAuthGate（数据全空），登录后再由 applySession 合并 ——
 		// 漏了这一行，「升级与重启」就只有直接带会话访问时才出现，

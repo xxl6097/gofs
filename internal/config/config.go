@@ -830,9 +830,12 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 		"强制会话/分享 Cookie 带 Secure（TLS 在反向代理终止且未配置可信代理时使用）")
 	fs.BoolVar(&cfg.AllowInsecureAuth, "allow-insecure-auth", cfg.AllowInsecureAuth,
 		"允许在明文 HTTP 上提交账号密码与会话（默认拒绝；Basic 仅 Base64，抓包即可还原）")
-	fs.Int64Var(&cfg.ExtractMaxTotal, "extract-max-total", cfg.ExtractMaxTotal, "单次解压写出字节上限")
-	fs.IntVar(&cfg.ExtractMaxFiles, "extract-max-files", cfg.ExtractMaxFiles, "单次解压文件数上限")
-	fs.IntVar(&cfg.ExtractMaxRatio, "extract-max-ratio", cfg.ExtractMaxRatio, "单文件压缩比上限（防解压炸弹）")
+	fs.Int64Var(&cfg.ExtractMaxTotal, "extract-max-total", cfg.ExtractMaxTotal,
+		"单次解压写出字节上限；0 表示未配置并禁用解压")
+	fs.IntVar(&cfg.ExtractMaxFiles, "extract-max-files", cfg.ExtractMaxFiles,
+		"单次解压文件数上限；0 表示未配置并禁用解压")
+	fs.IntVar(&cfg.ExtractMaxRatio, "extract-max-ratio", cfg.ExtractMaxRatio,
+		"单文件压缩比上限（防解压炸弹）；0 表示未配置并禁用解压")
 	fs.Int64Var(&cfg.UploadMaxSize, "upload-max-size", cfg.UploadMaxSize,
 		"单次上传的最大字节数，0 表示不限制")
 	fs.BoolVar(&noRootSwitch, "no-root-switch", false,
@@ -1101,14 +1104,16 @@ func (c *Config) Normalize() error {
 			return errors.New("启用 HTTPS 需要同时指定 --tls-cert 与 --tls-key")
 		}
 	}
-	if c.ExtractMaxFiles <= 0 {
-		return errors.New("--extract-max-files 必须为正整数")
+	// 解压上限允许为 0，但语义是「未配置」：任一为 0 时服务端会拒绝
+	// 解压（而不是退化成无限制）。负数仍是配置错误。
+	if c.ExtractMaxFiles < 0 {
+		return errors.New("--extract-max-files 不能为负数（0 表示未配置并禁用解压）")
 	}
-	if c.ExtractMaxTotal <= 0 {
-		return errors.New("--extract-max-total 必须为正整数")
+	if c.ExtractMaxTotal < 0 {
+		return errors.New("--extract-max-total 不能为负数（0 表示未配置并禁用解压）")
 	}
-	if c.ExtractMaxRatio <= 0 {
-		return errors.New("--extract-max-ratio 必须为正整数")
+	if c.ExtractMaxRatio < 0 {
+		return errors.New("--extract-max-ratio 不能为负数（0 表示未配置并禁用解压）")
 	}
 	if c.EditMaxSize <= 0 {
 		return errors.New("--edit-max-size 必须为正整数")
@@ -1326,9 +1331,10 @@ func usageText() string {
       --no-upload-dated      关闭上传按日期自动归档
       --tls-cert <path>      HTTPS 证书
       --tls-key <path>       HTTPS 私钥
-      --extract-max-total <n> 解压写出字节上限，默认 10GiB
-      --extract-max-files <n> 解压文件数上限，默认 100000
-      --extract-max-ratio <n> 单文件压缩比上限，默认 200
+      --extract-max-total <n> 解压写出字节上限，默认 10GiB；0 = 未配置，禁用解压
+      --extract-max-files <n> 解压文件数上限，默认 100000；0 = 未配置，禁用解压
+      --extract-max-ratio <n> 单文件压缩比上限，默认 200；0 = 未配置，禁用解压
+                              （三者任一为 0 都会拒绝解压，不会退化成无限制）
   -V, --version              打印版本
   -h, --help                 打印帮助
 
