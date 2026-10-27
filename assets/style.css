@@ -2771,6 +2771,8 @@ html.booting body::after {
   border-radius: 0;
   background: transparent;
 }
+/* 全屏下再切「仅预览」：编辑区收起，预览占满整行，专心阅读。 */
+.ed-root.preview-fs.preview-only .ed-pane { display: none; }
 .ed-root.preview-fs .ed-preview { padding: 18px 24px; }
 /* 焦点是脚本给的（为了方向键 / PageDown 滚动），不需要再画一圈焦点环。 */
 .ed-root.preview-fs .ed-preview:focus { outline: none; }

@@ -810,8 +810,12 @@
 
     function setPreview(on) {
       previewOn = on;
+      // 没有预览就谈不上「仅预览」：关掉预览时顺手退回编辑态。
+      if (!on) setPreviewOnly(false);
       previewPane.hidden = !on;
       stage.classList.toggle('split', on);
+      // 「仅预览」只在「全屏 + 预览开着」时有意义，别留一颗点不动的按钮。
+      if (fsOnlyBtn) fsOnlyBtn.hidden = !(on && fullscreen);
       if (pvBtn) {
         // 按钮本身要能看出「预览开着」。否则用户只能从多出来的半边
         // 内容推断状态，再点一次也不知道会发生什么。
@@ -832,9 +836,27 @@
     // 用户只能靠猜 Esc；而且 `srcdoc` 沙箱 iframe 在部分浏览器里
     // 拿不到全屏权限。现在标题栏、工具栏都还在，退出入口一直可见。
     //
-    // 全屏不是只读的阅读态：左边编辑区保留，右边预览随手改随手变
-    // （预览刷新本来就跟在 input 事件后面）。
+    // 全屏默认是编辑态：左边编辑区保留，右边预览随手改随手变
+    // （预览刷新本来就跟在 input 事件后面）。需要安静读长文时，
+    // 再切到「仅预览」把编辑区收起，预览占满整行。
     var fullscreen = false;
+    var previewOnly = false;
+
+    // setPreviewOnly 只负责切「收起编辑区」这一个状态，
+    // 焦点由调用方决定：点按钮进来 / 切回编辑区落点不一样。
+    function setPreviewOnly(on) {
+      on = !!on && fullscreen && previewOn;
+      if (on === previewOnly) return;
+      previewOnly = on;
+      body.classList.toggle('preview-only', on);
+      if (fsOnlyBtn) {
+        fsOnlyBtn.textContent = on ? '显示编辑' : '仅预览';
+        fsOnlyBtn.title = on
+          ? '显示编辑区，边改边看'
+          : '隐藏编辑区，只留预览（Esc 退出全屏）';
+        fsOnlyBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+    }
 
     function setFullscreen(on) {
       if (on === fullscreen) return;
@@ -851,6 +873,9 @@
         fsBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
         fsBtn.title = on ? '退出全屏（Esc）' : '全屏编辑与预览（Esc 退出）';
       }
+      // 「仅预览」只在这时候有意义：每次进全屏都从边改边看开始。
+      setPreviewOnly(false);
+      if (fsOnlyBtn) fsOnlyBtn.hidden = !on;
       if (on) {
         // 桌面端直接把焦点放进编辑区，进来就能改。触屏不抢焦点，
         // 否则一进全屏就弹出软键盘，把预览挤得只剩一条。
@@ -875,7 +900,7 @@
         e.preventDefault();
         var first = null;
         Array.prototype.some.call(tools.querySelectorAll('button'), function (b) {
-          if (!b.disabled) { first = b; return true; }
+          if (!b.disabled && !b.hidden) { first = b; return true; }
           return false;
         });
         (first || m.el).focus();
@@ -894,6 +919,7 @@
     var saveBtn = makeTool('保存', '保存到服务器（Ctrl/⌘ + S）', function () { save(); }, 'primary');
     var pvBtn = null;
     var fsBtn = null;
+    var fsOnlyBtn = null;
     var pvLabel = '';
     if (readOnly) {
       saveBtn.disabled = true;
@@ -938,6 +964,20 @@
       });
       fsBtn.setAttribute('aria-pressed', 'false');
       tools.appendChild(fsBtn);
+
+      // 「仅预览」只出现在全屏期间：把编辑区收起来，长文读起来更安静。
+      // 放在这里而不是另外开一颗入口按钮，是为了全屏只有一个进入点。
+      fsOnlyBtn = makeTool('仅预览', '隐藏编辑区，只留预览（Esc 退出全屏）', function () {
+        setPreviewOnly(!previewOnly);
+        if (previewOnly) {
+          previewPane.focus();
+        } else {
+          ta.focus();
+        }
+      });
+      fsOnlyBtn.setAttribute('aria-pressed', 'false');
+      fsOnlyBtn.hidden = true;
+      tools.appendChild(fsOnlyBtn);
     }
 
     // 格式化会直接改写 textarea 内容；只读文件不显示入口。
