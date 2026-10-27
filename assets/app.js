@@ -5964,7 +5964,9 @@
     function onNavKey(e) {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       var t = e.target;
-      if (t && t.closest && t.closest('video, audio, input, textarea, select, iframe')) return;
+      // 焦点在文档内容区时，左右键应当滚动长表格 / 在标签间移动，
+      // 而不是悄悄翻到下一个文件。
+      if (t && t.closest && t.closest('video, audio, input, textarea, select, iframe, .office-doc')) return;
       e.preventDefault();
       go(e.key === 'ArrowLeft' ? -1 : 1);
     }
@@ -6133,6 +6135,11 @@
     if (want && body.dataset.previewPath !== want) return;
 
     body.textContent = '';
+    // .preview-body 默认把内容居中（图片 / 视频用），Office 纸张必须铺满
+    // 整个可用高度 —— 否则长文档会被垂直居中，上下两头一起被裁掉，
+    // 连滚动条都不会出现。这个类名只在本函数里加，切到别的文件时
+    // render() 会重置 body.className。
+    body.classList.add('preview-body-office');
     var root = document.createElement('div');
     root.className = 'office-doc';
     body.appendChild(root);
@@ -6147,53 +6154,106 @@
     var showTabs = parts.length > 1;
     var pane = document.createElement('div');
     pane.className = 'office-pane';
+    // 让内容区本身可以聚焦：键盘用户 Tab 进来后就能用方向键 / PageDown
+    // 滚动文档。它不会被后加的 TAB 序号打乱，只在预览弹窗内部生效。
+    pane.tabIndex = 0;
+    pane.setAttribute('aria-label', '文档内容');
     if (showTabs) {
       root.appendChild(buildOfficeTabs(parts, pane));
     }
     root.appendChild(pane);
     renderOfficePart(pane, parts[0]);
 
+    // 提示统一收在一个可滚动的尾栏里：截断说明与解析提示可能不止一条，
+    // 直接堆在纸张下面会把内容区越挤越矮。
+    var notes = [];
     if (doc.truncated) {
-      root.appendChild(textEl('div', 'office-note',
-        '内容较多，只显示了前面一部分。完整内容请下载后查看。'));
+      notes.push('内容较多，只显示了前面一部分。完整内容请下载后查看。');
     }
-    (doc.notes || []).forEach(function (n) {
-      root.appendChild(textEl('div', 'office-note', n));
-    });
+    (doc.notes || []).forEach(function (n) { notes.push(n); });
+    if (notes.length) {
+      var noteBox = document.createElement('div');
+      noteBox.className = 'office-notes';
+      notes.forEach(function (n) {
+        noteBox.appendChild(textEl('div', 'office-note', n));
+      });
+      root.appendChild(noteBox);
+    }
   }
 
   // buildOfficeTabs 造出工作表 / 幻灯片切换条。
+  //
+  // 切换条**不随内容滚动**：它挂在滚动区（.office-pane）外面，
+  // 所以翻到工作表末尾时仍然能切到下一张 —— 这正是长表格最常用的操作。
   function buildOfficeTabs(parts, pane) {
     var bar = document.createElement('div');
     bar.className = 'office-tabs';
+    bar.setAttribute('role', 'tablist');
     var btns = [];
+    var active = 0;
+
+    function select(i) {
+      active = i;
+      btns.forEach(function (x, j) {
+        x.classList.toggle('active', j === i);
+        x.setAttribute('aria-selected', j === i ? 'true' : 'false');
+        x.tabIndex = j === i ? 0 : -1;
+      });
+      renderOfficePart(pane, parts[i]);
+      // 工作表很多时切换条本身会横向滚动，把选中的那张带进视野。
+      btns[i].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+
     parts.forEach(function (part, i) {
       var b = document.createElement('button');
       b.type = 'button';
-      b.className = 'office-tab' + (i === 0 ? ' active' : '');
+      b.className = 'office-tab' + (i === active ? ' active' : '');
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', i === active ? 'true' : 'false');
+      b.tabIndex = i === active ? 0 : -1;
       b.textContent = part.name || ('第 ' + (i + 1) + ' 部分');
-      b.onclick = function () {
-        btns.forEach(function (x) { x.classList.remove('active'); });
-        b.classList.add('active');
-        renderOfficePart(pane, part);
-      };
+      b.title = b.textContent;
+      b.onclick = function () { select(i); };
       btns.push(b);
       bar.appendChild(b);
     });
+
+    // 方向键在标签之间移动（与浏览器原生 tablist 习惯一致），
+    // 否则这里按下左右键会被预览弹窗的「上一个 / 下一个文件」抢走。
+    bar.addEventListener('keydown', function (e) {
+      var delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!delta) return;
+      // 只接管焦点确实在切换条里的时候，避免影响弹窗其它位置的按键。
+      if (!bar.contains(document.activeElement)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var next = (active + delta + parts.length) % parts.length;
+      select(next);
+      btns[next].focus();
+    });
+
     return bar;
   }
 
   // renderOfficePart 渲染一个部分（正文 / 一张工作表 / 一张幻灯片）。
   function renderOfficePart(pane, part) {
     pane.textContent = '';
+    // 切到另一张表应当从头开始看，而不是停在上次那张表的滚动位置。
+    pane.scrollTop = 0;
+    pane.scrollLeft = 0;
+    // 留白放在内层：滚动容器自身不带 padding，粘住的表头才能贴着
+    // 纸张顶边，不会在它上方露出一截正在滚动的表格行。
+    var inner = document.createElement('div');
+    inner.className = 'office-pane-inner';
+    pane.appendChild(inner);
     var blocks = (part && part.blocks) || [];
     if (!blocks.length) {
-      pane.appendChild(textEl('div', 'office-tip', '（这一部分没有文字内容）'));
+      inner.appendChild(textEl('div', 'office-tip', '（这一部分没有文字内容）'));
       return;
     }
     blocks.forEach(function (b) {
       var node = buildOfficeBlock(b);
-      if (node) pane.appendChild(node);
+      if (node) inner.appendChild(node);
     });
   }
 
@@ -6232,10 +6292,15 @@
   }
 
   // buildOfficeTable 渲染表格。
+  //
+  // 首行是表头（xlsx 总是把第一行标成 Header）时放进 <thead>：
+  // 长表格滚到几百行之后仍然能看见字段名，这是表格预览最要紧的一条。
   function buildOfficeTable(rows) {
+    rows = rows || [];
     var t = document.createElement('table');
     t.className = 'office-table';
-    (rows || []).forEach(function (row) {
+
+    function buildRow(row) {
       var tr = document.createElement('tr');
       (row || []).forEach(function (cell) {
         var td = document.createElement(cell && cell.h ? 'th' : 'td');
@@ -6244,8 +6309,22 @@
         td.textContent = (cell && cell.t) || '';
         tr.appendChild(td);
       });
-      t.appendChild(tr);
-    });
+      return tr;
+    }
+
+    var start = 0;
+    if (rows.length && rows[0] && rows[0].length) {
+      var allHeader = rows[0].every(function (c) { return !!(c && c.h); });
+      if (allHeader) {
+        var thead = document.createElement('thead');
+        thead.appendChild(buildRow(rows[0]));
+        t.appendChild(thead);
+        start = 1;
+      }
+    }
+    var tbody = document.createElement('tbody');
+    for (var i = start; i < rows.length; i++) tbody.appendChild(buildRow(rows[i]));
+    t.appendChild(tbody);
     return t;
   }
 

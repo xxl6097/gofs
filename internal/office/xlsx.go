@@ -5,6 +5,8 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -25,6 +27,12 @@ type xlsxParser struct {
 }
 
 // xlsx 提取全部工作表。
+//
+// 工作表名与 XML 文件的对应关系**不能按文件名猜**：workbook.xml 里的
+// <sheet r:id="rId3"> 指向 workbook.xml.rels 中的 Target，两者编号常常
+// 与 sheet1.xml / sheet2.xml 的顺序对不上（重命名、删表、复制表之后
+// Excel 不会重排文件名）。按名字配对时猜错，标签就会指着另一张表。
+// 只有 rels 缺失（手写 / 残缺的包）才退回「按编号排序后按下标配对」。
 func (r *reader) xlsx() (*Doc, error) {
 	p := &xlsxParser{rd: r}
 
@@ -32,35 +40,58 @@ func (r *reader) xlsx() (*Doc, error) {
 		p.loadSharedStrings(data)
 	}
 
-	// 工作表名（拿不到就退回 sheet1、sheet2…）。
-	names := p.sheetNames()
+	refs := p.sheetRefs()
+	targets := p.workbookTargets()
 
+	// rels 不可用时的退路：xl/worksheets/ 下按编号排序的 sheet*.xml。
 	sheetPaths := r.entriesUnder("xl/worksheets", func(base string) bool {
 		return strings.HasPrefix(base, "sheet") && strings.HasSuffix(base, ".xml")
 	})
-	if len(sheetPaths) == 0 {
+	if len(refs) == 0 && len(sheetPaths) == 0 {
 		return nil, ErrNotOffice
 	}
 
 	var parts []Part
-	for i, sp := range sheetPaths {
-		if i >= r.maxParts {
-			r.truncated = true
-			break
-		}
-		data, err := r.readEntry(sp)
+	// addPart 读取一张表；文件不存在或是空条目时返回 false。
+	addPart := func(name, entry string) bool {
+		data, err := r.readEntry(entry)
 		if err != nil || len(data) == 0 {
-			continue
+			return false
 		}
-		blocks := p.sheet(data)
-		name := ""
-		if i < len(names) {
-			name = names[i]
+		parts = append(parts, Part{Name: name, Blocks: p.sheet(data)})
+		return true
+	}
+
+	if len(refs) > 0 {
+		for i, ref := range refs {
+			if len(parts) >= r.maxParts {
+				r.truncated = true
+				break
+			}
+			name := ref.name
+			if name == "" {
+				name = fmt.Sprintf("工作表 %d", i+1)
+			}
+			entry := resolvePartTarget(targets[ref.rid])
+			if entry == "" {
+				entry = fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1)
+			}
+			if addPart(name, entry) {
+				continue
+			}
+			// rels 指向的条目读不到（残缺包）：按排序后的第 i 个兜底。
+			if i < len(sheetPaths) {
+				addPart(name, sheetPaths[i])
+			}
 		}
-		if name == "" {
-			name = fmt.Sprintf("工作表 %d", i+1)
+	} else {
+		for i, sp := range sheetPaths {
+			if len(parts) >= r.maxParts {
+				r.truncated = true
+				break
+			}
+			addPart(fmt.Sprintf("工作表 %d", i+1), sp)
 		}
-		parts = append(parts, Part{Name: name, Blocks: blocks})
 	}
 	if len(parts) == 0 {
 		return nil, ErrNotOffice
@@ -110,15 +141,24 @@ func (p *xlsxParser) loadSharedStrings(data []byte) {
 	}
 }
 
-// sheetNames 读 xl/workbook.xml 里的工作表名。
-func (p *xlsxParser) sheetNames() []string {
+// sheetRef 是 workbook.xml 里的一条工作表声明。
+type sheetRef struct {
+	name string
+	// rid 是 r:id，指向 workbook.xml.rels 里的关系条目。
+	rid string
+}
+
+// sheetRefs 按 workbook.xml 中的显示顺序读出工作表名与关系 ID。
+//
+// 没写 r:id 的条目也保留：rels 缺失时还要靠顺序号码兜底。
+func (p *xlsxParser) sheetRefs() []sheetRef {
 	data, err := p.rd.readEntry("xl/workbook.xml")
 	if err != nil || len(data) == 0 {
 		return nil
 	}
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	guard := &xmlGuard{}
-	var names []string
+	var refs []sheetRef
 	for {
 		tok, err := guard.token(dec)
 		if err != nil {
@@ -127,13 +167,63 @@ func (p *xlsxParser) sheetNames() []string {
 			}
 			break
 		}
-		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "sheet" {
-			if n := attrVal(se, "name"); n != "" {
-				names = append(names, n)
-			}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "sheet" {
+			continue
 		}
+		// 带 r: 前缀的属性经 encoding/xml 解析后 Local 是 "id"，
+		// 与普通属性名不会混淆（工作表 id 是 "sheetId"）。
+		refs = append(refs, sheetRef{name: attrVal(se, "name"), rid: attrVal(se, "id")})
 	}
-	return names
+	return refs
+}
+
+// workbookTargets 读 xl/_rels/workbook.xml.rels，把关系 ID 映射到包内路径。
+//
+// rels 是 XML 里的 URI 引用：Target 可能是相对 xl/ 的路径、以 / 开头的
+// 绝对路径，也可能带百分号编码 —— 三种都要落到 zip 的真实条目名上。
+func (p *xlsxParser) workbookTargets() map[string]string {
+	data, err := p.rd.readEntry("xl/_rels/workbook.xml.rels")
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	guard := &xmlGuard{}
+	targets := make(map[string]string)
+	for {
+		tok, err := guard.token(dec)
+		if err != nil {
+			if errors.Is(err, ErrNotOffice) {
+				p.rd.truncated = true
+			}
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "Relationship" {
+			continue
+		}
+		id, target := attrVal(se, "Id"), attrVal(se, "Target")
+		if id == "" || target == "" {
+			continue
+		}
+		targets[id] = target
+	}
+	return targets
+}
+
+// resolvePartTarget 把 rels 的 Target 换成 zip 条目路径。
+func resolvePartTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	if u, err := url.PathUnescape(target); err == nil {
+		target = u
+	}
+	if strings.HasPrefix(target, "/") {
+		return strings.TrimPrefix(path.Clean(target), "/")
+	}
+	return path.Join("xl", target)
 }
 
 // sheet 解析一张工作表，产出一个 table 块。

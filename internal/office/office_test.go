@@ -295,22 +295,70 @@ func TestXlsxBasics(t *testing.T) {
 	}
 }
 
-// TestXlsxSheetOrderNumeric 确认 sheet2 排在 sheet10 前面（按数字而非字符串）。
+// TestXlsxSheetOrderNumeric 确认没有 workbook.xml.rels 时，sheet2 排在
+// sheet10 前面（按数字而非字符串），并且每张表都能读到。
 func TestXlsxSheetOrderNumeric(t *testing.T) {
 	sheetXML := `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>X</t></is></c></row></sheetData></worksheet>`
-	zr := xlsxZip(t, map[string]string{
+	// 不走 xlsxZip：它带的 workbook.xml 会声明两张表，把 rels 路径引进来。
+	zr := buildZip(t, map[string]string{
+		"xl/sharedStrings.xml":      `<sst/>`,
 		"xl/worksheets/sheet2.xml":  sheetXML,
 		"xl/worksheets/sheet10.xml": sheetXML,
 		"xl/worksheets/sheet1.xml":  sheetXML,
-	}, `<sst/>`)
+	})
 
 	doc, err := Extract(zr, "xlsx", Options{})
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	// 表名来自 workbook.xml 的顺序，这里只验证数量与不崩。
 	if len(doc.Parts) != 3 {
 		t.Fatalf("工作表数 = %d，期望 3", len(doc.Parts))
+	}
+	for i, want := range []string{"工作表 1", "工作表 2", "工作表 3"} {
+		if doc.Parts[i].Name != want {
+			t.Errorf("第 %d 张表名 = %q，期望 %q", i, doc.Parts[i].Name, want)
+		}
+	}
+}
+
+// TestXlsxSheetNamesFollowRels 确认表名与工作表 XML 的配对走 workbook.xml.rels，
+// 而不是「排序后的第 N 个文件」。真实文件里删表、复制表之后，
+// 编号顺序与显示顺序经常对不上；按文件名配对会把标签指到别的表上。
+func TestXlsxSheetNamesFollowRels(t *testing.T) {
+	sheetXML := func(text string) string {
+		return `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>` +
+			text + `</t></is></c></row></sheetData></worksheet>`
+	}
+	zr := buildZip(t, map[string]string{
+		"xl/sharedStrings.xml": `<sst/>`,
+		"xl/workbook.xml": `<workbook><sheets>` +
+			`<sheet name="第二张" sheetId="2" r:id="rId2"/>` +
+			`<sheet name="第一张" sheetId="1" r:id="rId1"/>` +
+			`</sheets></workbook>`,
+		// Target 同时覆盖相对路径与以 / 开头的绝对路径两种写法。
+		"xl/_rels/workbook.xml.rels": `<Relationships>` +
+			`<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>` +
+			`<Relationship Id="rId2" Target="/xl/worksheets/sheet2.xml"/>` +
+			`</Relationships>`,
+		"xl/worksheets/sheet1.xml": sheetXML("sheet1 的内容"),
+		"xl/worksheets/sheet2.xml": sheetXML("sheet2 的内容"),
+	})
+
+	doc, err := Extract(zr, "xlsx", Options{})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if len(doc.Parts) != 2 {
+		t.Fatalf("工作表数 = %d，期望 2", len(doc.Parts))
+	}
+	// workbook.xml 的显示顺序优先：第二张（rId2 → sheet2.xml）在前。
+	if doc.Parts[0].Name != "第二张" || doc.Parts[1].Name != "第一张" {
+		t.Fatalf("表名顺序不对：%q / %q", doc.Parts[0].Name, doc.Parts[1].Name)
+	}
+	got0 := doc.Parts[0].Blocks[0].Rows[0][0].Text
+	got1 := doc.Parts[1].Blocks[0].Rows[0][0].Text
+	if got0 != "sheet2 的内容" || got1 != "sheet1 的内容" {
+		t.Errorf("表名与内容错配：%q / %q", got0, got1)
 	}
 }
 

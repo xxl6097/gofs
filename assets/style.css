@@ -147,20 +147,38 @@
 .office-doc {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  min-width: 0;
+  /* 这里**不能**再自己滚动：滚动交给 .office-pane，切换条才会一直留在
+     视野里。以前 .office-doc 也是滚动容器，且外层 .preview-body 是
+     align-items:center —— 长文档被垂直居中后上下一起裁掉，既看不到
+     工作表标签，也没有滚动条。 */
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-/* 多工作表 / 多幻灯片时的切换条。 */
+/* Office 文档要铺满预览区，不能被 .preview-body 的居中规则影响。
+   两个类一起写是为了压过文件末尾 .preview-body 的 align-items:center
+   （那一条在后面，单类选择器同特异度会赢）。 */
+.preview-body.preview-body-office { align-items: stretch; }
+
+/* 多工作表 / 多幻灯片时的切换条。
+   横向排开、不换行：工作表一多，换行会把切换条撑成好几行、把纸张越挤越矮；
+   标签多到放不下时这里自己横向滚动。 */
 .office-tabs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px;
   flex: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
 }
 .office-tab {
+  flex: none;
   padding: 5px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -228,20 +246,27 @@
   overflow: auto;
 }
 
-/* 纸张本体。 */
+/* 纸张本体。纵向、横向都自己滚动：长文档向下翻，宽表格向右拖。 */
 .office-pane {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   background: #ffffff;
   color: #1c1f24;
   border-radius: var(--radius-sm);
-  padding: 30px 36px;
+  /* 留白放在内层：如果留在滚动容器上，内容会从留白区域里滑过，
+     表头粘住时上面就会露出一截滚动中的表格行。 */
+  padding: 0;
   font-size: var(--fs-md);
   line-height: 1.75;
   word-wrap: break-word;
   overflow-wrap: anywhere;
 }
+.office-pane-inner { padding: 30px 36px; min-height: 100%; }
+/* 内容区可聚焦（键盘滚动），焦点环留在纸张内部，不要盖住标题。 */
+.office-pane:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.office-pane:focus:not(:focus-visible) { outline: none; }
 
 .office-p { margin: 0 0 10px; }
 .office-h { margin: 18px 0 8px; font-weight: 650; line-height: 1.35; }
@@ -249,7 +274,7 @@
 .office-h2 { font-size: var(--fs-2xl); }
 .office-h3 { font-size: var(--fs-xl); }
 .office-h4 { font-size: var(--fs-lg); }
-.office-pane > *:first-child { margin-top: 0; }
+.office-pane-inner > *:first-child { margin-top: 0; }
 
 .office-li { margin: 0 0 4px 22px; }
 
@@ -265,18 +290,25 @@
 .office-u { text-decoration: underline; }
 
 /* 表格：Excel 的表格和 Word 的表格共用这一套。
-   边框用浅灰、表头加深，接近文档里的观感。 */
+   边框用浅灰、表头加深，接近文档里的观感。
+   表格本身不再是滚动容器（以前是 display:block + overflow-x:auto）：
+   横向滚动统一交给 .office-pane，否则表头粘不住 —— 表格自己成为
+   滚动盒之后，position:sticky 只认它，不认外层纸张。
+   边框也不合并（border-collapse: collapse 下 Chrome 会把粘住的表头
+   背景画到滚动行下面，行会透出来）：右 + 下各一条，外加表格自身的
+   上 + 左边，拼出来仍是单线网格。 */
 .office-table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-top: 1px solid #d7dbe2;
+  border-left: 1px solid #d7dbe2;
   margin: 0 0 14px;
   font-size: var(--fs-md);
-  max-width: 100%;
-  display: block;
-  overflow-x: auto;
 }
 .office-table th,
 .office-table td {
-  border: 1px solid #d7dbe2;
+  border-right: 1px solid #d7dbe2;
+  border-bottom: 1px solid #d7dbe2;
   padding: 5px 10px;
   text-align: left;
   vertical-align: top;
@@ -287,7 +319,14 @@
   background: #f3f5f8;
   font-weight: 650;
 }
-.office-table tr:nth-child(even) td { background: #fafbfc; }
+/* 表头钉在纸张顶部：几千行的字典表滚到哪里都知道这一列是什么。 */
+.office-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f3f5f8;
+}
+.office-table tbody tr:nth-child(even) td { background: #fafbfc; }
 
 /* 提示与截断说明。 */
 .office-tip {
@@ -300,6 +339,14 @@
 .preview-body > .office-tip { color: #9ba3ae; }
 .office-tip-error { color: #f87171; }
 
+.office-notes {
+  flex: none;
+  max-height: 30%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .office-note {
   flex: none;
   font-size: var(--fs-sm);
@@ -312,7 +359,7 @@
 
 /* 手机端：纸张的留白收一收，否则正文只剩很窄一条。 */
 @media (max-width: 560px) {
-  .office-pane { padding: 16px 14px; font-size: var(--fs-md); }
+  .office-pane-inner { padding: 16px 14px; }
   .office-table th, .office-table td { max-width: 220px; }
 }
 
