@@ -35,8 +35,8 @@ func main() {
 	// 并且只监听 127.0.0.1。账号名刻意不用 admin —— 常见默认名会让
 	// 定向猜口令/锁定的成本低得多。对外部署请用 cmd/gofs 并显式 -a
 	// 配置账号，或使用库入口 gofs.Run（每次启动随机生成账号名与口令）。
-	const user = "gofs"
-	pass := "gofs123"
+	const user = "admin"
+	pass := "admin123"
 
 	// 规则里 @ 后面是 URL 路径（相对服务根目录），不是磁盘路径。
 	cfg.AuthRules = []string{user + ":" + pass + "@/:rw"}
