@@ -701,7 +701,7 @@
     var previewPane = document.createElement('div');
     previewPane.className = 'ed-preview';
     previewPane.hidden = true;
-    // 全屏时把焦点交给预览区，方向键 / PageDown 才能滚动长文档。
+    // 点预览区也能拿到焦点，方向键 / PageDown 才能滚动长文档。
     // -1 表示不进 Tab 序列，弹窗的焦点陷阱不会因此多出一站。
     previewPane.tabIndex = -1;
     stage.appendChild(previewPane);
@@ -809,8 +809,6 @@
     }
 
     function setPreview(on) {
-      // 关掉预览时全屏也一并退出，否则会只剩一个空白的整屏弹窗。
-      if (!on && fullscreen) setFullscreen(false);
       previewOn = on;
       previewPane.hidden = !on;
       stage.classList.toggle('split', on);
@@ -827,12 +825,15 @@
       if (on) refreshPreview();
     }
 
-    // ---- 全屏预览 ----
+    // ---- 全屏编辑与预览 ----
     //
     // 用 CSS 把**弹窗本身**撑到整个窗口，而不是浏览器原生 Fullscreen：
     // 原生全屏会把弹窗标题栏和这颗「退出全屏」按钮一起藏起来，
     // 用户只能靠猜 Esc；而且 `srcdoc` 沙箱 iframe 在部分浏览器里
     // 拿不到全屏权限。现在标题栏、工具栏都还在，退出入口一直可见。
+    //
+    // 全屏不是只读的阅读态：左边编辑区保留，右边预览随手改随手变
+    // （预览刷新本来就跟在 input 事件后面）。
     var fullscreen = false;
 
     function setFullscreen(on) {
@@ -848,10 +849,12 @@
         fsBtn.textContent = on ? '退出全屏' : '全屏';
         fsBtn.classList.toggle('active', on);
         fsBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-        fsBtn.title = on ? '退出全屏（Esc）' : '全屏预览（只读，不影响原文）';
+        fsBtn.title = on ? '退出全屏（Esc）' : '全屏编辑与预览（Esc 退出）';
       }
       if (on) {
-        previewPane.focus();
+        // 桌面端直接把焦点放进编辑区，进来就能改。触屏不抢焦点，
+        // 否则一进全屏就弹出软键盘，把预览挤得只剩一条。
+        if (!window.matchMedia || window.matchMedia('(hover: hover)').matches) ta.focus();
       } else if (fsBtn) {
         fsBtn.focus();
       }
@@ -930,7 +933,7 @@
 
       // 全屏按钮只在有预览的语言里出现（Markdown / HTML / JSON / XML）。
       // 没开预览时点它，会先把预览打开再进全屏。
-      fsBtn = makeTool('全屏', '全屏预览（只读，不影响原文）', function () {
+      fsBtn = makeTool('全屏', '全屏编辑与预览（Esc 退出）', function () {
         setFullscreen(!fullscreen);
       });
       fsBtn.setAttribute('aria-pressed', 'false');

@@ -2763,8 +2763,9 @@ html.booting body::after {
   line-height: 1.75;
 }
 
-/* 全屏预览：编辑区让位，预览铺满弹窗剩余高度。 */
-.ed-root.preview-fs .ed-pane { display: none; }
+/* 全屏编辑与预览：编辑区保留，左边改、右边跟着变。
+   分栏比例沿用 .split；这里只去掉弹窗式的外框，让两栏直接铺满窗口。
+   预览没开时（全屏下仍可点「关闭预览」），编辑区自然占满整行。 */
 .ed-root.preview-fs .ed-stage {
   border: 0;
   border-radius: 0;
@@ -2776,7 +2777,7 @@ html.booting body::after {
 /* 整屏宽度下一行文字太长：Markdown 收成一条居中的阅读栏。
    代码块与表格仍可在栏内横向滚动。 */
 .ed-root.preview-fs .ed-markdown { max-width: 960px; margin: 0 auto; }
-/* 全屏是阅读态，底部那行「行数 / 大小 / 已同步」没有信息量。 */
+/* 全屏时底部那行「行数 / 大小 / 已同步」让位给内容。 */
 .ed-root.preview-fs .ed-foot { display: none; }
 
 @media (max-width: 560px) {
