@@ -3507,14 +3507,6 @@
   // 永久失败 —— 传文件夹时绝大多数都是几 KB 的静态资源，网络抖一下就会
   // 成片报「网络错误」。现在所有文件都重试，大文件续传、小文件整文件重传。
   var uploadMaxRetry = 2;
-  // uploadGatewayRetry 是网关类错误（502/503/504）的首传之外重试次数。
-  //
-  // 这类状态码 gofs **自己不会返回**：PUT 的失败都是带说明的 4xx/5xx
-  // （403/409/413/500/503…），502/504 只可能来自前面的反向代理、隧道或
-  // 负载均衡。典型场景是后端/隧道短暂重启：连接被立刻拒绝，几秒后恢复。
-  // 普通错误 3 次尝试只覆盖 ~0.75s，一次几秒的网关抖动就会把整批文件
-  // 记成永久失败；这类错误值得多等一会儿（1s/2s/4s/8s 退避）。
-  var uploadGatewayRetry = 4;
 
   // sleep 返回一个在 ms 毫秒后 resolve 的 Promise，用于重试退避。
   function sleep(ms) {
@@ -3525,12 +3517,8 @@
   // 优先尊重服务端的 Retry-After（并发闸门回 503 时会带），
   // 否则按 250ms、500ms… 指数退避，封顶 3s：太短会把已经拥塞的链路
   // 打得更满，太长会让零星失败拖住整批。
-  //
-  // 网关类错误（502/503/504）用更长的退避：它们不是请求本身的问题，
-  // 而是后端/代理暂时不可达，等它重启完比立刻重发有效得多。
   function uploadRetryDelay(err, attempt) {
-    if (err && err.retryAfter > 0) return Math.min(15000, err.retryAfter * 1000);
-    if (err && err.gateway) return Math.min(8000, 1000 * Math.pow(2, attempt));
+    if (err && err.retryAfter > 0) return Math.min(10000, err.retryAfter * 1000);
     return Math.min(3000, 250 * Math.pow(2, attempt));
   }
 
@@ -3562,17 +3550,9 @@
           return;
         }
         // 4xx 是请求本身的问题，重试没有意义；5xx、429 与网络错误才值得重试。
-        var detail = (xhr.responseText || '').trim();
-        // 网关返回的 502 往往没有响应体；补一句人话，别让提示只剩「HTTP 502」。
-        if (!detail && (xhr.status === 502 || xhr.status === 504)) {
-          detail = '（网关/代理不可用，请求可能未到达服务端）';
-        }
-        var err = new Error('HTTP ' + xhr.status + (detail ? ' ' + detail : ''));
+        var err = new Error('HTTP ' + xhr.status + ' ' + (xhr.responseText || ''));
         err.status = xhr.status;
         err.retryable = xhr.status >= 500 || xhr.status === 429;
-        // 502/504 只可能由代理层返回（gofs 的 PUT 不会产生这两个状态），
-        // 503 则可能是 gofs 并发闸门，也可能是网关。统一按「网关类」多等一会儿。
-        err.gateway = xhr.status === 502 || xhr.status === 503 || xhr.status === 504;
         var retryAfter = parseFloat(xhr.getResponseHeader('Retry-After'));
         if (isFinite(retryAfter) && retryAfter > 0) err.retryAfter = retryAfter;
         reject(err);
@@ -3642,8 +3622,7 @@
         }
         return out.text;
       } catch (err) {
-        var maxRetry = err && err.gateway ? uploadGatewayRetry : uploadMaxRetry;
-        if (!err.retryable || attempt >= maxRetry) throw err;
+        if (!err.retryable || attempt >= uploadMaxRetry) throw err;
 
         // 先退避再重试：瞬时断连/503 往往下一秒就恢复了，
         // 立刻重发只会把同一条拥塞链路打得更满。
@@ -4090,10 +4069,7 @@
     //
     // 连续出现可重试错误（网络/5xx）说明链路可能整体不可用：让所有 worker
     // 共享一个短暂的暂停窗口，避免上千个请求继续往坏链路上灌。只有连续
-    // 若干个任务在重试后仍失败才触发，正常的零星抖不会拖慢整批。
-    //
-    // 网关错误（502/503/504）按更严格的阈值、更长的窗口处理：那说明后端
-    // 或代理整体不可达，继续发只会让每个任务都把重试预算烧光。
+    // 5 个任务在重试后仍失败才触发，正常的零星抖不会拖慢整批。
     var linkFailStreak = 0;
     var linkPauseUntil = 0;
     async function waitForLink() {
@@ -4103,10 +4079,8 @@
     function noteUploadFailure(err) {
       if (!err.retryable) { linkFailStreak = 0; return; }
       linkFailStreak++;
-      var threshold = err.gateway ? 2 : 5;
-      if (linkFailStreak >= threshold) {
-        linkPauseUntil = Math.max(linkPauseUntil,
-          Date.now() + (err.gateway ? 3000 : 1000));
+      if (linkFailStreak >= 5) {
+        linkPauseUntil = Math.max(linkPauseUntil, Date.now() + 1000);
         linkFailStreak = 0;
       }
     }
@@ -4139,7 +4113,6 @@
             rel: job.rel,
             message: err.message,
             network: !!err.network,
-            gateway: !!err.gateway,
             file: job.file
           });
           noteUploadFailure(err);
@@ -4202,18 +4175,12 @@
     hint.className = 'hint-box';
     hint.style.marginBottom = '12px';
     var networkCount = failures.filter(function (f) { return f.network; }).length;
-    var gatewayCount = failures.filter(function (f) { return f.gateway; }).length;
     var hintText = '共 ' + failures.length + ' 个文件失败。';
     if (networkCount) {
       hintText += '其中 ' + networkCount + ' 个是网络错误：请求没有完成' +
         '（连接中断、代理/隧道重置，或源文件已不可读）。';
     }
-    if (gatewayCount) {
-      hintText += '其中 ' + gatewayCount + ' 个是网关错误（502/503/504）：' +
-        '请求很可能没有到达 gofs，通常是反向代理、隧道或后端在短暂重启；' +
-        '稍后再点「重试失败项」多半能成功。';
-    }
-    if (networkCount + gatewayCount < failures.length) {
+    if (networkCount < failures.length) {
       hintText += '其余是服务端拒绝的 HTTP 错误，原因见下。';
     }
     hint.textContent = hintText;
