@@ -281,6 +281,32 @@ created /uploads/report.pdf (2483912 bytes)
 `X-Gofs-Path` 为 ASCII 安全做了百分号编码，中文文件名需要先解码，
 例如 Go 用 `url.PathUnescape`，Python 用 `urllib.parse.unquote`。
 
+### 3.5 预置同名目标：`CONFLICT /<路径>?conflict=...`
+
+网页端上传整个文件夹时，先在**根文件夹**上调用一次 `CONFLICT`，把旧目录整体
+替换或备份，再逐个文件普通上传。这样备份得到的是一份完整的旧文件夹，而不是
+根目录里每个同名文件各一份 `名称-时间戳` 碎片。
+
+```http
+CONFLICT /proj?conflict=backup HTTP/1.1
+Authorization: Basic base64(user:pass)
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `conflict=replace` | 递归删除同名目标（含目录内容） |
+| `conflict=backup` | 同名目标改名为 `名称-时间戳`（文件保留扩展名，目录不带扩展名） |
+
+规则：
+
+- 只处理同名目标，不写入任何内容；响应 `204 No Content`。目标不存在时同样
+  返回 204（幂等），调用方可以放心地先 `CONFLICT` 再上传。
+- 权限与上传一致：要求开启上传（`--allow-upload`）并对目标有写权限；目录会按
+  后代逐项复核 ACL，目录只读子项不会被一次替换/备份绕过。
+- 不允许对服务根目录执行；非法或缺失的 `conflict` 返回 `400`。
+- 路径带尾斜杠时会先去重，`/proj/` 与 `/proj` 等价——备份落在同级的
+  `proj-时间戳`，不会嵌进 `/proj/` 内部。
+
 ---
 
 ## 4. `POST /<目录路径>/`：multipart 表单上传

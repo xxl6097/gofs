@@ -609,6 +609,43 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, urlPath, ab
 	w.WriteHeader(http.StatusCreated)
 }
 
+// handleConflict 在真正上传前处理一个文件夹（或文件）的同名目标。
+//
+// 网页端上传整个文件夹时，同名冲突只应发生在**根文件夹**这一层：
+// 先调用一次 CONFLICT 把根文件夹替换/备份掉，再逐个文件普通上传。
+// 这样不会出现「根目录里每个文件各备份一份」的碎片化备份。
+//
+// 只接受 conflict=replace|backup。权限与上传一致：要求开启上传并对
+// 目标有写权限；目录会按后代逐项复核（替换）或复核移动后的权限（备份）。
+func (s *Server) handleConflict(w http.ResponseWriter, r *http.Request, urlPath, abs string, p permResult) {
+	if !s.cfg.AllowUpload {
+		http.Error(w, "403 Forbidden: 未开启上传（--allow-upload）", http.StatusForbidden)
+		return
+	}
+	if !s.requireWrite(w, p) {
+		return
+	}
+	mode := conflictModeOf(r)
+	if mode == conflictNone {
+		http.Error(w, "400 Bad Request: conflict 必须是 replace 或 backup",
+			http.StatusBadRequest)
+		return
+	}
+	// 备份名按「同目录 + 新名字」计算；先去掉尾斜杠，避免把 /docs/
+	// 当成 /docs 目录里的一个条目。
+	if urlPath != "/" {
+		urlPath = strings.TrimSuffix(urlPath, "/")
+	}
+	if isRootPath(urlPath) || s.res.IsRoot(abs) {
+		http.Error(w, "403 Forbidden: 不允许替换或备份服务根目录", http.StatusForbidden)
+		return
+	}
+	if !s.resolveUploadConflict(w, r, p, urlPath, abs, mode) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleMove 移动或重命名。目标取自标准的 Destination 头。
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath string, p permResult) {
 	if !s.cfg.AllowUpload {

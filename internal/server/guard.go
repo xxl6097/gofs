@@ -226,6 +226,7 @@ var writeMethods = map[string]bool{
 	http.MethodDelete: true,
 	MethodMkcol:       true,
 	MethodMove:        true,
+	MethodConflict:    true,
 	MethodCopy:        true,
 }
 

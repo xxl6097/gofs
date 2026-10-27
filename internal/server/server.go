@@ -68,6 +68,9 @@ const (
 	MethodMove = "MOVE"
 	// MethodCopy 复制资源。
 	MethodCopy = "COPY"
+	// MethodConflict 在写入前处理同名目标（替换 / 备份）。
+	// 供网页端上传整个文件夹时先处理根文件夹，避免逐文件备份。
+	MethodConflict = "CONFLICT"
 )
 
 // New 构造 Server。assets 为内嵌前端资源（根目录即 http 路径根）。
@@ -420,7 +423,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, MKCOL, MOVE, OPTIONS, HEAD")
+		h.Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, MKCOL, MOVE, CONFLICT, OPTIONS, HEAD")
 		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Update-Range, Destination, Range, X-Gofs-Ajax")
 		h.Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Location, X-Gofs-Offset, X-Gofs-Path")
 		if r.Method == http.MethodOptions {
@@ -1239,7 +1242,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if fi, lerr := os.Lstat(abs); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		leafLink = true
 	}
-	if !(leafLink && (r.Method == http.MethodDelete || r.Method == MethodMove)) {
+	if !(leafLink && (r.Method == http.MethodDelete || r.Method == MethodMove || r.Method == MethodConflict)) {
 		realURL, realAbs, realPerm, within := s.realPermOf(r, abs)
 		// 记录授权时看到的真实目标，后续 open 用它做 inode 复核，堵住
 		// “检查完再把路径换成软链”的 TOCTOU。
@@ -1285,8 +1288,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.handleMkcol(w, r, urlPath, abs, p)
 	case MethodMove:
 		s.handleMove(w, r, urlPath, p)
+	case MethodConflict:
+		s.handleConflict(w, r, urlPath, abs, p)
 	default:
-		w.Header().Set("Allow", "GET, HEAD, PUT, POST, DELETE, MKCOL, MOVE, OPTIONS")
+		w.Header().Set("Allow", "GET, HEAD, PUT, POST, DELETE, MKCOL, MOVE, CONFLICT, OPTIONS")
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }

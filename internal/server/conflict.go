@@ -183,7 +183,7 @@ func (s *Server) resolveUploadConflict(w http.ResponseWriter, r *http.Request, p
 			s.writeErr(w, err)
 			return false
 		}
-		backupURL := path.Join(path.Dir(urlPath), filepath.Base(backupAbs))
+		backupURL := path.Join(path.Dir(strings.TrimSuffix(urlPath, "/")), filepath.Base(backupAbs))
 		if !s.uploadBackupAllowed(w, r, p, backupURL, backupAbs) {
 			return false
 		}
@@ -193,7 +193,8 @@ func (s *Server) resolveUploadConflict(w http.ResponseWriter, r *http.Request, p
 				return false
 			}
 		}
-		if err := s.secureRename(abs, backupAbs); err != nil {
+		if err := s.secureRename(abs, backupAbs); err != nil &&
+			!errors.Is(err, fs.ErrNotExist) {
 			s.writeErr(w, err)
 			return false
 		}

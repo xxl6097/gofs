@@ -1847,8 +1847,8 @@
       var tip = document.createElement('div');
       tip.className = 'hint-box';
       tip.style.marginTop = '14px';
-      tip.textContent = '备份：先把原' + noun + '重命名为「名称-时间戳.扩展名」，再写入新' + noun +
-        '；替换：先删除原' + noun + '，再写入新' + noun + '。';
+      tip.textContent = '备份：先把原目标改名为「名称-时间戳」（文件保留扩展名），' +
+        '再上传新内容；替换：先删除原目标，再写入新内容。';
       body.appendChild(tip);
 
       var m = openModal({
@@ -3812,19 +3812,22 @@
     return joinPath(dir, rel);
   }
 
-  // detectUploadConflicts 并发地用 HEAD 探测哪些目标已经存在。
+  // detectUploadConflicts 并发地用 HEAD 探测哪些候选目标已经存在。
   //
+  // candidates 的元素形如 { url }，url 是不带查询串的文件空间地址。
   // 并发数比上传低一档：这些只是轻量的探测请求，跑太快意义不大。
-  async function detectUploadConflicts(jobs) {
+  async function detectUploadConflicts(candidates) {
     var found = [];
     var cursor = 0;
-    var workers = Math.min(8, jobs.length);
+    var workers = Math.min(8, candidates.length);
     async function worker() {
       for (;;) {
         var i = cursor++;
-        if (i >= jobs.length) return;
+        if (i >= candidates.length) return;
         try {
-          var res = await apiFetch(fileURL(jobs[i].dest) + '?stat=1', { method: 'HEAD' });
+          // stat=1 让服务端只回答“存在吗”，不会被 --render-spa 的回退
+          // 伪装成 200；否则 SPA 部署下每次上传都会被误判成重名。
+          var res = await apiFetch(candidates[i].url + '?stat=1', { method: 'HEAD' });
           if (res.ok) found.push(i);
         } catch (e) {
           // 探测失败（网络抖动等）不阻断上传：真正的 PUT 会给出准确错误。
@@ -3835,7 +3838,7 @@
     for (var w = 0; w < workers; w++) pool.push(worker());
     await Promise.all(pool);
     found.sort(function (a, b) { return a - b; });
-    return found.map(function (i) { return jobs[i]; });
+    return found.map(function (i) { return candidates[i]; });
   }
 
   async function uploadFiles(files, targetDir, opts) {
@@ -3876,25 +3879,99 @@
       if (!okGo) return;
     }
 
-    // 上传前先探测同名目标。发现重名只问一次，用户的选择对整批文件生效；
+    // 文件夹上传按「根文件夹」归组：同名冲突只处理根文件夹一次。
+    // 逐文件处理会给根目录里的每个同名文件各生成一份备份，既碎又难找。
+    var rootMap = Object.create(null);
+    var rootList = [];
+    var looseJobs = [];
+    for (var rj = 0; rj < jobs.length; rj++) {
+      var jb = jobs[rj];
+      var slash = jb.rel.indexOf('/');
+      if (slash > 0) {
+        var rootName = jb.rel.slice(0, slash);
+        var group = rootMap[rootName];
+        if (!group) {
+          group = rootMap[rootName] = {
+            name: rootName,
+            url: joinPath(targetDir, rootName),
+            jobs: []
+          };
+          rootList.push(group);
+        }
+        group.jobs.push(jb);
+        jb.rootName = rootName;
+      } else {
+        looseJobs.push(jb);
+      }
+    }
+
+    // 发现重名只问一次：文件夹只看根文件夹，散装文件逐个看。
     // 没选就取消整次上传，不会悄悄覆盖任何已有文件。
     var conflictMode = '';
+    var conflictingRoots = [];
+    var conflictingFiles = [];
     if (retryMode) {
-      // 保留用户最初的选择；没有选择过就用 replace —— 上一次失败可能已在
-      // 服务端留下半截文件，而它不是用户的数据。
-      conflictMode = opts.conflictMode || 'replace';
+      // 重试只覆盖上一次失败留下的半截文件；根文件夹在第一次上传时
+      // 已经处理过，不能再备份一次。
+      conflictMode = 'replace';
     } else {
-      var conflicts = await detectUploadConflicts(jobs);
+      var rootHits = await detectUploadConflicts(rootList.map(function (g) {
+        return { url: fileURL(g.url), root: g };
+      }));
+      var fileHits = await detectUploadConflicts(looseJobs.map(function (j) {
+        return { url: fileURL(j.dest), job: j };
+      }));
+      var conflicts = rootHits.map(function (h) {
+        return { name: h.root.name + '/', isDir: true };
+      }).concat(fileHits.map(function (h) {
+        return { name: h.job.rel };
+      }));
       if (conflicts.length) {
+        var folderOnly = rootHits.length > 0 && fileHits.length === 0;
         conflictMode = await chooseConflictMode({
-          title: '发现同名文件',
+          title: folderOnly ? '发现同名文件夹' : '发现同名目标',
+          noun: folderOnly ? '文件夹' : '文件',
+          folderOnly: folderOnly,
           conflicts: conflicts,
           context: '存入 ' + dirDisplay(isTree ? targetDir : destDir) +
-          '；同一个选择会应用到本次全部同名文件。',
+            '；文件夹整体处理根目录，散装文件逐个处理；同一个选择应用到本次全部同名目标。',
           backupLabel: '备份上传',
           replaceLabel: '替换上传'
         });
         if (!conflictMode) return;
+        conflictingRoots = rootHits.map(function (h) { return h.root; });
+        conflictingFiles = fileHits.map(function (h) { return h.job; });
+      }
+    }
+
+    // 根文件夹只处理一次：先替换/备份整个根目录，再普通上传各文件。
+    // 这样备份出来的是一份完整的旧文件夹，而不是每个文件各一份。
+    for (var cr = 0; cr < conflictingRoots.length; cr++) {
+      var rg = conflictingRoots[cr];
+      var cres = await apiFetch(fileURL(rg.url) + '?conflict=' + encodeURIComponent(conflictMode), {
+        method: 'CONFLICT'
+      });
+      if (!cres.ok) {
+        toast('err', '准备文件夹 ' + rg.name + ' 失败：' +
+          ((await cres.text()).trim() || ('HTTP ' + cres.status)));
+        return;
+      }
+    }
+
+    // 标记每个任务的冲突处理方式：
+    //   - 文件夹：根目录已处理，逐文件请求不再带 conflict；
+    //   - 散装文件：只有探测到重名的才带；
+    //   - 重试：一律 replace，覆盖上次遗留的半截文件。
+    for (var cj = 0; cj < jobs.length; cj++) {
+      var cjob = jobs[cj];
+      if (retryMode) {
+        cjob.conflict = 'replace';
+      } else if (cjob.rootName) {
+        cjob.conflict = '';
+      } else if (conflictingFiles.indexOf(cjob) >= 0) {
+        cjob.conflict = conflictMode;
+      } else {
+        cjob.conflict = '';
       }
     }
 
@@ -4021,7 +4098,7 @@
         var job = jobs[idx];
         repaint(job.rel, idx + 1);
         var target = fileURL(job.dest) +
-          (conflictMode ? '?conflict=' + conflictMode : '');
+          (job.conflict ? '?conflict=' + encodeURIComponent(job.conflict) : '');
         try {
           await putFile(target, job.file, function (loaded) {
             loadedTotal += loaded - loadedByJob[idx];

@@ -380,3 +380,76 @@ func TestExtractAncestorFileConflict(t *testing.T) {
 		t.Errorf("备份内容 = %q", old)
 	}
 }
+
+// TestConflictMethodBackupRootFolder 验证文件夹上传只备份根文件夹。
+func TestConflictMethodBackupRootFolder(t *testing.T) {
+	root := makeFixture(t)
+	writeFile(t, filepath.Join(root, "proj", "old.txt"), []byte("old"))
+	writeFile(t, filepath.Join(root, "proj", "sub", "nested.txt"), []byte("nested"))
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	r := do(t, s, MethodConflict, "/proj?conflict=backup", nil, nil)
+	if r.code != http.StatusNoContent {
+		t.Fatalf("状态码 = %d, 期望 204；%s", r.code, r.body)
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "proj-*"))
+	if len(matches) != 1 {
+		t.Fatalf("根文件夹备份数量 = %d, 期望 1：%v", len(matches), matches)
+	}
+	if got, _ := os.ReadFile(filepath.Join(matches[0], "old.txt")); string(got) != "old" {
+		t.Errorf("备份内容缺失: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(matches[0], "sub", "nested.txt")); err != nil {
+		t.Errorf("备份目录结构缺失: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "proj")); !os.IsNotExist(err) {
+		t.Errorf("原根文件夹仍然存在")
+	}
+
+	// 之后普通上传不应再触发逐文件备份。
+	for _, name := range []string{"a.txt", "sub/b.txt"} {
+		rr := do(t, s, http.MethodPut, "/proj/"+name, strings.NewReader("new"), nil)
+		if rr.code != http.StatusCreated {
+			t.Fatalf("上传 %s 失败：%d %s", name, rr.code, rr.body)
+		}
+	}
+	if matches, _ := filepath.Glob(filepath.Join(root, "proj", "*-*")); len(matches) != 0 {
+		t.Errorf("普通上传不应再产生逐文件备份：%v", matches)
+	}
+}
+
+// TestConflictMethodReplaceRootFolder 验证文件夹上传可以整体替换根文件夹。
+func TestConflictMethodReplaceRootFolder(t *testing.T) {
+	root := makeFixture(t)
+	writeFile(t, filepath.Join(root, "proj", "old.txt"), []byte("old"))
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	if r := do(t, s, MethodConflict, "/proj?conflict=replace", nil, nil); r.code != http.StatusNoContent {
+		t.Fatalf("状态码 = %d, 期望 204；%s", r.code, r.body)
+	}
+	if _, err := os.Stat(filepath.Join(root, "proj")); !os.IsNotExist(err) {
+		t.Fatalf("替换后根文件夹仍然存在")
+	}
+	if r := do(t, s, http.MethodPut, "/proj/new.txt", strings.NewReader("new"), nil); r.code != http.StatusCreated {
+		t.Fatalf("上传失败：%d %s", r.code, r.body)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(root, "proj-*")); len(matches) != 0 {
+		t.Errorf("replace 不应产生备份：%v", matches)
+	}
+}
+
+// TestConflictMethodValidation 验证根目录与非法参数被拒绝。
+func TestConflictMethodValidation(t *testing.T) {
+	root := makeFixture(t)
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	if r := do(t, s, MethodConflict, "/?conflict=backup", nil, nil); r.code != http.StatusForbidden {
+		t.Errorf("对服务根执行 CONFLICT 返回 %d, 期望 403", r.code)
+	}
+	if r := do(t, s, MethodConflict, "/docs?conflict=banana", nil, nil); r.code != http.StatusBadRequest {
+		t.Errorf("非法 conflict 返回 %d, 期望 400", r.code)
+	}
+	if r := do(t, s, MethodConflict, "/docs", nil, nil); r.code != http.StatusBadRequest {
+		t.Errorf("缺少 conflict 返回 %d, 期望 400", r.code)
+	}
+}
