@@ -160,6 +160,15 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, urlPath strin
 	}
 
 	appendMode := strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Update-Range")), "append")
+	// 同名的替换/备份只对「从头写入」生效。续传必须保留磁盘上的半截文件，
+	// 否则 conflict=replace 会把续传点删掉，append 又从空文件开始写。
+	if !appendMode {
+		if mode := conflictModeOf(r); mode != conflictNone {
+			if !s.resolveUploadConflict(w, r, p, destPath, abs, mode) {
+				return
+			}
+		}
+	}
 	flags := os.O_CREATE | os.O_WRONLY
 	if appendMode {
 		flags |= os.O_APPEND
@@ -283,6 +292,7 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 		http.Error(w, "400 Bad Request: 未收到任何文件", http.StatusBadRequest)
 		return
 	}
+	uploadConflict := parseConflictMode(r.FormValue("conflict"))
 
 	// 目标目录 = 当前目录 [+ 表单指定的子路径] [+ 年/月/日 归档目录]。
 	destDir := fsutil.CleanURLPath(urlPath)
@@ -409,6 +419,14 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 				return
 			}
 		}
+		// 没有指定替换/备份时，同名目录会挡住普通文件写入；
+		// 提前拒绝，避免整批文件写到一半才在 savePart 里失败。
+		if uploadConflict == conflictNone {
+			if fi, err := os.Lstat(dst); err == nil && fi.IsDir() {
+				http.Error(w, "409 Conflict: 同名目录已存在", http.StatusConflict)
+				return
+			}
+		}
 		targets = append(targets, uploadTarget{fh: fh, dst: dst, url: fileURL})
 	}
 
@@ -423,6 +441,13 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, urlPath stri
 
 	saved := make([]string, 0, len(targets))
 	for _, t := range targets {
+		// 整批校验已经全部通过，这里才真正动磁盘：先按用户选择的
+		// 替换/备份方式处理同名目标，再写入新文件。
+		if uploadConflict != conflictNone {
+			if !s.resolveUploadConflict(w, r, p, t.url, t.dst, uploadConflict) {
+				return
+			}
+		}
 		src, err := t.fh.Open()
 		if err != nil {
 			s.writeErr(w, err)

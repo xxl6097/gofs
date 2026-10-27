@@ -1539,13 +1539,22 @@
       el.style.transform = 'translateX(12px)';
       setTimeout(function () { el.remove(); }, 220);
     };
-    if (action) {
-      var btnEl = document.createElement('button');
-      btnEl.type = 'button';
-      btnEl.className = 'toast-action';
-      btnEl.textContent = action.label;
-      btnEl.onclick = function () { dismiss(); action.onClick(); };
-      el.appendChild(btnEl);
+    // action 既可以是单个 {label,onClick}，也可以是数组。
+    // 上传失败同时需要「查看目录」「重试失败项」两个出口，单个按钮不够用。
+    var actions = (action ? (Array.isArray(action) ? action : [action]) : [])
+      .filter(function (a) { return a && a.label; });
+    if (actions.length) {
+      var actionsEl = document.createElement('div');
+      actionsEl.className = 'toast-actions';
+      actions.forEach(function (a) {
+        var btnEl = document.createElement('button');
+        btnEl.type = 'button';
+        btnEl.className = 'toast-action';
+        btnEl.textContent = a.label;
+        btnEl.onclick = function () { dismiss(); a.onClick(); };
+        actionsEl.appendChild(btnEl);
+      });
+      el.appendChild(actionsEl);
     }
     // 自动消失的提示也必须能手动关掉：它可能正盖着一行文件，
     // 而用户不想等 3 秒。
@@ -1575,7 +1584,7 @@
     }
     // 手机上 toast 挂在顶栏下方，需要实时的 --topbar-h。
     if (typeof syncToolbarOffset === 'function') syncToolbarOffset();
-    setTimeout(dismiss, ms || (kind === 'err' ? 7000 : (action ? 9000 : 3200)));
+    setTimeout(dismiss, ms || (kind === 'err' ? 7000 : (actions.length ? 9000 : 3200)));
   }
 
   // ---------------------------------------------------------------- 弹窗
@@ -1788,6 +1797,75 @@
               finish(true);   // 先定值
               m.close();      // 再关闭（此时 onClose 的 finish(false) 会被忽略）
             }
+          }
+        ])
+      });
+    });
+  }
+
+  // chooseConflictMode 在发现同名条目时让用户选择「替换」还是「备份」。
+  //
+  // 返回值：'replace' / 'backup' / ''（取消）。两条路径都会先处理原条目，
+  // 再写入新内容；区别只在于原条目是被删除还是被改名保留。
+  function chooseConflictMode(opts) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(v) {
+        if (settled) return;
+        settled = true;
+        resolve(v);
+      }
+
+      var body = document.createElement('div');
+      var lead = document.createElement('div');
+      lead.style.lineHeight = '1.8';
+      var noun = opts.noun || '文件';
+      lead.textContent = '检测到 ' + opts.conflicts.length + ' 个同名' + noun + '：';
+      body.appendChild(lead);
+
+      var box = document.createElement('div');
+      box.className = 'hint-box';
+      box.style.marginTop = '12px';
+      box.style.maxHeight = '160px';
+      box.style.overflow = 'auto';
+      box.style.whiteSpace = 'pre-wrap';
+      var names = opts.conflicts.slice(0, 8).map(function (c) {
+        return typeof c === 'string' ? c : c.name;
+      });
+      box.textContent = names.join('\n') +
+        (opts.conflicts.length > 8 ? '\n… 另有 ' + (opts.conflicts.length - 8) + ' 个' : '');
+      body.appendChild(box);
+
+      if (opts.context) {
+        var ctx = document.createElement('div');
+        ctx.className = 'hint';
+        ctx.style.marginTop = '10px';
+        ctx.textContent = opts.context;
+        body.appendChild(ctx);
+      }
+
+      var tip = document.createElement('div');
+      tip.className = 'hint-box';
+      tip.style.marginTop = '14px';
+      tip.textContent = '备份：先把原' + noun + '重命名为「名称-时间戳.扩展名」，再写入新' + noun +
+        '；替换：先删除原' + noun + '，再写入新' + noun + '。';
+      body.appendChild(tip);
+
+      var m = openModal({
+        title: opts.title || '发现同名' + noun,
+        body: body,
+        onClose: function () { finish(''); },
+        footer: modalFoot([
+          { label: '取消', onClick: function () { finish(''); m.close(); } },
+          {
+            label: opts.backupLabel || '备份上传',
+            cls: 'primary',
+            onClick: function () { finish('backup'); m.close(); }
+          },
+          {
+            label: opts.replaceLabel || '替换上传',
+            cls: 'danger-solid',
+            onClick: function () { finish('replace'); m.close(); }
           }
         ])
       });
@@ -3424,7 +3502,25 @@
   // resumeMinSize 是启用断点续传的门槛：文件比它小的时候，
   // 重传一遍比「查询断点 + 续传」更快也更简单。
   var resumeMinSize = 8 * 1024 * 1024;
-  var resumeMaxRetry = 2;
+  // uploadMaxRetry 是首传之外的重试次数。
+  // 早先只有 ≥ resumeMinSize 的大文件才重试，小文件一次瞬时断连就被记成
+  // 永久失败 —— 传文件夹时绝大多数都是几 KB 的静态资源，网络抖一下就会
+  // 成片报「网络错误」。现在所有文件都重试，大文件续传、小文件整文件重传。
+  var uploadMaxRetry = 2;
+
+  // sleep 返回一个在 ms 毫秒后 resolve 的 Promise，用于重试退避。
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // uploadRetryDelay 计算失败后到下一次尝试之间的等待时间。
+  // 优先尊重服务端的 Retry-After（并发闸门回 503 时会带），
+  // 否则按 250ms、500ms… 指数退避，封顶 3s：太短会把已经拥塞的链路
+  // 打得更满，太长会让零星失败拖住整批。
+  function uploadRetryDelay(err, attempt) {
+    if (err && err.retryAfter > 0) return Math.min(10000, err.retryAfter * 1000);
+    return Math.min(3000, 250 * Math.pow(2, attempt));
+  }
 
   // putOnce 发一次 PUT。offset 为 0 表示从头传（覆盖写）。
   function putOnce(url, file, offset, onProgress) {
@@ -3453,17 +3549,29 @@
           });
           return;
         }
-        // 4xx 是请求本身的问题，重试没有意义；5xx 与网络错误才值得续传。
+        // 4xx 是请求本身的问题，重试没有意义；5xx、429 与网络错误才值得重试。
         var err = new Error('HTTP ' + xhr.status + ' ' + (xhr.responseText || ''));
-        err.retryable = xhr.status >= 500;
+        err.status = xhr.status;
+        err.retryable = xhr.status >= 500 || xhr.status === 429;
+        var retryAfter = parseFloat(xhr.getResponseHeader('Retry-After'));
+        if (isFinite(retryAfter) && retryAfter > 0) err.retryAfter = retryAfter;
         reject(err);
       };
       xhr.onerror = function () {
+        // status 0 表示浏览器没拿到 HTTP 响应：连接被重置/拒绝、代理拦截，
+        // 或者本地 File 已经读不到了。这类错误可以安全重试。
         var err = new Error('网络错误');
+        err.status = 0;
+        err.network = true;
         err.retryable = true;
         reject(err);
       };
-      xhr.onabort = function () { reject(new Error('已取消')); };
+      xhr.onabort = function () {
+        var err = new Error('已取消');
+        err.cancelled = true;
+        err.retryable = false;
+        reject(err);
+      };
       xhr.send(body);
     });
   }
@@ -3498,40 +3606,49 @@
   // 这次 HEAD 只对够大、值得续传的文件做（小文件直接跳过，
   // 免得给「传一堆小文件」的场景平白多加一倍请求）。
   async function putFile(url, file, onProgress) {
-    var baseSize = file.size >= resumeMinSize ? await remoteSize(url) : -1;
+    var canResume = file.size >= resumeMinSize;
+    // 只有大文件值得先问服务端已落盘多少字节；小文件直接整文件重传更简单。
+    var baseSize = canResume ? await remoteSize(url) : -1;
     var offset = 0;
     for (var attempt = 0; ; attempt++) {
       try {
         var out = await putOnce(url, file, offset, onProgress);
         // 续传之后大小不对，说明中间有内容丢失（服务端被别的写法覆盖过、
         // 或断点算错了）。宁可报错让用户重传，也不要留下一个看起来成功、
-        // 实际残缺的文件。
-        if (offset > 0 && file.size >= resumeMinSize &&
-            offset + out.written !== file.size) {
+        // 实际残缺的文件。这个错误没有 retryable，会直接抛给上层。
+        if (offset > 0 && canResume && offset + out.written !== file.size) {
           throw new Error('续传后大小不一致（' + (offset + out.written) +
             ' / ' + file.size + ' 字节），请重新上传');
         }
         return out.text;
       } catch (err) {
-        if (!err.retryable || file.size < resumeMinSize || attempt >= resumeMaxRetry) throw err;
+        if (!err.retryable || attempt >= uploadMaxRetry) throw err;
 
-        var got = await remoteSize(url);
-        // 三个条件缺一不可：确实写了一部分、还没写完、**且与上传前不一样**。
-        if (got > 0 && got < file.size && got !== baseSize) {
-          offset = got;
-          if (onProgress) onProgress(offset, file.size);
-          toast('warn', '上传中断，已从 ' + fmtSize(offset) + ' 处继续');
+        // 先退避再重试：瞬时断连/503 往往下一秒就恢复了，
+        // 立刻重发只会把同一条拥塞链路打得更满。
+        await sleep(uploadRetryDelay(err, attempt));
+
+        if (canResume) {
+          var got = await remoteSize(url);
+          // 三个条件缺一不可：确实写了一部分、还没写完、且与上传前不一样。
+          if (got > 0 && got < file.size && got !== baseSize) {
+            offset = got;
+            if (onProgress) onProgress(offset, file.size);
+            toast('warn', '上传中断，已从 ' + fmtSize(offset) + ' 处继续');
+            continue;
+          }
+          // 剩下的那截证明不了是我们的（服务端压根没碰到文件），
+          // 或者什么都没写进去 —— 那就从头上传：覆盖写会把旧文件截断，
+          // 拼不出「旧内容 + 新尾巴」这种东西。
+          offset = 0;
+          baseSize = got;
+          if (onProgress) onProgress(0, file.size);
+          toast('warn', '上传中断，改为从头重传');
           continue;
         }
-        // 剩下的那截证明不了是我们的（服务端压根没碰到文件），
-        // 或者什么都没写进去 —— 那就从头上传：覆盖写会把旧文件截断，
-        // 拼不出「旧内容 + 新尾巴」这种东西。
-        // 已经在从头传了还是失败，就交给上层报错，别在这里打转。
-        if (offset === 0) throw err;
-        offset = 0;
-        baseSize = got;
+
+        // 小文件：整文件重传。PUT 是覆盖写，重传会截断上一次留下的半截内容。
         if (onProgress) onProgress(0, file.size);
-        toast('warn', '上传中断，改为从头重传');
       }
     }
   }
@@ -3682,10 +3799,55 @@
 
   // ---- 上传 ----------------------------------------------------------------
 
-  async function uploadFiles(files, targetDir) {
+  // uploadDest 返回单个上传文件的实际落点。
+  //
+  // 必须与服务端 applyUploadLayout 一致：只有「直接传到服务根目录的文件」
+  // 才会被归档进 年/月/日；文件夹里的文件（rel 含 /）不归档。
+  // 前端显式算好落点，才能在上传前用 HEAD 正确检查同名文件。
+  function uploadDest(targetDir, rel) {
+    var dir = targetDir;
+    if (archiveAt(targetDir) && rel.indexOf('/') < 0) {
+      dir = joinPath(dir, uploadDateDir());
+    }
+    return joinPath(dir, rel);
+  }
+
+  // detectUploadConflicts 并发地用 HEAD 探测哪些目标已经存在。
+  //
+  // 并发数比上传低一档：这些只是轻量的探测请求，跑太快意义不大。
+  async function detectUploadConflicts(jobs) {
+    var found = [];
+    var cursor = 0;
+    var workers = Math.min(8, jobs.length);
+    async function worker() {
+      for (;;) {
+        var i = cursor++;
+        if (i >= jobs.length) return;
+        try {
+          var res = await apiFetch(fileURL(jobs[i].dest) + '?stat=1', { method: 'HEAD' });
+          if (res.ok) found.push(i);
+        } catch (e) {
+          // 探测失败（网络抖动等）不阻断上传：真正的 PUT 会给出准确错误。
+        }
+      }
+    }
+    var pool = [];
+    for (var w = 0; w < workers; w++) pool.push(worker());
+    await Promise.all(pool);
+    found.sort(function (a, b) { return a - b; });
+    return found.map(function (i) { return jobs[i]; });
+  }
+
+  async function uploadFiles(files, targetDir, opts) {
     if (!files || !files.length) return;
     if (!can('write')) { toast('warn', '当前没有上传权限'); return; }
+    opts = opts || {};
+    // retryMode 是「重试失败项」发起的：这些文件刚刚已经确认过，
+    // 不再弹批量确认，也不再探测同名 —— 磁盘上的同名内容多半就是上一次
+    // 失败留下的半截文件，直接按 replace 覆盖掉才是预期。
+    var retryMode = !!opts.retry;
 
+    var destDir = uploadTargetDir(targetDir);
     var jobs = [];
     var skippedNames = 0;
     for (var i = 0; i < files.length; i++) {
@@ -3693,7 +3855,7 @@
       // 相对路径用于文件夹上传，保留目录结构。
       var rel = sanitizeRel(relPathOf(f));
       if (!rel) { skippedNames++; continue; }
-      jobs.push({ file: f, rel: rel, dest: joinPath(targetDir, rel) });
+      jobs.push({ file: f, rel: rel, dest: uploadDest(targetDir, rel) });
     }
     if (!jobs.length) {
       toast('warn', skippedNames ? '这些条目没有可用的文件名，已跳过' : '没有可上传的文件');
@@ -3702,8 +3864,8 @@
 
     // 传文件夹很容易一次带上成千上万个文件。批量确认一次，
     // 免得手滑把整个 home 目录拖进来。
-    var isTree = jobs.length > 1 && jobs.some(function (j) { return j.rel.indexOf('/') >= 0; });
-    if (jobs.length > uploadBatchWarn) {
+    var isTree = jobs.some(function (j) { return j.rel.indexOf('/') >= 0; });
+    if (!retryMode && jobs.length > uploadBatchWarn) {
       var okGo = await confirmDialog({
         title: '确认上传 ' + jobs.length + ' 个文件？',
         message: '这次包含 ' + (isTree ? '文件夹，共 ' : '') + jobs.length + ' 个文件，合计 ' +
@@ -3714,8 +3876,29 @@
       if (!okGo) return;
     }
 
+    // 上传前先探测同名目标。发现重名只问一次，用户的选择对整批文件生效；
+    // 没选就取消整次上传，不会悄悄覆盖任何已有文件。
+    var conflictMode = '';
+    if (retryMode) {
+      // 保留用户最初的选择；没有选择过就用 replace —— 上一次失败可能已在
+      // 服务端留下半截文件，而它不是用户的数据。
+      conflictMode = opts.conflictMode || 'replace';
+    } else {
+      var conflicts = await detectUploadConflicts(jobs);
+      if (conflicts.length) {
+        conflictMode = await chooseConflictMode({
+          title: '发现同名文件',
+          conflicts: conflicts,
+          context: '存入 ' + dirDisplay(isTree ? targetDir : destDir) +
+          '；同一个选择会应用到本次全部同名文件。',
+          backupLabel: '备份上传',
+          replaceLabel: '替换上传'
+        });
+        if (!conflictMode) return;
+      }
+    }
+
     var totalBytes = jobs.reduce(function (s, j) { return s + j.file.size; }, 0);
-    var destDir = uploadTargetDir(targetDir);
     // 每个文件已传字节，用来在并发时汇总总进度。
     var loadedByJob = new Array(jobs.length);
     for (var z = 0; z < jobs.length; z++) loadedByJob[z] = 0;
@@ -3736,10 +3919,13 @@
     nb.textContent = '存入';
     note.appendChild(nb);
     note.appendChild(document.createTextNode('：'));
+    // 文件夹上传时各文件落在 targetDir/<文件夹>/ 下，不会套日期目录；
+    // 只有直接传到根目录的文件才按日期归档。
+    var shownDir = isTree ? targetDir : destDir;
     var code = document.createElement('code');
-    code.textContent = dirDisplay(destDir);
+    code.textContent = dirDisplay(shownDir);
     note.appendChild(code);
-    if (destDir !== targetDir) {
+    if (!isTree && destDir !== targetDir) {
       note.appendChild(document.createTextNode('（按日期自动归档）'));
     }
     note.appendChild(document.createTextNode('　·　单文件上限：' +
@@ -3770,7 +3956,9 @@
     var started = Date.now();
 
     var m = openModal({
-      title: (isTree ? '上传文件夹' : '上传 ' + jobs.length + ' 个文件'),
+      title: retryMode
+        ? (isTree ? '重试上传文件夹' : '重试上传 ' + jobs.length + ' 个文件')
+        : (isTree ? '上传文件夹' : '上传 ' + jobs.length + ' 个文件'),
       body: body,
       locked: true,
       // locked 的弹窗不能用 ESC / 点遮罩关掉，但右上角的 ✕ 仍然可点 ——
@@ -3801,24 +3989,56 @@
     repaint();
 
     // 有界并发：worker 池 + 共享游标，避免一次性发起 N 个请求。
+    //
+    // 连续出现可重试错误（网络/5xx）说明链路可能整体不可用：让所有 worker
+    // 共享一个短暂的暂停窗口，避免上千个请求继续往坏链路上灌。只有连续
+    // 5 个任务在重试后仍失败才触发，正常的零星抖不会拖慢整批。
+    var linkFailStreak = 0;
+    var linkPauseUntil = 0;
+    async function waitForLink() {
+      var wait = linkPauseUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+    function noteUploadFailure(err) {
+      if (!err.retryable) { linkFailStreak = 0; return; }
+      linkFailStreak++;
+      if (linkFailStreak >= 5) {
+        linkPauseUntil = Math.max(linkPauseUntil, Date.now() + 1000);
+        linkFailStreak = 0;
+      }
+    }
+
     var cursor = 0;
     async function worker() {
       for (;;) {
+        if (cancelled) return;
+        // 链路退避期间先等一拍；等待结束后重新检查取消状态，
+        // 否则用户点了 ✕ 还要等完这一拍才退出。
+        await waitForLink();
         if (cancelled) return;
         var idx = cursor++;
         if (idx >= jobs.length) return;
         var job = jobs[idx];
         repaint(job.rel, idx + 1);
+        var target = fileURL(job.dest) +
+          (conflictMode ? '?conflict=' + conflictMode : '');
         try {
-          await putFile(fileURL(job.dest), job.file, function (loaded) {
+          await putFile(target, job.file, function (loaded) {
             loadedTotal += loaded - loadedByJob[idx];
             loadedByJob[idx] = loaded;
             repaint(job.rel, idx + 1);
           });
           loadedTotal += job.file.size - loadedByJob[idx];
           loadedByJob[idx] = job.file.size;
+          linkFailStreak = 0;
         } catch (err) {
-          failures.push(job.rel + '：' + err.message);
+          failures.push({
+            rel: job.rel,
+            message: err.message,
+            network: !!err.network,
+            file: job.file
+          });
+          noteUploadFailure(err);
         }
         finished++;
       }
@@ -3838,22 +4058,86 @@
 
     var msg = (cancelled ? '已取消，' : '') + '已上传 ' + okCount + '/' + jobs.length + ' 个文件（共 ' +
       fmtSize(totalBytes) + '，耗时 ' + fmtDuration(elapsedMs) + '）';
-    if (destDir !== targetDir) msg += '\n存入 ' + dirDisplay(destDir);
+    var shownDest = isTree ? targetDir : destDir;
+    if (shownDest !== targetDir) msg += '\n存入 ' + dirDisplay(shownDest);
     if (cancelled) msg += '\n余下 ' + (jobs.length - finished) + ' 个文件未上传';
     if (failures.length) {
       // 传文件夹时失败很容易成片出现，逐个弹 toast 会把界面刷爆 ——
-      // 汇总成一条，列出前几个具体原因。
-      msg += '\n失败 ' + failures.length + ' 个：' + failures.slice(0, 3).join('；') +
-        (failures.length > 3 ? ' …等' : '');
+      // 汇总成一条，列出前几个具体原因；完整清单放在「失败详情」里。
+      msg += '\n失败 ' + failures.length + ' 个：' +
+        failures.slice(0, 3).map(function (f) {
+          return f.rel + '：' + f.message;
+        }).join('；') + (failures.length > 3 ? ' …等' : '');
+    }
+    var actions = [];
+    if (failures.length) {
+      actions.push({
+        label: '失败详情',
+        onClick: function () {
+          showUploadFailures(failures, targetDir, shownDest, conflictMode);
+        }
+      });
+    } else if (okCount > 0) {
+      actions.push({ label: '查看', onClick: function () { navigate(shownDest); } });
     }
     toast(failures.length ? 'err' : (cancelled ? 'warn' : 'ok'), msg,
-      null, okCount > 0 ? {
-        label: '查看',
-        onClick: function () { navigate(destDir); }
-      } : null);
+      failures.length ? 15000 : null, actions);
 
     // 停留在原目录，这样连续拖拽不会越陷越深（不会生成 日期/日期 的嵌套）。
     navigate(state.path, false);
+  }
+
+  // showUploadFailures 打开完整失败清单。
+  //
+  // toast 只放得下前三行，传文件夹时失败可能上百条；这里给出全量清单，
+  // 并允许直接重试。重试会跳过同名探测：磁盘上那些同名文件多半是上一次
+  // 失败留下的半截内容，按 replace 覆盖才符合预期。
+  function showUploadFailures(failures, targetDir, viewDir, conflictMode) {
+    var body = document.createElement('div');
+    var hint = document.createElement('div');
+    hint.className = 'hint-box';
+    hint.style.marginBottom = '12px';
+    var networkCount = failures.filter(function (f) { return f.network; }).length;
+    var hintText = '共 ' + failures.length + ' 个文件失败。';
+    if (networkCount) {
+      hintText += '其中 ' + networkCount + ' 个是网络错误：请求没有完成' +
+        '（连接中断、代理/隧道重置，或源文件已不可读）。';
+    }
+    if (networkCount < failures.length) {
+      hintText += '其余是服务端拒绝的 HTTP 错误，原因见下。';
+    }
+    hint.textContent = hintText;
+    body.appendChild(hint);
+
+    var list = document.createElement('div');
+    list.className = 'failure-list';
+    list.textContent = failures.map(function (f) {
+      return f.rel + '：' + f.message;
+    }).join('\n');
+    body.appendChild(list);
+
+    var m = openModal({
+      title: '上传失败详情',
+      body: body,
+      footer: modalFoot([
+        { label: '关闭', onClick: function () { m.close(); } },
+        {
+          label: '查看目录',
+          onClick: function () { m.close(); navigate(viewDir); }
+        },
+        {
+          label: '重试失败项 (' + failures.length + ')',
+          cls: 'primary',
+          onClick: function () {
+            m.close();
+            uploadFiles(failures.map(function (f) { return f.file; }), targetDir, {
+              retry: true,
+              conflictMode: conflictMode
+            });
+          }
+        }
+      ])
+    });
   }
 
   // ------------------------------------------------------------ 新建文件 / 目录
@@ -6114,18 +6398,8 @@
     field.appendChild(input);
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = '目录不存在会自动创建；已存在且非空时需要勾选覆盖。';
+    hint.textContent = '目录不存在会自动创建；发现同名文件时会询问是替换还是备份。';
     field.appendChild(hint);
-
-    var owWrap = document.createElement('label');
-    owWrap.className = 'checkbox';
-    owWrap.style.marginTop = '12px';
-    var ow = document.createElement('input');
-    ow.type = 'checkbox';
-    var owText = document.createElement('span');
-    owText.textContent = '覆盖已存在的同名文件';
-    owWrap.appendChild(ow);
-    owWrap.appendChild(owText);
 
     var limits = DATA.extract_limits;
     var limitText;
@@ -6145,7 +6419,6 @@
 
     var wrap = document.createElement('div');
     wrap.appendChild(field);
-    wrap.appendChild(owWrap);
     wrap.appendChild(limitBox);
 
     var m = openModal({
@@ -6153,16 +6426,59 @@
       body: wrap,
       footer: modalFoot([
         { label: '取消', onClick: function () { m.close(); } },
-        { label: '开始解压', cls: 'primary', onClick: function () { submit(); } }
+        { label: '开始解压', cls: 'primary', id: 'extract-start', onClick: function () { submit(); } }
       ])
     });
+    var startBtn = m.el.querySelector('#extract-start');
 
     async function submit() {
       var dest = input.value.trim();
       if (!dest) { toast('warn', '请输入目标目录'); return; }
       DEST_CACHE[entry.path] = dest;
-      m.close();
-      startExtract(entry, dest, ow.checked);
+
+      // 先问服务端：目标目录里哪些条目会重名。发现重名再弹窗，
+      // 用户没选之前不关闭本对话框，也不动磁盘。
+      if (startBtn) startBtn.disabled = true;
+      var info;
+      try {
+        info = await checkExtractConflicts(entry, dest);
+      } catch (err) {
+        if (startBtn) startBtn.disabled = false;
+        toast('err', '检查同名文件失败：' + err.message);
+        return;
+      }
+      if (startBtn) startBtn.disabled = false;
+
+      if (info.dest_is_file) {
+        toast('err', '目标路径已存在且是一个文件，无法解压到该位置');
+        return;
+      }
+
+      var mode = '';
+      if (info.conflicts && info.conflicts.length) {
+        m.close();
+        mode = await chooseConflictMode({
+          title: '发现同名文件',
+          conflicts: info.conflicts,
+          context: '解压到 ' + dirDisplay(dest) + '；同一个选择会应用到压缩包内全部同名条目。',
+          noun: '文件',
+          backupLabel: '备份解压',
+          replaceLabel: '替换解压'
+        });
+        if (!mode) return;
+      } else if (info.dest_nonempty) {
+        m.close();
+        var go = await confirmDialog({
+          title: '目标目录非空',
+          message: '目标目录 ' + dirDisplay(dest) + ' 已存在且非空，但没有与压缩包重名的文件。',
+          detail: '继续解压会把压缩包内容合并进该目录，现有文件不会被删除。',
+          okLabel: '继续解压'
+        });
+        if (!go) return;
+      } else {
+        m.close();
+      }
+      startExtract(entry, dest, mode, !mode && info.dest_nonempty);
     }
 
     input.onkeydown = function (e) { if (e.key === 'Enter') submit(); };
@@ -6182,8 +6498,22 @@
     return (dir === '' ? '/' + name : dir + '/' + name);
   }
 
+  // checkExtractConflicts 让服务端在真正解压前预检同名条目。
+  //
+  // 不逐个 HEAD：一个压缩包可能有上万个条目，服务端一次性扫描完成更省事，
+  // 也能顺带判断目标目录是否非空、是否其实是个文件。
+  async function checkExtractConflicts(entry, dest) {
+    var url = API + '?check=1&path=' + encodeURIComponent(entry.path) +
+      '&dest=' + encodeURIComponent(dest);
+    var res = await apiFetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) {
+      throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+    }
+    return await res.json();
+  }
+
   // 解析 SSE 流并驱动进度条。
-  async function startExtract(entry, dest, overwrite) {
+  async function startExtract(entry, dest, mode, overwrite) {
     var bar = document.createElement('i');
     var pb = document.createElement('div');
     pb.className = 'progress-bar';
@@ -6240,7 +6570,12 @@
       res = await apiFetch(API, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: entry.path, dest: dest, overwrite: overwrite })
+        body: JSON.stringify({
+          path: entry.path,
+          dest: dest,
+          overwrite: !!overwrite,
+          conflict: mode || ''
+        })
       });
     } catch (err) {
       logBox.textContent = '请求失败：' + err.message;

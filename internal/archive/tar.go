@@ -346,7 +346,22 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 				rep.ElapsedMs = time.Since(start).Milliseconds()
 				return rep, err // 与文件分支一致：超限即中止
 			}
-			// 同 zip 侧：目录目标也不能穿过根外软链。
+			if err := authorizeParents(opts, target); err != nil {
+				return rep, err
+			}
+			if cerr := resolveExistingDirConflict(opts, target); cerr != nil {
+				if os.IsExist(cerr) {
+					prog.Skipped++
+					rep.Skipped++
+					rep.Warnings = append(rep.Warnings, fmt.Sprintf("%s 已存在，已跳过", name))
+					report()
+					continue
+				}
+				rep.ElapsedMs = time.Since(start).Milliseconds()
+				return rep, cerr
+			}
+			// 同 zip 侧：目录目标也不能穿过根外软链。放在同名处理之后，
+			// 祖先位置是普通文件时先由 ResolveConflict 腾出目录。
 			if !opts.AllowSymlink {
 				if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
 					prog.Skipped++
@@ -355,9 +370,6 @@ func (t *tarReader) Extract(ctx context.Context, opts Options, onProgress func(P
 					report()
 					continue
 				}
-			}
-			if err := authorizeParents(opts, target); err != nil {
-				return rep, err
 			}
 			if err := mkdirAll(opts, target, 0o755); err != nil {
 				rep.ElapsedMs = time.Since(start).Milliseconds()

@@ -18,6 +18,8 @@
   `X-Update-Range: append` 追加续传，
   并**默认把「传到根目录」的文件按 年/月/日 三级目录自动归档**
   （子目录原地放；可关闭、可自定义布局、可单次覆盖）；
+  上传前探测同名文件，可整批选择**替换**或**备份**（备份名 `名称-时间戳.扩展名`）；
+  网络中断 / 5xx / 429 自动重试并遵循 `Retry-After`，失败项可查看完整原因并一键重试；
   表单上传另有 1 GiB 硬上限（更大的文件走流式 `PUT`），归档后的真实落点会再做一次 ACL / 密钥 scope 复核
 - 删除、新建目录（`MKCOL`）、**移动（单选或批量，用目录选择器挑目标）**、重命名（`MOVE`）、
   **批量重命名（查找替换、通配符/正则匹配、由示例生成正则，带实时预览与冲突跳过）**
@@ -1581,10 +1583,16 @@ X-Gofs-Path: /2026/09/28/%E6%8A%A5%E5%91%8A.pdf
 - **并发 3 个请求**。传文件夹时绝大多数是几 KB 的小文件，串行的话每个都要等一个
   RTT，几百个文件会慢得离谱；3 是折中值（远低于服务端的并发闸门，速度读数也还稳）。
 - **超过 200 个文件先确认一次**，免得手滑把整个 home 目录拖进来。
+- **上传前先探测同名目标**（`HEAD …?stat=1`）：发现重名时整批选择「替换上传」或
+  「备份上传」。备份把原条目改名为 `名称-时间戳.扩展名` 后再写入，替换先删除同名条目；
+  选择对整批生效，且替换/备份前会逐项复核 ACL、真实路径与目录内权限。
 - **点右上角 ✕ 可以中途取消**：正在排队的文件不再开始，已传的保留，
   提示里如实写出「已上传 X/Y，余下 N 个未上传」。
-- **失败汇总成一条**，列出前几个具体原因。传文件夹时失败很容易成片出现，
-  逐个弹提示会把界面刷爆。
+- **网络中断、5xx、429 会自动重试**：小文件整文件重传，大文件仍按断点续传协议追加；
+  优先遵循服务端的 `Retry-After`，否则从 250ms 起指数退避。连续多个任务失败时，
+  所有上传 worker 会短暂停顿，避免把已经拥塞的链路打得更满。
+- **失败汇总成一条**，列出前几个具体原因；点「失败详情」可查看完整清单，
+  并直接「重试失败项」。传文件夹时失败很容易成片出现，逐个弹提示会把界面刷爆。
 
 ### 已知限制
 
@@ -1701,6 +1709,31 @@ curl 'http://127.0.0.1:5000/fs/extract?path=/backup.zip'
 单条目预览另有 **64 MiB** 的固定上限（更大的条目请直接下载或解压）——
 否则少量并发预览就能把临时目录写满。清单/预览与解压共用重任务名额。
 
+**预检同名条目（不落盘）**
+
+```bash
+curl 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored&check=1'
+```
+
+返回目标目录的状态和会被覆盖的条目清单：
+
+```json
+{
+  "path": "/backup.zip",
+  "dest": "/restored",
+  "total": 3,
+  "dest_exists": true,
+  "dest_nonempty": true,
+  "dest_is_file": false,
+  "conflicts": [
+    {"name": "a.txt", "is_dir": false, "existing_is_dir": false}
+  ]
+}
+```
+
+网页端据此在真正解压前弹窗询问「替换 / 备份」：替换会先删除同名条目，
+备份会先把同名条目改名为 `名称-时间戳.扩展名` 再写入新内容。
+
 **取出包内单个文件（流式，不解压落盘）**
 
 ```bash
@@ -1712,7 +1745,7 @@ curl -O 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&file=a.txt'
 ```bash
 curl -N -X PUT http://127.0.0.1:5000/fs/extract \
   -H 'Content-Type: application/json' \
-  -d '{"path":"/backup.zip","dest":"/restored","overwrite":false}'
+  -d '{"path":"/backup.zip","dest":"/restored","conflict":"backup"}'
 ```
 
 返回 `text/event-stream`，逐条推送：
@@ -1733,8 +1766,12 @@ data: {"report":{"files":1203,"dirs":64,"bytes":104857600,"skipped":2,"warnings"
 也支持用查询参数调用，方便一行 curl：
 
 ```bash
-curl -N -X PUT 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored&overwrite'
+curl -N -X PUT 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored&conflict=replace'
 ```
+
+`conflict` 可取 `replace`（先删除同名条目再写入）或 `backup`（先把同名条目
+改名为 `名称-时间戳.扩展名` 再写入）。不传时保持旧语义：目标目录非空需要
+`overwrite=true`，同名的已有文件会被跳过。
 
 ### 安全设计
 
@@ -1755,7 +1792,7 @@ curl -N -X PUT 'http://127.0.0.1:5000/fs/extract?path=/backup.zip&dest=/restored
 | **重任务拖垮服务** | 打开压缩包（解析中央目录）之前就要取到 `--max-concurrent-jobs` 名额；清单预览、解压、打包共用同一个池 |
 | **权限位提权**（包内 4755 的 setuid 文件） | 忽略包内 mode，文件恒为 `0644`、目录恒为 `0755` |
 | **路径歧义** | `dest` / `path` 中出现 `..` 段直接 400 拒绝，而不是静默规范化 |
-| **覆盖已有数据** | 目标目录已存在且非空时必须显式 `overwrite=true`；非覆盖模式跳过同名文件 |
+| **覆盖已有数据** | 目标目录已存在且非空时必须显式 `overwrite=true` 或 `conflict=replace|backup`；默认模式跳过同名文件。替换/备份前会逐项复核同名目标及其后代的写权限，不会借一次选择绕过「目录可写、子项只读」的 ACL |
 | **磁盘打满** | 写出过程用 `io.Writer` 包装器实时拦截，超限即熔断，不会先写满再检查 |
 
 上限可通过 `--extract-max-total` / `--extract-max-files` / `--extract-max-ratio` 调整。
@@ -1823,6 +1860,10 @@ curl -X PUT -H 'X-Update-Range: append' --data-binary @<(tail -c +$((OFFSET+1)) 
 **下载支持 Range**，所以客户端的续传、多线程下载、播放器拖动都是现成的。
 前端上传大文件走的是 XHR `PUT`（流式直传），**不经 multipart 临时文件**，
 所以不占额外的临时磁盘空间；网页端在中断后会自动按上面的协议续传。
+
+网页端对网络错误、`5xx` 与 `429` 会自动重试：小文件直接整文件重传，大文件按上面的
+协议续传；服务端给了 `Retry-After` 就按它等待，否则从 250ms 起指数退避。
+重试用尽仍失败的条目会汇总到「失败详情」，可查看完整原因并一键重试。
 
 ### 上传防护
 

@@ -1294,6 +1294,21 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // handleGet 处理读取类请求：目录列表、搜索、打包、文件下载。
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, urlPath, abs string, p permResult) {
 	info, err := os.Stat(abs)
+	if r.URL.Query().Has("stat") {
+		// ?stat=1 只回答「这个路径存在吗」。上传前的重名探测用它，
+		// 必须绕过下面的 SPA 回退，否则 --render-spa 部署下所有不存在的
+		// 路径都会返回 200，前端会把每次上传都当成重名。
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				http.Error(w, "404 Not Found", http.StatusNotFound)
+				return
+			}
+			s.writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if s.cfg.RenderSPA {

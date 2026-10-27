@@ -64,7 +64,10 @@ func (s *Server) noteAuthorizedPath(r *http.Request, urlPath, real string) {
 	}
 	if c, ok := r.Context().Value(canonicalCacheKey{}).(*canonicalCache); ok {
 		c.mu.Lock()
-		if len(c.paths) < 256 {
+		// 已存在键必须允许覆盖：替换/备份上传会先把原目标移走，再写入新文件；
+		// 如果此时因为缓存已满而保留旧 inode 快照，secureOpenWrite 会误判成
+		// “路径在授权后发生变化”，把一次合法的上传拒成 409。
+		if _, exists := c.paths[urlPath]; exists || len(c.paths) < 256 {
 			c.paths[urlPath] = snapshotAuthorized(real)
 		}
 		c.mu.Unlock()

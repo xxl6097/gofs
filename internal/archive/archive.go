@@ -103,6 +103,18 @@ type Options struct {
 	OpenWrite func(target string, flags int, perm fs.FileMode) (*os.File, error)
 	// MkdirAll 可选：替换默认的 os.MkdirAll，供调用方用 os.Root 创建目录。
 	MkdirAll func(target string, perm fs.FileMode) error
+	// ResolveConflict 可选：在写入一个**已存在**的目标之前调用。
+	//
+	// target 是本次要写出的路径，conflict 是挡路的现有条目：通常与 target
+	// 相同，也可能是 target 的某一级祖先（包里是 a/b.txt，而 a 是普通文件）。
+	// 调用方应在这里按自己的策略处理 conflict（删除、改名等）；返回 nil 后
+	// 本包会继续打开 target 写入。返回 fs.ErrExist 表示跳过该条目
+	//（与 Overwrite=false 时的旧语义一致）。
+	//
+	// 放在写入点而不是提前批量处理：只有**真正会被写出**的条目才会改动
+	// 磁盘。提前按 List 结果处理的话，包里的软链/特殊类型/非法路径条目
+	// 虽然会被 Extract 跳过，却仍可能在预检阶段把用户已有的同名文件删掉。
+	ResolveConflict func(target, conflict string, info fs.FileInfo) error
 }
 
 // mkdirAll 在有安全实现时使用它，否则退回 os.MkdirAll。
@@ -503,26 +515,97 @@ func normalizeEntryName(name string) string {
 	return name
 }
 
+// existingWriteConflict 找到会阻碍 target 落盘的现有条目。
+//
+// 返回值可能是 target 自身，也可能是它上面某一级“本应是目录、实际是文件”
+// 的祖先：包里是 a/b.txt，而目标目录里已有一个名为 a 的普通文件时，
+// Lstat(a/b.txt) 只会报 ENOTDIR。allowDir 为 true 表示同名目录可以合并
+// （用于目录条目），不算冲突。
+func existingWriteConflict(dest, target string, allowDir bool) (string, fs.FileInfo) {
+	for p := target; ; {
+		if p == dest || !fsutil.IsWithin(dest, p) {
+			return "", nil
+		}
+		fi, err := os.Lstat(p)
+		if err == nil {
+			if p == target {
+				if allowDir && fi.IsDir() {
+					return "", nil
+				}
+				return p, fi
+			}
+			if fi.IsDir() {
+				// 目标本身不存在，最近存在的祖先是目录：没有冲突。
+				return "", nil
+			}
+			return p, fi
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", nil
+		}
+		p = parent
+	}
+}
+
+// resolveExistingFileConflict 在写文件前处理已存在的目标。
+//
+// 返回 fs.ErrExist 表示调用方应跳过该条目。没有 ResolveConflict 回调时
+// 维持旧语义：Overwrite=true 直接截断，否则跳过。
+func resolveExistingFileConflict(opts Options, target string) error {
+	conflictPath, fi := existingWriteConflict(opts.Dest, target, false)
+	if conflictPath == "" {
+		return nil
+	}
+	if opts.ResolveConflict != nil {
+		return opts.ResolveConflict(target, conflictPath, fi)
+	}
+	if !opts.Overwrite {
+		return fs.ErrExist
+	}
+	return nil
+}
+
+// resolveExistingDirConflict 在创建目录前处理同名但**不是目录**的目标。
+//
+// 已存在的同名目录应当合并，不调用回调。没有回调时交给 MkdirAll 报错
+// （与旧行为一致）。
+func resolveExistingDirConflict(opts Options, target string) error {
+	conflictPath, fi := existingWriteConflict(opts.Dest, target, true)
+	if conflictPath == "" {
+		return nil
+	}
+	if opts.ResolveConflict != nil {
+		return opts.ResolveConflict(target, conflictPath, fi)
+	}
+	return nil
+}
+
 // writeFile 安全地把 src 写入 target，并返回写入字节数。
 // 一旦中途失败（超出配额、磁盘错误等），已写入的残缺文件会被删除，
 // 避免在目标目录里留下半截数据。
 func writeFile(target string, src io.Reader, opts Options, limit *limiter, compressed int64, name string, modTime time.Time) (int64, error) {
+	// 先复核父目录，再动已存在的目标：父目录没有写权限时，不应该
+	// 先把用户的同名文件删掉/改名，然后才发现这次解压根本不能写。
+	if err := authorizeParents(opts, target); err != nil {
+		return 0, err
+	}
+	if err := resolveExistingFileConflict(opts, target); err != nil {
+		return 0, err
+	}
 	// 包内条目名本身是干净的（secureJoin 做过词法检查），但目标路径上可能
 	// 有一条**本来就存在**的软链指向根外 —— MkdirAll/OpenFile 会跟过去，
 	// 于是解压把文件写到服务根之外。这条检查与 HTTP 层用的是同一个实现
 	//（fsutil.EnsureWithin），只堵一边等于没堵。
+	//
+	// 放在同名处理之后：祖先位置可能是普通文件（a/b.txt 而 a 是文件），
+	// 此时 EnsureWithin 会因 ENOTDIR 失败；同名处理先把 a 删除/改名后，
+	// 这条路径才真正可写。ResolveConflict 回调内部也会做同样的逃逸检查，
+	// 因此“先动磁盘”不会绕过软链防护。
 	if !opts.AllowSymlink {
 		if err := fsutil.EnsureWithin(opts.Dest, target); err != nil {
 			return 0, err
 		}
-	}
-	if !opts.Overwrite {
-		if _, err := os.Stat(target); err == nil {
-			return 0, fs.ErrExist
-		}
-	}
-	if err := authorizeParents(opts, target); err != nil {
-		return 0, err
 	}
 	if dir := filepath.Dir(target); dir != "" {
 		if err := mkdirAll(opts, dir, 0o755); err != nil {

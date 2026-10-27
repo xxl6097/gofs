@@ -29,8 +29,30 @@ type extractRequest struct {
 	Path string `json:"path"`
 	// Dest 为解压目标目录，留空则使用压缩包同级的同名目录。
 	Dest string `json:"dest"`
-	// Overwrite 为 true 时覆盖已存在的文件。
+	// Overwrite 为 true 时覆盖已存在的文件（兼容旧调用方，等价于 replace）。
 	Overwrite bool `json:"overwrite"`
+	// Conflict 为同名条目的处理方式：replace（先删除再写入）或
+	// backup（先把原条目重命名为 名称-时间戳.扩展名 再写入）。
+	// 留空时保持旧语义：跳过已存在的文件。
+	Conflict string `json:"conflict"`
+}
+
+// extractConflict 描述一个会被解压写入的同名目标。
+type extractConflict struct {
+	Name          string `json:"name"`
+	IsDir         bool   `json:"is_dir"`
+	ExistingIsDir bool   `json:"existing_is_dir"`
+}
+
+// extractCheck 是解压前的同名预检结果，供浏览器决定是否弹窗询问。
+type extractCheck struct {
+	Path         string            `json:"path"`
+	Dest         string            `json:"dest"`
+	Total        int               `json:"total"`
+	DestExists   bool              `json:"dest_exists"`
+	DestNonEmpty bool              `json:"dest_nonempty"`
+	DestIsFile   bool              `json:"dest_is_file"`
+	Conflicts    []extractConflict `json:"conflicts"`
 }
 
 // sseWriter 负责按 Server-Sent Events 协议推送消息。
@@ -283,6 +305,40 @@ func (s *Server) extractList(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
+	// check=1：只做解压前的同名预检，不落盘。浏览器据此决定是否弹窗
+	// 询问「替换 / 备份」。没有被截断的列表才是全集，否则不能拿来预检。
+	if r.URL.Query().Has("check") {
+		destClean, destAbs, ok := s.extractDest(w, r, clean, r.URL.Query().Get("dest"))
+		if !ok {
+			return
+		}
+		srcAbs, rerr := s.res.Resolve(clean)
+		if rerr != nil {
+			http.Error(w, "403 Forbidden", http.StatusForbidden)
+			return
+		}
+		if destAbs == srcAbs {
+			http.Error(w, "400 Bad Request: 目标目录不能是压缩包自身", http.StatusBadRequest)
+			return
+		}
+		if tr, ok := rd.(truncationReporter); ok && tr.Truncated() {
+			http.Error(w, fmt.Sprintf("413 Payload Too Large: 压缩包条目数超过上限 %d，请先解压到本地或调大 --extract-max-files",
+				s.cfg.ExtractMaxFiles), http.StatusRequestEntityTooLarge)
+			return
+		}
+		exists, nonEmpty, isFile := extractDestState(destAbs)
+		s.writeJSON(w, extractCheck{
+			Path:         clean,
+			Dest:         destClean,
+			Total:        len(entries),
+			DestExists:   exists,
+			DestNonEmpty: nonEmpty,
+			DestIsFile:   isFile,
+			Conflicts:    s.extractConflictList(destAbs, entries),
+		})
+		return
+	}
+
 	truncated := s.cfg.ExtractMaxFiles > 0 && len(entries) >= s.cfg.ExtractMaxFiles
 	s.writeJSON(w, map[string]any{
 		"path":         clean,
@@ -371,23 +427,9 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确定目标目录。
-	destClean := req.Dest
-	if destClean == "" {
-		destClean = s.defaultDest(srcClean)
-	}
-	// 解压目标同样要落在有写权限的路径上。
-	if dp, ok := s.authorize(w, r, destClean); !ok || dp.Perm != auth.PermReadWrite {
-		http.Error(w, "403 Forbidden: 对目标目录没有写权限", http.StatusForbidden)
-		return
-	}
-	destClean = fsutil.CleanURLPath(destClean)
-	destAbs, err := s.res.Resolve(destClean)
-	if err != nil {
-		http.Error(w, "403 Forbidden: 目标目录非法", http.StatusForbidden)
-		return
-	}
-	if !s.requireRealPerm(w, r, destClean, destAbs, auth.PermReadWrite) {
+	// 确定目标目录，并确认目标落在有写权限的路径上。
+	destClean, destAbs, ok := s.extractDest(w, r, srcClean, req.Dest)
+	if !ok {
 		return
 	}
 	if destAbs == srcAbs {
@@ -395,12 +437,24 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 目标目录已存在且非空时，要求显式覆盖，避免把文件混进已有目录。
-	if info, err := os.Stat(destAbs); err == nil && info.IsDir() && !req.Overwrite {
-		if empty, eerr := s.isDirEmpty(r, destClean, destAbs); eerr == nil && !empty {
-			http.Error(w, "409 Conflict: 目标目录已存在且非空，如需覆盖请设置 overwrite=true",
-				http.StatusConflict)
-			return
+	// 同名处理方式：conflict 优先；overwrite=true 是它的旧别名。
+	mode := parseConflictMode(req.Conflict)
+	if mode == conflictNone {
+		mode = parseConflictMode(r.URL.Query().Get("conflict"))
+	}
+	if mode == conflictNone && req.Overwrite {
+		mode = conflictReplace
+	}
+
+	// 没有指定替换/备份时，保留原来的保护：目标目录非空必须先显式确认。
+	// 指定 conflict 后由下面逐条目的同名预检接管。
+	if mode == conflictNone {
+		if info, err := os.Stat(destAbs); err == nil && info.IsDir() {
+			if empty, eerr := s.isDirEmpty(r, destClean, destAbs); eerr == nil && !empty {
+				http.Error(w, "409 Conflict: 目标目录已存在且非空，如需覆盖请设置 overwrite=true 或 conflict=replace|backup",
+					http.StatusConflict)
+				return
+			}
 		}
 	}
 
@@ -463,7 +517,7 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	//
 	// 这一步只对“未截断”的列表有意义；真正落盘前还有 Authorize 回调
 	// （见 opts），两者使用同一套判定。
-	if bad, ok := s.extractTargetsAllowed(r, destClean, entries); !ok {
+	if bad, ok := s.extractTargetsAllowed(r, destClean, entries, mode); !ok {
 		http.Error(w, "403 Forbidden: 压缩包内条目 "+bad+" 没有写权限", http.StatusForbidden)
 		return
 	}
@@ -504,17 +558,26 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 		sse.event("progress", pr)
 	}
 
+	// 替换/备份在**每个条目的写入点**处理：只有真正会被写出的路径才会
+	// 动磁盘，包内被跳过的软链/特殊类型不会误删同名文件。
+	var resolveConflict func(string, string, fs.FileInfo) error
+	if mode != conflictNone {
+		resolveConflict = func(target, conflict string, info fs.FileInfo) error {
+			return s.resolveExtractConflict(r, destClean, destAbs, mode, target, conflict, info)
+		}
+	}
 	opts := archive.Options{
-		Dest:          destAbs,
-		Overwrite:     req.Overwrite,
-		MaxTotalBytes: s.cfg.ExtractMaxTotal,
-		MaxFiles:      s.cfg.ExtractMaxFiles,
-		MaxRatio:      s.cfg.ExtractMaxRatio,
-		AllowSymlink:  s.cfg.AllowSymlink,
+		Dest:            destAbs,
+		Overwrite:       req.Overwrite,
+		MaxTotalBytes:   s.cfg.ExtractMaxTotal,
+		MaxFiles:        s.cfg.ExtractMaxFiles,
+		MaxRatio:        s.cfg.ExtractMaxRatio,
+		AllowSymlink:    s.cfg.AllowSymlink,
+		ResolveConflict: resolveConflict,
 		// 落盘前的最后一道授权。即使 List 预检与真实写入集出现偏差
 		//（比如填充条目/TOCTOU），每个真正写出的路径也会再查一次。
 		Authorize: func(rel string) error {
-			if err := s.extractTargetAllowed(r, destClean, rel); err != nil {
+			if err := s.extractTargetAllowed(r, destClean, rel, mode); err != nil {
 				return err
 			}
 			// 记录授权时的 inode；OpenWrite 用 os.Root + 快照复核落盘。
@@ -567,34 +630,120 @@ func (s *Server) extractRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// extractDest 解析并校验解压目标目录。
+//
+// requested 为空时使用压缩包同级的同名目录。目标目录必须对当前请求可写，
+// 且真实路径（软链/大小写别名解析后）同样可写。
+func (s *Server) extractDest(w http.ResponseWriter, r *http.Request, srcClean, requested string) (string, string, bool) {
+	destClean := strings.TrimSpace(requested)
+	if destClean == "" {
+		destClean = s.defaultDest(srcClean)
+	}
+	if fsutil.HasParentSegment(destClean) {
+		http.Error(w, "400 Bad Request: 路径中不允许出现 ..", http.StatusBadRequest)
+		return "", "", false
+	}
+	dp, ok := s.authorize(w, r, destClean)
+	if !ok {
+		return "", "", false
+	}
+	if dp.Perm != auth.PermReadWrite {
+		http.Error(w, "403 Forbidden: 对目标目录没有写权限", http.StatusForbidden)
+		return "", "", false
+	}
+	destClean = fsutil.CleanURLPath(destClean)
+	destAbs, err := s.res.Resolve(destClean)
+	if err != nil {
+		http.Error(w, "403 Forbidden: 目标目录非法", http.StatusForbidden)
+		return "", "", false
+	}
+	if !s.requireRealPerm(w, r, destClean, destAbs, auth.PermReadWrite) {
+		return "", "", false
+	}
+	return destClean, destAbs, true
+}
+
 // extractTargetAllowed 复核一个条目的最终目标路径是否可写。
 //
 // rel 是相对 destClean 的 URL 路径（已用 / 分隔）。ACL 查目标 URL，
 // 再按软链/大小写别名解析真实路径复核一次。
-func (s *Server) extractTargetAllowed(r *http.Request, destClean, rel string) error {
-	target := fsutil.CleanURLPath(path.Join(destClean, rel))
-	if s.checkPerm(r, target) != auth.PermReadWrite {
-		return fmt.Errorf("条目 %s 没有写权限", target)
+//
+// mode 不为 none 时，目标路径上可能存在一个同名的普通文件祖先
+// （例如包内是 sub/a.txt，目标目录里的 sub 是文件）。此时 Resolve 会因
+// ENOTDIR 失败，不能据此直接拒绝：写入点的 ResolveConflict 会把那个
+// 祖先删除/改名。这里退到最近的、能解析的祖先做真实路径复核。
+func (s *Server) extractTargetAllowed(r *http.Request, destClean, rel string, modes ...conflictMode) error {
+	mode := conflictNone
+	if len(modes) > 0 {
+		mode = modes[0]
 	}
+	target := fsutil.CleanURLPath(path.Join(destClean, rel))
+
+	var abs string
+	if s.checkPerm(r, target) == auth.PermReadWrite {
+		a, err := s.res.Resolve(target)
+		if err != nil {
+			if mode == conflictNone {
+				return fmt.Errorf("条目 %s 的真实路径没有写权限", target)
+			}
+			// 祖先同名文件会让 Resolve 因 ENOTDIR 失败；写入点会先处理它。
+			a, _ = s.closestResolvable(target)
+		}
+		abs = a
+	} else {
+		if mode == conflictNone {
+			return fmt.Errorf("条目 %s 没有写权限", target)
+		}
+		// 目标路径无法规范化时（典型场景：包内 sub/a.txt，目标里的 sub
+		// 是普通文件），退到最近的已存在祖先，按它的 ACL 与真实路径复核。
+		// 写入点的 ResolveConflict 处理的正是这个祖先。
+		ancAbs, ok := s.closestResolvable(target)
+		if !ok {
+			return fmt.Errorf("条目 %s 没有写权限", target)
+		}
+		ancURL, err := s.res.Rel(ancAbs)
+		if err != nil || s.checkPerm(r, ancURL) != auth.PermReadWrite {
+			return fmt.Errorf("条目 %s 没有写权限", target)
+		}
+		abs = ancAbs
+	}
+
 	// 目标可能经过软链/大小写别名落到另一条 ACL 规则下：按真实路径复核。
-	if abs, err := s.res.Resolve(target); err != nil ||
-		!s.realPermAllowed(r, abs, auth.PermReadWrite) {
+	if abs == "" || !s.realPermAllowed(r, abs, auth.PermReadWrite) {
 		return fmt.Errorf("条目 %s 的真实路径没有写权限", target)
 	}
 	return nil
+}
+
+// closestResolvable 返回 target 自身或最近一个能够解析的祖先的绝对路径。
+func (s *Server) closestResolvable(target string) (string, bool) {
+	for p := target; ; {
+		if abs, err := s.res.Resolve(p); err == nil {
+			return abs, true
+		}
+		parent := path.Dir(p)
+		if parent == p || parent == "." {
+			return "", false
+		}
+		p = parent
+	}
 }
 
 // extractTargetsAllowed 对压缩包内每个条目的最终 URL 路径做写权限复核。
 //
 // 返回第一个不通过的路径（用于错误提示）与是否全部通过。
 // 只在 List 未被截断时调用；真正落盘前还有 Authorize 回调兜底。
-func (s *Server) extractTargetsAllowed(r *http.Request, destClean string, entries []archive.Entry) (string, bool) {
+func (s *Server) extractTargetsAllowed(r *http.Request, destClean string, entries []archive.Entry, modes ...conflictMode) (string, bool) {
+	mode := conflictNone
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 	for _, e := range entries {
 		name := e.Name
 		if name == "" {
 			continue
 		}
-		if err := s.extractTargetAllowed(r, destClean, name); err != nil {
+		if err := s.extractTargetAllowed(r, destClean, name, mode); err != nil {
 			return fsutil.CleanURLPath(path.Join(destClean, name)), false
 		}
 	}

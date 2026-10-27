@@ -298,6 +298,17 @@ func (z *zipReader) Extract(ctx context.Context, opts Options, onProgress func(P
 			if err := authorizeParents(opts, target); err != nil {
 				return rep, err
 			}
+			if cerr := resolveExistingDirConflict(opts, target); cerr != nil {
+				if os.IsExist(cerr) {
+					prog.Skipped++
+					rep.Skipped++
+					rep.Warnings = append(rep.Warnings,
+						fmt.Sprintf("%s 已存在，已跳过", normalizeEntryName(f.Name)))
+					report()
+					continue
+				}
+				return rep, cerr
+			}
 			if err := mkdirAll(opts, target, 0o755); err != nil {
 				return rep, err
 			}
