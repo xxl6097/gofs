@@ -701,6 +701,9 @@
     var previewPane = document.createElement('div');
     previewPane.className = 'ed-preview';
     previewPane.hidden = true;
+    // 全屏时把焦点交给预览区，方向键 / PageDown 才能滚动长文档。
+    // -1 表示不进 Tab 序列，弹窗的焦点陷阱不会因此多出一站。
+    previewPane.tabIndex = -1;
     stage.appendChild(previewPane);
     body.appendChild(stage);
 
@@ -806,6 +809,8 @@
     }
 
     function setPreview(on) {
+      // 关掉预览时全屏也一并退出，否则会只剩一个空白的整屏弹窗。
+      if (!on && fullscreen) setFullscreen(false);
       previewOn = on;
       previewPane.hidden = !on;
       stage.classList.toggle('split', on);
@@ -822,6 +827,58 @@
       if (on) refreshPreview();
     }
 
+    // ---- 全屏预览 ----
+    //
+    // 用 CSS 把**弹窗本身**撑到整个窗口，而不是浏览器原生 Fullscreen：
+    // 原生全屏会把弹窗标题栏和这颗「退出全屏」按钮一起藏起来，
+    // 用户只能靠猜 Esc；而且 `srcdoc` 沙箱 iframe 在部分浏览器里
+    // 拿不到全屏权限。现在标题栏、工具栏都还在，退出入口一直可见。
+    var fullscreen = false;
+
+    function setFullscreen(on) {
+      if (on === fullscreen) return;
+      // 还没开预览就点全屏：直接替用户打开，一步到位。
+      if (on && !previewOn) setPreview(true);
+      fullscreen = on;
+      var mask = m.el.parentNode;
+      body.classList.toggle('preview-fs', on);
+      m.el.classList.toggle('preview-fs', on);
+      if (mask) mask.classList.toggle('preview-fs', on);
+      if (fsBtn) {
+        fsBtn.textContent = on ? '退出全屏' : '全屏';
+        fsBtn.classList.toggle('active', on);
+        fsBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        fsBtn.title = on ? '退出全屏（Esc）' : '全屏预览（只读，不影响原文）';
+      }
+      if (on) {
+        previewPane.focus();
+      } else if (fsBtn) {
+        fsBtn.focus();
+      }
+    }
+
+    m.el.addEventListener('keydown', function (e) {
+      // Esc 只退出全屏、不关弹窗。弹窗自己的 Esc 监听挂在 document 上（冒泡），
+      // 这里在弹窗元素上先接住并 stopPropagation，事件就到不了它。
+      if (e.key === 'Escape' && fullscreen) {
+        e.preventDefault();
+        e.stopPropagation();
+        setFullscreen(false);
+        return;
+      }
+      // 预览区是脚本聚焦的（tabIndex = -1），不在弹窗焦点循环的候选里。
+      // 不接管的话，从它按 Tab 会直接跳出弹窗、跑到浏览器地址栏。
+      if (e.key === 'Tab' && fullscreen && document.activeElement === previewPane) {
+        e.preventDefault();
+        var first = null;
+        Array.prototype.some.call(tools.querySelectorAll('button'), function (b) {
+          if (!b.disabled) { first = b; return true; }
+          return false;
+        });
+        (first || m.el).focus();
+      }
+    });
+
     // ---- 工具栏 ----
 
     function makeTool(label, title, onClick, cls) {
@@ -833,6 +890,7 @@
 
     var saveBtn = makeTool('保存', '保存到服务器（Ctrl/⌘ + S）', function () { save(); }, 'primary');
     var pvBtn = null;
+    var fsBtn = null;
     var pvLabel = '';
     if (readOnly) {
       saveBtn.disabled = true;
@@ -869,6 +927,14 @@
       });
       pvBtn.setAttribute('aria-pressed', 'false');
       tools.appendChild(pvBtn);
+
+      // 全屏按钮只在有预览的语言里出现（Markdown / HTML / JSON / XML）。
+      // 没开预览时点它，会先把预览打开再进全屏。
+      fsBtn = makeTool('全屏', '全屏预览（只读，不影响原文）', function () {
+        setFullscreen(!fullscreen);
+      });
+      fsBtn.setAttribute('aria-pressed', 'false');
+      tools.appendChild(fsBtn);
     }
 
     // 格式化会直接改写 textarea 内容；只读文件不显示入口。

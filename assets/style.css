@@ -2384,6 +2384,20 @@ html.booting body::after {
   max-height: 92vh;
 }
 
+/* 预览全屏：把编辑弹窗本身撑满整个窗口。
+   不是浏览器原生 Fullscreen —— 那会把标题栏和「退出全屏」按钮一起藏掉，
+   用户只能靠猜 Esc。这里遮罩去内边距，弹窗去边框与圆角，四边贴住视口；
+   标题栏与编辑器工具栏都还在，退出入口一直可见。 */
+.modal-mask.preview-fs { padding: 0; align-items: stretch; }
+.modal.full.preview-fs {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+}
+
 /* 设置弹窗收窄回一个「对话框」的尺寸。
    .full 那档 1500px 是**编辑器**要的（代码行需要横向空间），设置页跟着沾光
    就变成 1900px 画布上摆一列控件 —— 右边一大片空白，看着很散。
@@ -2747,6 +2761,26 @@ html.booting body::after {
   padding: var(--space-3) var(--space-4);
   font-size: var(--fs-md);
   line-height: 1.75;
+}
+
+/* 全屏预览：编辑区让位，预览铺满弹窗剩余高度。 */
+.ed-root.preview-fs .ed-pane { display: none; }
+.ed-root.preview-fs .ed-stage {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.ed-root.preview-fs .ed-preview { padding: 18px 24px; }
+/* 焦点是脚本给的（为了方向键 / PageDown 滚动），不需要再画一圈焦点环。 */
+.ed-root.preview-fs .ed-preview:focus { outline: none; }
+/* 整屏宽度下一行文字太长：Markdown 收成一条居中的阅读栏。
+   代码块与表格仍可在栏内横向滚动。 */
+.ed-root.preview-fs .ed-markdown { max-width: 960px; margin: 0 auto; }
+/* 全屏是阅读态，底部那行「行数 / 大小 / 已同步」没有信息量。 */
+.ed-root.preview-fs .ed-foot { display: none; }
+
+@media (max-width: 560px) {
+  .ed-root.preview-fs .ed-preview { padding: 12px; }
 }
 
 .ed-foot {
