@@ -1,4 +1,4 @@
-# gofs
+# gofs介绍
 
 参照 [sigoden/dufs](https://github.com/sigoden/dufs) 的设计，用 Go 重写的一个实用文件服务器，
 并**额外实现了压缩包在线解压**。
