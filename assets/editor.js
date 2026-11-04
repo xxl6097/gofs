@@ -813,9 +813,9 @@
       // 没有预览就谈不上「仅预览」：关掉预览时顺手退回编辑态。
       if (!on) setPreviewOnly(false);
       previewPane.hidden = !on;
-      stage.classList.toggle('split', on);
-      // 「仅预览」只在「全屏 + 预览开着」时有意义，别留一颗点不动的按钮。
-      if (fsOnlyBtn) fsOnlyBtn.hidden = !(on && fullscreen);
+      stage.classList.toggle('split', on && !previewOnly);
+      // 「仅预览」按钮只在预览开着时才有意义。
+      if (poBtn) poBtn.hidden = !on;
       if (pvBtn) {
         // 按钮本身要能看出「预览开着」。否则用户只能从多出来的半边
         // 内容推断状态，再点一次也不知道会发生什么。
@@ -842,19 +842,22 @@
     var fullscreen = false;
     var previewOnly = false;
 
-    // setPreviewOnly 只负责切「收起编辑区」这一个状态，
-    // 焦点由调用方决定：点按钮进来 / 切回编辑区落点不一样。
+    // setPreviewOnly 在全屏和非全屏模式下都可用：
+    // 隐藏编辑区，预览独占舞台，适合长文阅读。
     function setPreviewOnly(on) {
-      on = !!on && fullscreen && previewOn;
+      // 必须先开预览才能进「仅预览」。
+      on = !!on && previewOn;
       if (on === previewOnly) return;
       previewOnly = on;
       body.classList.toggle('preview-only', on);
-      if (fsOnlyBtn) {
-        fsOnlyBtn.textContent = on ? '显示编辑' : '仅预览';
-        fsOnlyBtn.title = on
-          ? '显示编辑区，边改边看'
-          : '隐藏编辑区，只留预览（Esc 退出全屏）';
-        fsOnlyBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      stage.classList.toggle('split', previewOn && !on);
+      if (poBtn) {
+        poBtn.textContent = on ? '显示编辑' : '仅预览';
+        poBtn.classList.toggle('active', on);
+        poBtn.title = on
+          ? '恢复分屏，边改边看'
+          : '隐藏编辑区，只看预览';
+        poBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
       }
     }
 
@@ -873,13 +876,16 @@
         fsBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
         fsBtn.title = on ? '退出全屏（Esc）' : '全屏编辑与预览（Esc 退出）';
       }
-      // 「仅预览」只在这时候有意义：每次进全屏都从边改边看开始。
-      setPreviewOnly(false);
-      if (fsOnlyBtn) fsOnlyBtn.hidden = !on;
       if (on) {
         // 桌面端直接把焦点放进编辑区，进来就能改。触屏不抢焦点，
         // 否则一进全屏就弹出软键盘，把预览挤得只剩一条。
-        if (!window.matchMedia || window.matchMedia('(hover: hover)').matches) ta.focus();
+        if (!window.matchMedia || window.matchMedia('(hover: hover)').matches) {
+          if (previewOnly) {
+            previewPane.focus();
+          } else {
+            ta.focus();
+          }
+        }
       } else if (fsBtn) {
         fsBtn.focus();
       }
@@ -919,7 +925,7 @@
     var saveBtn = makeTool('保存', '保存到服务器（Ctrl/⌘ + S）', function () { save(); }, 'primary');
     var pvBtn = null;
     var fsBtn = null;
-    var fsOnlyBtn = null;
+    var poBtn = null;  // preview-only button
     var pvLabel = '';
     if (readOnly) {
       saveBtn.disabled = true;
@@ -957,17 +963,9 @@
       pvBtn.setAttribute('aria-pressed', 'false');
       tools.appendChild(pvBtn);
 
-      // 全屏按钮只在有预览的语言里出现（Markdown / HTML / JSON / XML）。
-      // 没开预览时点它，会先把预览打开再进全屏。
-      fsBtn = makeTool('全屏', '全屏编辑与预览（Esc 退出）', function () {
-        setFullscreen(!fullscreen);
-      });
-      fsBtn.setAttribute('aria-pressed', 'false');
-      tools.appendChild(fsBtn);
-
-      // 「仅预览」只出现在全屏期间：把编辑区收起来，长文读起来更安静。
-      // 放在这里而不是另外开一颗入口按钮，是为了全屏只有一个进入点。
-      fsOnlyBtn = makeTool('仅预览', '隐藏编辑区，只留预览（Esc 退出全屏）', function () {
+      // 「仅预览」按钮：隐藏编辑区，预览独占舞台。
+      // 全屏和非全屏模式下都可用，只在预览开着时显示。
+      poBtn = makeTool('仅预览', '隐藏编辑区，只看预览', function () {
         setPreviewOnly(!previewOnly);
         if (previewOnly) {
           previewPane.focus();
@@ -975,9 +973,112 @@
           ta.focus();
         }
       });
-      fsOnlyBtn.setAttribute('aria-pressed', 'false');
-      fsOnlyBtn.hidden = true;
-      tools.appendChild(fsOnlyBtn);
+      poBtn.setAttribute('aria-pressed', 'false');
+      poBtn.hidden = true;
+      tools.appendChild(poBtn);
+
+      // 全屏按钮只在有预览的语言里出现（Markdown / HTML / JSON / XML）。
+      // 没开预览时点它，会先把预览打开再进全屏。
+      fsBtn = makeTool('全屏', '全屏编辑与预览（Esc 退出）', function () {
+        setFullscreen(!fullscreen);
+      });
+      fsBtn.setAttribute('aria-pressed', 'false');
+      tools.appendChild(fsBtn);
+    }
+
+    // Markdown 专属工具栏：快捷插入标题、粗体、斜体、链接、代码块等
+    if (doc.language === 'markdown' && !readOnly) {
+      var mdTools = document.createElement('div');
+      mdTools.className = 'ed-md-tools';
+
+      function mdInsert(before, after, placeholder, selectPlaceholder) {
+        return function () {
+          var start = ta.selectionStart;
+          var end = ta.selectionEnd;
+          var val = ta.value;
+          var selected = val.slice(start, end);
+          var insert = before + (selected || placeholder) + (after || '');
+          ta.setRangeText(insert, start, end, 'end');
+          if (!selected && placeholder) {
+            // 没有选中文本时，插入占位符并选中它
+            var phStart = start + before.length;
+            ta.setSelectionRange(phStart, phStart + placeholder.length);
+          }
+          ta.focus();
+          onEdit();
+        };
+      }
+
+      function mdInsertBlock(prefix, placeholder) {
+        return function () {
+          var start = ta.selectionStart;
+          var end = ta.selectionEnd;
+          var val = ta.value;
+          var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+          var lineEnd = val.indexOf('\n', end);
+          if (lineEnd === -1) lineEnd = val.length;
+
+          var selected = val.slice(start, end);
+          var currentLine = val.slice(lineStart, lineEnd);
+
+          var content;
+          if (selected) {
+            // 有选中文字：只用选中部分
+            content = selected;
+          } else if (currentLine) {
+            // 无选中、行非空：去掉已有的标题前缀后用整行内容
+            content = currentLine.replace(/^#+\s*/, '');
+          } else {
+            // 空行：用占位符
+            content = placeholder;
+          }
+
+          var insert = prefix + content;
+          ta.setRangeText(insert, lineStart, lineEnd, 'end');
+
+          if (!selected && !currentLine) {
+            // 空行插入占位符时选中它
+            var phStart = lineStart + prefix.length;
+            ta.setSelectionRange(phStart, phStart + placeholder.length);
+          } else {
+            // 否则光标放在行尾
+            ta.setSelectionRange(lineStart + insert.length, lineStart + insert.length);
+          }
+          ta.focus();
+          onEdit();
+        };
+      }
+
+      var mdBtns = [
+        { label: 'H1', title: '一级标题', fn: mdInsertBlock('# ', '标题') },
+        { label: 'H2', title: '二级标题', fn: mdInsertBlock('## ', '标题') },
+        { label: 'H3', title: '三级标题', fn: mdInsertBlock('### ', '标题') },
+        { label: '粗', title: '粗体（Ctrl/⌘ + B）', fn: mdInsert('**', '**', '粗体文字') },
+        { label: '斜', title: '斜体（Ctrl/⌘ + I）', fn: mdInsert('*', '*', '斜体文字') },
+        { label: '链', title: '插入链接', fn: mdInsert('[', '](url)', '链接文字') },
+        { label: '图', title: '插入图片', fn: mdInsert('![', '](url)', '图片描述') },
+        { label: '代', title: '行内代码', fn: mdInsert('`', '`', '代码') },
+        { label: '块', title: '代码块', fn: function () {
+          var start = ta.selectionStart;
+          var val = ta.value;
+          var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+          var insert = '```\n代码块\n```\n';
+          ta.setRangeText(insert, lineStart, lineStart, 'end');
+          ta.setSelectionRange(lineStart + 4, lineStart + 7);
+          ta.focus();
+          onEdit();
+        }},
+        { label: '列', title: '无序列表', fn: mdInsertBlock('- ', '列表项') },
+        { label: '引', title: '引用', fn: mdInsertBlock('> ', '引用内容') },
+      ];
+
+      mdBtns.forEach(function (item) {
+        var btn = makeTool(item.label, item.title, item.fn);
+        btn.classList.add('ed-md-btn');
+        mdTools.appendChild(btn);
+      });
+
+      bar.insertBefore(mdTools, meta);
     }
 
     // 格式化会直接改写 textarea 内容；只读文件不显示入口。
@@ -1036,6 +1137,33 @@
         if (!readOnly) save();
         return;
       }
+
+      // Markdown 快捷键：Ctrl/⌘ + B 粗体，Ctrl/⌘ + I 斜体
+      if (doc.language === 'markdown' && !readOnly && (e.metaKey || e.ctrlKey)) {
+        if (e.key === 'b' || e.key === 'B') {
+          e.preventDefault();
+          var start = ta.selectionStart, end = ta.selectionEnd;
+          var selected = ta.value.slice(start, end);
+          var insert = '**' + (selected || '粗体文字') + '**';
+          ta.setRangeText(insert, start, end, 'end');
+          if (!selected) ta.setSelectionRange(start + 2, start + 6);
+          ta.focus();
+          onEdit();
+          return;
+        }
+        if (e.key === 'i' || e.key === 'I') {
+          e.preventDefault();
+          var start = ta.selectionStart, end = ta.selectionEnd;
+          var selected = ta.value.slice(start, end);
+          var insert = '*' + (selected || '斜体文字') + '*';
+          ta.setRangeText(insert, start, end, 'end');
+          if (!selected) ta.setSelectionRange(start + 1, start + 5);
+          ta.focus();
+          onEdit();
+          return;
+        }
+      }
+
       if (readOnly) return;
 
       // Tab 插入缩进而不是跳走

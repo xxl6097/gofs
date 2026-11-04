@@ -2699,6 +2699,48 @@ html.booting body::after {
 }
 .ed-tools { display: flex; gap: 7px; flex: none; }
 
+/* Markdown 语法工具栏：快捷插入标题、粗体、链接、代码等。
+   与右侧主工具栏分开：主工具栏是文件级（保存 / 预览 / 退出），
+   这里是内容级（操作当前光标处的文字）。 */
+.ed-md-tools {
+  display: flex;
+  gap: 4px;
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+}
+.ed-md-btn {
+  min-width: 32px;
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.ed-md-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--accent);
+}
+.ed-md-btn:active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+@media (max-width: 820px) {
+  .ed-md-tools { gap: 3px; padding: 5px 8px; }
+  .ed-md-btn { min-width: 28px; padding: 3px 6px; font-size: var(--fs-2xs); }
+}
+
+@media (max-width: 560px) {
+  /* 手机端工具栏会换行，Markdown 工具栏独占一行 */
+  .ed-md-tools { width: 100%; justify-content: space-between; }
+  .ed-md-btn { flex: 1; min-width: 0; }
+}
+
 .ed-stage {
   flex: 1;
   display: flex;
@@ -2782,8 +2824,18 @@ html.booting body::after {
 /* 全屏时底部那行「行数 / 大小 / 已同步」让位给内容。 */
 .ed-root.preview-fs .ed-foot { display: none; }
 
+/* 仅预览模式：无论全屏与否，都隐藏编辑区，预览独占舞台。
+   与全屏独立：非全屏时也能用，弹窗尺寸不变，适合长文阅读。 */
+.ed-root.preview-only .ed-pane { display: none; }
+.ed-root.preview-only .ed-stage { display: block; }
+.ed-root.preview-only .ed-preview { padding: 18px 24px; }
+.ed-root.preview-only .ed-preview:focus { outline: none; }
+/* 非全屏的仅预览：Markdown 也收成阅读栏，避免一行太长。 */
+.ed-root.preview-only:not(.preview-fs) .ed-markdown { max-width: 860px; margin: 0 auto; }
+
 @media (max-width: 560px) {
   .ed-root.preview-fs .ed-preview { padding: 12px; }
+  .ed-root.preview-only .ed-preview { padding: 12px; }
 }
 
 .ed-foot {
