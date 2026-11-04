@@ -2827,8 +2827,15 @@ html.booting body::after {
 /* 仅预览模式：无论全屏与否，都隐藏编辑区，预览独占舞台。
    与全屏独立：非全屏时也能用，弹窗尺寸不变，适合长文阅读。 */
 .ed-root.preview-only .ed-pane { display: none; }
-.ed-root.preview-only .ed-stage { display: block; }
-.ed-root.preview-only .ed-preview { padding: 18px 24px; }
+.ed-root.preview-only .ed-stage {
+  display: flex;
+  flex-direction: column;
+}
+.ed-root.preview-only .ed-preview {
+  flex: 1;
+  overflow: auto;
+  padding: 18px 24px;
+}
 .ed-root.preview-only .ed-preview:focus { outline: none; }
 /* 非全屏的仅预览：Markdown 也收成阅读栏，避免一行太长。 */
 .ed-root.preview-only:not(.preview-fs) .ed-markdown { max-width: 860px; margin: 0 auto; }
