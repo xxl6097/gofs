@@ -1049,13 +1049,43 @@
         };
       }
 
+      // looksLikeURL 判断选中的文本是不是一段可直接当作链接地址的内容。
+      // 只认没有空白的紧凑串：带协议（http://、mailto:）、www 开头、
+      // 或带常见顶级域名的裸域名/路径；javascript:/data: 等可执行协议除外。
+      function looksLikeURL(s) {
+        var t = String(s).trim();
+        if (!t || /\s/.test(t)) return false;
+        if (/^(javascript|data|vbscript):/i.test(t)) return false;
+        return /^[a-z][a-z0-9+.-]*:/i.test(t) ||
+          /^www\./i.test(t) ||
+          /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}([/?#].*)?$/i.test(t);
+      }
+
+      // mdLink 插入链接。选中的文本本来就是一段链接时，把它直接填进超链接
+      // 位置（[url](url)），省去再手敲一遍地址；否则沿用通用占位符插入。
+      function mdLink() {
+        var start = ta.selectionStart;
+        var end = ta.selectionEnd;
+        var selected = ta.value.slice(start, end);
+
+        if (selected && looksLikeURL(selected)) {
+          var insert = '[' + selected + '](' + selected + ')';
+          ta.setRangeText(insert, start, end, 'end');
+          ta.focus();
+          onEdit();
+          return;
+        }
+
+        mdInsert('[', '](url)', '链接文字')();
+      }
+
       var mdBtns = [
         { label: 'H1', title: '一级标题', fn: mdInsertBlock('# ', '标题') },
         { label: 'H2', title: '二级标题', fn: mdInsertBlock('## ', '标题') },
         { label: 'H3', title: '三级标题', fn: mdInsertBlock('### ', '标题') },
         { label: '粗', title: '粗体（Ctrl/⌘ + B）', fn: mdInsert('**', '**', '粗体文字') },
         { label: '斜', title: '斜体（Ctrl/⌘ + I）', fn: mdInsert('*', '*', '斜体文字') },
-        { label: '链', title: '插入链接', fn: mdInsert('[', '](url)', '链接文字') },
+        { label: '链', title: '插入链接', fn: mdLink },
         { label: '图', title: '插入图片', fn: mdInsert('![', '](url)', '图片描述') },
         { label: '代', title: '行内代码', fn: mdInsert('`', '`', '代码') },
         { label: '块', title: '代码块', fn: function () {
