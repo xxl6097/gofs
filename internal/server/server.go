@@ -25,6 +25,7 @@ import (
 	"github.com/xxl6097/gofs/internal/config"
 	"github.com/xxl6097/gofs/internal/fsutil"
 	"github.com/xxl6097/gofs/internal/uploadkey"
+	"github.com/xxl6097/gofs/internal/webdav"
 )
 
 // Server 持有全部运行时依赖。
@@ -58,6 +59,11 @@ type Server struct {
 	// assetTags 缓存内嵌资源的 ETag（按内容算，只算一次）。
 	// 为什么不能只用 modTime+size：见 handler_list.go 的 assetETag。
 	assetTags sync.Map
+
+	// WebDAV 相关
+	webdavMu     sync.Mutex
+	webdavAPI    *webdav.API
+	webdavServer *webdav.Server
 }
 
 // WebDAV 风格的方法，标准库未定义。
@@ -241,6 +247,9 @@ func (s *Server) Handler() http.Handler {
 	// 卸载是**独立**的扩展点（WithUninstaller），与 Restarter 无关。
 	mux.HandleFunc("/fs/uninstall", s.handleUninstall)
 	mux.HandleFunc("/fs/users", s.handleUsers)
+	// WebDAV 账号管理 API
+	mux.HandleFunc("/api/webdav/accounts", s.handleWebDAVAccounts)
+	mux.HandleFunc("/api/webdav/accounts/", s.handleWebDAVAccountsDetail)
 	// 批量重命名：整批校验通过才动手（见 handler_rename.go）。
 	mux.HandleFunc("/fs/rename-batch", s.handleRenameBatch)
 	mux.HandleFunc("/fs/extract", s.handleExtract)

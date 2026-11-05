@@ -940,6 +940,11 @@
     return { el: p.el, footerItems: p.buttons || [] };
   }
 
+  function buildWebDAVTab(ctx) {
+    var p = G.webdavPanel();
+    return { el: p.el, footerItems: p.buttons || [] };
+  }
+
   // ---------------------------------------------------------------- 等服务回来
 
   // healthOK 探一次 /fs/health，返回服务是否已经能响应。
@@ -1453,6 +1458,10 @@
     }
     if (G.data.allow_users) {
       defs.push({ id: 'users', label: '用户与权限', build: buildUsersTab });
+    }
+    // WebDAV 账号管理（如果 webdavPanel 函数存在）
+    if (G.webdavPanel && G.data.allow_settings) {
+      defs.push({ id: 'webdav', label: 'WebDAV 账号', build: buildWebDAVTab });
     }
     // 升级 / 重启 / 卸载接口都要管理员权限，所以没「常规」就没有这一页 ——
     // 否则会给出一个点了必然 403 的标签。
