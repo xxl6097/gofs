@@ -1090,7 +1090,7 @@
       body: body,
       footer: modalFoot([
         { label: '取消', onClick: function () { m.close(); } },
-        { label: '生成并复制', cls: 'primary', onClick: function () { submit(); } }
+        { label: '生成链接', cls: 'primary', onClick: function () { submit(); } }
       ])
     });
 
@@ -1123,37 +1123,28 @@
         // 刚才那条是只读还是能删文件，事后也回想不起来。
         var desc = sharePermLabel(data.key && data.key.kind) + ' · ' + ttlText;
 
-        // ⚠️ 链接这时候**已经在服务端建好了**，而明文只此一次、之后只剩摘要。
-        // 所以复制失败绝不能当成「生成失败」——那样链接既在生效，用户又拿不到，
-        // 只能去密钥面板把它撤销掉。这里改成把地址显示出来让用户手动复制。
-        try {
-          await copyText(url);
-          m.close();
-          toast('ok', '分享链接已复制（' + desc + '）', 5000);
-          return;
-        } catch (e) {
-          showShareLink(m, url, desc, e.message);
-        }
+        // 链接这时候**已经在服务端建好了**，而明文只此一次、之后只剩摘要。
+        // 所以不能只静默塞进剪贴板：用户既看不到地址，自动复制失败也没有
+        // 补救机会。改成把地址显示出来，让用户能「查看并复制」。
+        showShareResult(m, url, desc);
       } catch (e) {
-        if (btn) { btn.disabled = false; btn.textContent = '生成并复制'; }
+        if (btn) { btn.disabled = false; btn.textContent = '生成链接'; }
         toast('err', '生成分享链接失败：' + e.message);
       }
     }
   }
 
-  // showShareLink 在自动复制失败时，把地址显示出来让用户手动复制。
+  // showShareResult 展示生成好的分享链接：地址可见、可一键复制。
   //
-  // 这一步是必需的：链接已经生效，而明文只在这一次返回里给过 ——
-  // 不显示出来，这条链接就等于「已经公开但没人知道地址」，
-  // 用户只能去密钥面板撤销。
-  function showShareLink(prev, url, desc, why) {
+  // 明文只在这一次返回里给过，所以必须让用户「看到并复制」地址 ——
+  // 只静默塞进剪贴板既不透明，复制失败时也没有补救机会。
+  function showShareResult(prev, url, desc) {
     var box = document.createElement('div');
 
-    var warn = document.createElement('div');
-    warn.className = 'hint-box danger';
-    warn.textContent = '链接已经生成并生效，但自动复制失败了（' + why + '）。' +
-      '请手动选中下面的地址复制 —— 它只显示这一次。';
-    box.appendChild(warn);
+    var info = document.createElement('div');
+    info.className = 'hint-box';
+    info.textContent = '链接已生成，只显示这一次。请复制保存；之后仍可在「密钥」面板撤销。';
+    box.appendChild(info);
 
     var input = document.createElement('input');
     input.type = 'text';
@@ -1165,14 +1156,30 @@
 
     var note = document.createElement('div');
     note.className = 'hint';
-    note.textContent = '权限与有效期：' + desc + '。可以在「密钥」面板里随时撤销。';
+    note.style.marginTop = '8px';
+    note.textContent = '权限与有效期：' + desc;
     box.appendChild(note);
 
     prev.close();
     var m = openModal({
       title: '分享链接',
       body: box,
-      footer: modalFoot([{ label: '我已复制', cls: 'primary', onClick: function () { m.close(); } }])
+      footer: modalFoot([
+        {
+          label: '复制链接', cls: 'primary', onClick: function () {
+            var btn = m.el.querySelector('.modal-foot .btn.primary');
+            copyText(url).then(function () {
+              if (btn) { btn.textContent = '已复制 ✓'; btn.disabled = true; }
+              setTimeout(function () {
+                if (btn) { btn.textContent = '复制链接'; btn.disabled = false; }
+              }, 1500);
+            }).catch(function (e) {
+              toast('err', '复制失败：' + e.message);
+            });
+          }
+        },
+        { label: '完成', onClick: function () { m.close(); } }
+      ])
     });
     // 选中，方便直接 ⌘C。
     input.focus();

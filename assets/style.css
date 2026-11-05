@@ -1,6 +1,10 @@
 /* gofs 前端样式：跟随系统主题，支持手动切换，无任何外部依赖。 */
 
 :root {
+  /* 原生表单控件（勾选框、下拉框、滚动条等）跟着主题一起切色。
+     手动切到深色主题时，浏览器的 color-scheme 若不跟着改，勾选框会
+     仍是浅色底，和整片暗色界面格格不入。 */
+  color-scheme: light;
   --bg: #ffffff;
   --bg-soft: #f6f7f9;
   --bg-elev: #ffffff;
@@ -73,6 +77,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme="auto"], :root:not([data-theme]) {
+    color-scheme: dark;
     --bg: #14161a;
     --bg-soft: #191c21;
     --bg-elev: #1d2127;
@@ -107,6 +112,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #14161a;
   --bg-soft: #191c21;
   --bg-elev: #1d2127;

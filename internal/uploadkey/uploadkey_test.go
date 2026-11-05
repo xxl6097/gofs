@@ -216,6 +216,39 @@ func TestPersistence(t *testing.T) {
 	}
 }
 
+// TestShareTokenPersisted 分享链接会保存明文 token（供列表复制链接），
+// 上传密钥不保存；重启后分享的 token 仍在。
+func TestShareTokenPersisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.json")
+	s := newStore(t, path)
+
+	share, shareToken, err := s.Create(CreateOptions{Name: "分享", Scope: "/docs", Kind: KindRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if share.Token != shareToken {
+		t.Errorf("分享链接应保存明文 token：got %q want %q", share.Token, shareToken)
+	}
+
+	up, _, err := s.Create(CreateOptions{Name: "上传", Scope: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Token != "" {
+		t.Errorf("上传密钥不应保存明文 token：got %q", up.Token)
+	}
+
+	// 重载后分享 token 仍在，可从存储取回。
+	s2 := newStore(t, path)
+	got, ok := s2.Get(share.ID)
+	if !ok {
+		t.Fatal("重载后找不到分享链接")
+	}
+	if got.Token != shareToken {
+		t.Errorf("重载后分享 token = %q，期望 %q", got.Token, shareToken)
+	}
+}
+
 func TestListOrderAndCopy(t *testing.T) {
 	s := newStore(t, "")
 	if _, _, err := s.Create(CreateOptions{Name: "第一个"}); err != nil {

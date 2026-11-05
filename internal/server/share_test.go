@@ -303,6 +303,51 @@ func TestKeyViewReportsKind(t *testing.T) {
 	}
 }
 
+// TestShareLinkExposesTokenInList 确认「密钥」列表里，分享链接会带出明文令牌
+// 供前端复制完整地址；上传密钥仍然不带（明文只显示一次）。
+func TestShareLinkExposesTokenInList(t *testing.T) {
+	s, _ := shareServer(t)
+	tok := newShare(t, s, "/docs")
+	if _, _, err := s.keys.Create(uploadkey.CreateOptions{Name: "up", Scope: "/"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := do(t, s, http.MethodGet, "/fs/keys", nil,
+		map[string]string{"Authorization": basicAuth("boss", "pw")})
+	if got.code != http.StatusOK {
+		t.Fatalf("返回 %d：%s", got.code, got.body)
+	}
+
+	var d struct {
+		Keys []struct {
+			Kind       string `json:"kind"`
+			ShareToken string `json:"share_token"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(got.body), &d); err != nil {
+		t.Fatalf("解析列表失败: %v\n%s", err, got.body)
+	}
+
+	var share, upload bool
+	for _, k := range d.Keys {
+		switch k.Kind {
+		case uploadkey.KindRead:
+			share = true
+			if k.ShareToken != tok {
+				t.Errorf("分享链接的 share_token = %q，期望 %q", k.ShareToken, tok)
+			}
+		case uploadkey.KindUpload:
+			upload = true
+			if k.ShareToken != "" {
+				t.Errorf("上传密钥不应带 share_token，实际 %q", k.ShareToken)
+			}
+		}
+	}
+	if !share || !upload {
+		t.Fatalf("列表里应同时有分享链接与上传密钥（share=%v upload=%v）", share, upload)
+	}
+}
+
 // TestReadOnlyPermsDoNotIncludeEdit 钉住一个既有 bug。
 //
 // buildPerms 里 Edit 原本写的是 `canRead && AllowEdit`，而 Write/Delete/

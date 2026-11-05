@@ -490,6 +490,30 @@
 
         var actions = document.createElement('div');
         actions.className = 'key-actions';
+
+        // 分享链接可以在列表里直接复制完整地址；上传密钥的明文仍只显示一次，
+        // 所以这里只对带 share_token 的分享链接给出复制按钮。
+        if (k.share_token) {
+          var copyLink = G.btn('复制链接', 'btn-sm', function () {
+            var url = location.origin +
+              G.raw('/s/' + encodeURIComponent(k.share_token) + G.encPath(k.scope));
+            copyText(url).then(function () {
+              copyLink.textContent = '已复制 ✓';
+              copyLink.disabled = true;
+              setTimeout(function () {
+                copyLink.textContent = '复制链接';
+                copyLink.disabled = false;
+              }, 1500);
+              G.toast('ok', '已复制分享链接');
+            }).catch(function (e) {
+              G.toast('err', '复制失败：' + e.message);
+            });
+          });
+          copyLink.title = '复制 ' + location.origin +
+            G.raw('/s/' + encodeURIComponent(k.share_token) + G.encPath(k.scope));
+          actions.appendChild(copyLink);
+        }
+
         var del = G.btn('撤销', 'danger', function () {
           G.confirm({
             title: '撤销密钥',

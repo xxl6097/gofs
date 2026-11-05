@@ -21,7 +21,9 @@ import (
 const maxKeyTTLSeconds = 10 * 365 * 24 * 3600
 
 // keyView 是返回给前端的密钥视图。
-// 刻意不含任何可用于认证的字段——明文只在创建时返回一次，摘要则永不外泄。
+// 上传密钥刻意不含任何可用于认证的字段——明文只在创建时返回一次，摘要则
+// 永不外泄。分享链接例外：为了让用户之后能在「密钥」面板里复制链接，
+// ShareToken 会带出明文令牌（只有分享链接才有）。
 type keyView struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -37,6 +39,7 @@ type keyView struct {
 	LastUsedAt string `json:"last_used_at,omitempty"`
 	UseCount   int64  `json:"use_count"`
 	Note       string `json:"note,omitempty"`
+	ShareToken string `json:"share_token,omitempty"`
 }
 
 // keyCreateRequest 是创建密钥的请求体。
@@ -361,6 +364,10 @@ func (s *Server) keyView(k *uploadkey.Key) keyView {
 	}
 	if !k.LastUsedAt.IsZero() {
 		v.LastUsedAt = k.LastUsedAt.Format(time.RFC3339)
+	}
+	// 只有分享链接才带出明文令牌，供前端还原 /s/<token><scope> 的完整地址。
+	if k.IsShare() && k.Token != "" {
+		v.ShareToken = k.Token
 	}
 	return v
 }

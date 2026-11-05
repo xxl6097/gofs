@@ -67,12 +67,16 @@ var (
 // 使用统计的落盘节流间隔，避免每次上传都写一次磁盘。
 const flushInterval = 30 * time.Second
 
-// Key 描述一把上传密钥。注意这里不保存明文。
+// Key 描述一把上传密钥。上传密钥不保存明文；分享链接为了让用户之后还能
+// 在「密钥」面板里复制链接，会额外保存明文 token（Token 字段）。
 type Key struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Prefix string `json:"prefix"` // 明文前若干位，仅供人工识别
 	Hash   string `json:"hash"`   // sha256(明文) 的十六进制摘要
+	// Token 是分享链接的明文令牌，只对分享链接（kind=read/readwrite）保存；
+	// 上传密钥仍遵循「明文只显示一次」，此字段为空。
+	Token string `json:"token,omitempty"`
 	// Scope 是允许访问的路径前缀，例如 "/uploads"；"/" 表示不限。
 	//
 	// 对上传密钥是「能传到哪」，对分享链接是「能读到哪」。
@@ -373,6 +377,11 @@ func (s *Store) Create(opts CreateOptions) (*Key, string, error) {
 		Creator:   opts.Creator,
 		CreatedAt: now,
 		Note:      note,
+	}
+	// 分享链接之后要在「密钥」面板里复制链接，必须能还原出明文；
+	// 上传密钥没有这个需求，保持「只显示一次」。
+	if IsShareKind(kind) {
+		k.Token = token
 	}
 	if opts.TTL > 0 {
 		k.ExpiresAt = now.Add(opts.TTL)
