@@ -940,7 +940,7 @@
     return { el: p.el, footerItems: p.buttons || [] };
   }
 
-  function buildWebDAVTab(ctx) {
+  function buildWebDAVTab() {
     var p = G.webdavPanel();
     return { el: p.el, footerItems: p.buttons || [] };
   }

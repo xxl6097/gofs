@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -85,6 +86,66 @@ func TestWebDAVServer(t *testing.T) {
 			t.Errorf("应该拒绝访问 /shared/，得到状态码 %d", w.Code)
 		}
 	})
+}
+
+// TestPrefixedMount 覆盖挂载前缀的两种职责：请求路径要剥掉 "/dav/" 才能
+// 映射到磁盘，目录 ACL 也要拿剥掉前缀后的路径来比对。
+func TestPrefixedMount(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755); err != nil {
+		t.Fatalf("创建 docs 目录失败: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "shared"), 0755); err != nil {
+		t.Fatalf("创建 shared 目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "docs", "a.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+
+	server, err := New(tmpDir)
+	if err != nil {
+		t.Fatalf("创建服务器失败: %v", err)
+	}
+	server.SetPrefix("/dav/")
+	if err := server.AddAccount("alice", "secret", []string{"/docs"}); err != nil {
+		t.Fatalf("添加账号失败: %v", err)
+	}
+
+	do := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.SetBasicAuth("alice", "secret")
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		return w
+	}
+
+	// 前缀内的授权目录：能真正读到磁盘上的 docs/a.txt。
+	if w := do("GET", "/dav/docs/a.txt"); w.Code != http.StatusOK {
+		t.Fatalf("GET /dav/docs/a.txt 期望 200，得到 %d", w.Code)
+	} else if w.Body.String() != "hello" {
+		t.Fatalf("文件内容不对: %q", w.Body.String())
+	}
+
+	// 浏览器直接 GET 目录：给出可点击的文件列表，而不是 WebDAV 的 405。
+	if w := do("GET", "/dav/docs/"); w.Code != http.StatusOK {
+		t.Fatalf("GET /dav/docs/ 期望 200，得到 %d", w.Code)
+	} else if body := w.Body.String(); !strings.Contains(body, "a.txt") ||
+		!strings.Contains(body, `href="./a.txt"`) {
+		t.Fatalf("目录列表应有 a.txt 链接，实际: %q", body)
+	}
+
+	// 前缀内、但不在授权目录：403。
+	if w := do("GET", "/dav/shared/"); w.Code != http.StatusForbidden {
+		t.Errorf("GET /dav/shared/ 期望 403，得到 %d", w.Code)
+	}
+
+	// 根路径不在授权范围：403（不是 401/404），并在响应里说明授权目录，
+	// 否则用户只看到「无权访问」，不知道要连 /dav/docs/。
+	if w := do("PROPFIND", "/dav/"); w.Code != http.StatusForbidden {
+		t.Errorf("PROPFIND /dav/ 期望 403，得到 %d", w.Code)
+	} else if !strings.Contains(w.Body.String(), "/docs") {
+		t.Errorf("403 响应应提示授权目录，实际: %q", w.Body.String())
+	}
 }
 
 func TestAccountManagement(t *testing.T) {

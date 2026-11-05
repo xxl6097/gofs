@@ -3,7 +3,8 @@
 参照 [sigoden/dufs](https://github.com/sigoden/dufs) 的设计，用 Go 重写的一个实用文件服务器，
 并**额外实现了压缩包在线解压**。
 
-单二进制、零第三方依赖（只用 Go 标准库）、内嵌前端，`go build` 出来直接就能跑。
+单二进制、内嵌前端，`go build` 出来直接就能跑。除 WebDAV 用到官方的
+`golang.org/x/net` 外，其余功能只用 Go 标准库。
 
 ## 特性
 
@@ -42,6 +43,11 @@
 - **账号自助改密**：任何登录用户（含启动参数账号）都能在顶栏「改密」，
   需再次验证当前密码；成功后全部会话、上传密钥与分享链接立即失效，
   新密码落盘后重启仍有效
+- **WebDAV 服务**（`/dav/`）：独立的 WebDAV 账号，每个账号只授权若干目录，
+  Basic Auth 认证、密码只存 PBKDF2 摘要；Windows「映射网络驱动器」、
+  macOS Finder（⌘K）、Cyberduck 等可直接挂载。
+  账号在「设置 → WebDAV 账号」里增删改，也提供 `/api/webdav/accounts` 接口；
+  浏览器打开目录时给出一份只读文件列表，点文件即可下载 / 预览
 - **默认监听 `0.0.0.0`（所有网卡）**，开箱即可从局域网访问；仅本机使用请加 `--bind 127.0.0.1`
 - 隐藏路径 glob、访问路径前缀、CORS、HTTPS、unix socket
 - **手机端交互适配**：触摸目标 ≥40px、无 hover 依赖、操作收进「更多」菜单、
@@ -137,7 +143,8 @@
 > `-b 127.0.0.1`；无鉴权时请先确认这确实是你要的暴露范围。
 
 ```bash
-# 构建（需要 Go 1.25+：os.Root 的安全 Rename/RemoveAll 用于防 TOCTOU）
+# 构建（需要 Go 1.26+：os.Root 的安全 Rename/RemoveAll 用于防 TOCTOU，
+# 密码哈希用到标准库 crypto/pbkdf2）
 go build -o gofs ./cmd/gofs
 
 # 以只读模式服务当前目录
@@ -406,9 +413,9 @@ curl -X POST http://host/fs/rename-batch \
 
 `docx` / `xlsx` / `pptx` 单击文件名直接在弹窗里读，不用下载再用 Word 打开。
 
-**浏览器不认这些格式，而本项目坚持零第三方依赖** —— 连 Markdown 渲染器都是
-自研的。所以这里的做法是：服务端用标准库（`archive/zip` + `encoding/xml`）
-把文档解成**结构化内容**，前端再渲染。
+**浏览器不认这些格式，而 gofs 除 WebDAV 外不引第三方依赖** —— 连 Markdown
+渲染器都是自研的。所以这里的做法是：服务端用标准库（`archive/zip` +
+`encoding/xml`）把文档解成**结构化内容**，前端再渲染。
 
 ```bash
 # 服务端返回的是中性模型，不是 HTML
@@ -1204,6 +1211,83 @@ curl -u alice:alice123 -X POST -H 'Content-Type: application/json' \
 文件损坏、账号非法（用户名带空格、没有任何路径权限、摘要字段缺失）、
 或 `version` 高于本程序支持的版本时，**启动会直接失败并说明原因**，
 而不是静默降级 —— 一个悄悄少了管理员的部署比启动不了更糟。
+
+## WebDAV
+
+把 gofs 当成 WebDAV 服务器挂到系统里用：Windows「映射网络驱动器」、
+macOS Finder 的「连接服务器」（⌘K）、Cyberduck、`davfs2` 都可以。
+
+WebDAV 账号和网页登录账号**彼此独立**：网页账号用来打开界面，WebDAV 账号
+只用来走 Basic Auth 访问文件。每个 WebDAV 账号单独指定允许访问的目录，
+未授权路径一律 `403`，和网页登录的权限互不影响。
+
+### 连接信息
+
+```
+地址：http://<主机>:<端口>/dav/
+认证：HTTP Basic Auth（用户名 + 密码）
+```
+
+账号只被授权了子目录时，要连对应子目录，而不是 `/dav/` 根：
+
+```
+授权目录 /cmd  →  http://<主机>:<端口>/dav/cmd/
+```
+
+连根目录会返回 `403`，响应里会写明这个账号实际被授权的目录。
+面板里每个账号都会直接列出连接地址，可一键复制。
+
+### 管理账号
+
+登录管理员账号 → 顶栏「设置」→「WebDAV 账号」：
+
+- 新建账号：用户名 + 密码（可随机生成）+ 允许访问的目录（可加多条）
+- 修改权限：调整可访问目录，立即生效
+- 改密码：只影响 WebDAV 访问，不影响网页登录
+- 删除：账号立即失效
+
+也可以用 API（需要管理员，即对服务根目录有读写权限的账号）：
+
+```bash
+# 列出账号
+curl -u boss:secret http://127.0.0.1:5000/api/webdav/accounts
+
+# 新建：alice 只能访问 /docs
+curl -u boss:secret -X POST -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"alice123","allowed_dirs":["/docs"]}' \
+  http://127.0.0.1:5000/api/webdav/accounts
+
+# 改权限
+curl -u boss:secret -X PUT -H 'Content-Type: application/json' \
+  -d '{"allowed_dirs":["/docs","/shared"]}' \
+  http://127.0.0.1:5000/api/webdav/accounts/alice
+
+# 改密码
+curl -u boss:secret -X POST -H 'Content-Type: application/json' \
+  -d '{"new_password":"new-pass-456"}' \
+  http://127.0.0.1:5000/api/webdav/accounts/alice/password
+
+# 删除
+curl -u boss:secret -X DELETE \
+  http://127.0.0.1:5000/api/webdav/accounts/alice
+```
+
+### 浏览器里的只读视图
+
+WebDAV 客户端用 `PROPFIND` 列目录，浏览器打开 `/dav/<目录>/` 发的是 `GET`。
+gofs 对这种情况直接渲染一份**只读文件列表**：目录可以继续点进去，文件点击
+即可下载或就地预览，链接沿用当前 Basic Auth 身份。
+
+上传、重命名、删除等写操作仍然要用 WebDAV 客户端或 gofs 网页版完成。
+
+### 安全说明
+
+- 密码用 PBKDF2-HMAC-SHA256（210000 次迭代、随机盐）存摘要，
+  落盘 `<用户配置目录>/gofs/webdav_accounts.json`（`0600`），服务端无法还原明文。
+- 目录权限按前缀匹配：授权 `/docs` 即可访问 `/docs` 及其所有子目录。
+- 账号管理接口只接受对服务根目录有读写权限的管理员。
+- WebDAV 本身用 Basic Auth，默认允许明文 HTTP（与网页登录一致）；
+  对公网部署请放在 HTTPS 后面，或用 `--allow-insecure-auth=false` 收紧。
 
 ## 服务设置（运行期）
 
@@ -2899,11 +2983,11 @@ const p3 = navigate('/docs');   // 取代 p2 → p2 立刻拿到 false
 | 登录体验 | 浏览器原生 Basic 弹窗 | 应用内登录框（仍是 Basic 协议） |
 | 上传归档 | — | 传到根目录时按 年/月/日 三级目录归档（子目录原地放），可自定义布局、可单次覆盖 |
 | 文件夹上传 | — | 支持（选目录 / 拖目录），保留完整层级；带进度、可中途取消 |
-| WebDAV | 支持 | 未实现（仅实现了 MKCOL / MOVE 等基础方法） |
+| WebDAV | 支持（整库挂载） | 支持（`/dav/`，独立账号 + 按目录授权，可在页面上管理） |
 | Digest 鉴权 | 支持 | 仅 Basic（支持明文密码） |
 | 哈希密码 | 支持 `$6$` sha512-crypt | 未实现 |
 | 配置文件 | 支持 YAML | 仅命令行与环境变量 |
-| 依赖 | 多个 crate | 零第三方依赖 |
+| 依赖 | 多个 crate | 仅 `golang.org/x/net`（WebDAV），其余为 Go 标准库 |
 
 ## 作为库使用
 

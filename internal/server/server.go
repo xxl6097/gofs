@@ -247,7 +247,8 @@ func (s *Server) Handler() http.Handler {
 	// 卸载是**独立**的扩展点（WithUninstaller），与 Restarter 无关。
 	mux.HandleFunc("/fs/uninstall", s.handleUninstall)
 	mux.HandleFunc("/fs/users", s.handleUsers)
-	// WebDAV 账号管理 API
+	// WebDAV：协议端点在 /dav/，账号管理 API 在 /api/webdav/accounts。
+	mux.HandleFunc(webDAVMountPath, s.handleWebDAVServe)
 	mux.HandleFunc("/api/webdav/accounts", s.handleWebDAVAccounts)
 	mux.HandleFunc("/api/webdav/accounts/", s.handleWebDAVAccountsDetail)
 	// 批量重命名：整批校验通过才动手（见 handler_rename.go）。

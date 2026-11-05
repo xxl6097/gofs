@@ -21,6 +21,9 @@ func NewAPI(server *Server, storage *Storage) *API {
 	}
 }
 
+// Server 返回底层 WebDAV 服务器，供 HTTP 路由把 /dav/ 挂上去。
+func (a *API) Server() *Server { return a.server }
+
 // createAccountRequest 创建账号的请求体。
 type createAccountRequest struct {
 	Username    string   `json:"username"`

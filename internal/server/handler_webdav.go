@@ -9,6 +9,22 @@ import (
 	"github.com/xxl6097/gofs/internal/webdav"
 )
 
+// webDAVMountPath 是 WebDAV 协议端点的挂载路径。
+const webDAVMountPath = "/dav/"
+
+// handleWebDAVServe 把 WebDAV 协议请求交给 WebDAV 处理器。
+//
+// 这里用 WebDAV 自己的 Basic Auth 账号（不是网页登录会话），
+// 所以不经过 requireAdminOr：每个账号只能访问自己被授权的目录。
+func (s *Server) handleWebDAVServe(w http.ResponseWriter, r *http.Request) {
+	api := s.getWebDAVAPI()
+	if api == nil {
+		http.Error(w, "WebDAV 功能未启用", http.StatusServiceUnavailable)
+		return
+	}
+	api.Server().ServeHTTP(w, r)
+}
+
 // handleWebDAVAccounts 处理 /api/webdav/accounts 请求（列出和创建账号）
 func (s *Server) handleWebDAVAccounts(w http.ResponseWriter, r *http.Request) {
 	// 检查管理员权限
@@ -84,6 +100,8 @@ func (s *Server) getWebDAVAPI() *webdav.API {
 		s.logger.Errorf("WebDAV 初始化失败: %v", err)
 		return nil
 	}
+	// 协议端点挂在 /dav/ 下；Prefix 让请求路径正确映射到服务根目录。
+	webdavServer.SetPrefix(webDAVMountPath)
 
 	// 确定账号文件路径：使用与 keys.json 相同的目录
 	accountsFile := filepath.Join(config.DefaultKeyDir(), "webdav_accounts.json")
