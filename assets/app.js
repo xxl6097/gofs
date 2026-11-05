@@ -5685,7 +5685,8 @@
       excludePaths: entries.map(function (e) { return e.path; }),
       excludedHint: '不能复制到它自己里面',
       confirmLabel: '复制到这里',
-      note: '原文件会保留；目标目录已有同名项时提示冲突，不会覆盖。',
+      note: '原文件会保留；目标目录已有同名项时提示冲突，不会覆盖。' +
+        '复制到源文件所在目录时可选择生成一份时间戳备份。',
       onPick: function (dest) { doCopy(entries, dest); }
     });
   }
@@ -5693,13 +5694,38 @@
   // doCopy 逐个发 COPY。与 MOVE 一样用 Overwrite: F —— 复制过去静默覆盖
   // 别人的同名文件，比失败更糟。
   async function doCopy(entries, dest) {
-    var ok = 0, conflict = 0, failed = [];
+    var copied = 0, backups = 0, skipped = 0, conflict = 0, failed = [];
+    var backupName = '';
+
+    // 目标就是源所在目录时，按同名复制没有意义。先问一次：要生成一份
+    // 带时间戳的备份副本，还是直接跳过这些项。
+    var inPlace = entries.filter(function (e) { return dirName(e.path) === dest; });
+    var wantBackup = false;
+    if (inPlace.length) {
+      wantBackup = await G.confirm({
+        title: '在原目录创建备份？',
+        message: inPlace.length === 1
+          ? '「' + inPlace[0].name + '」已经在这个目录里。'
+          : '有 ' + inPlace.length + ' 项已经在这个目录里。',
+        detail: '复制到原目录会与源同名。选择「创建备份」会在原目录生成一份' +
+          '带时间戳的副本（如 name-20261105-153000.txt），原文件保留；' +
+          '选择「跳过」则不复制这些项。',
+        okLabel: '创建备份',
+        cancelLabel: '跳过'
+      });
+    }
 
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      var target = joinPath(dest, baseName(e.path));
+      var sameDir = dirName(e.path) === dest;
+      if (sameDir && !wantBackup) { skipped++; continue; }
+
+      // 同目录备份把 Destination 指向源自己，由服务端生成唯一的时间戳名字；
+      // 普通复制指向目标目录下的同名文件。
+      var target = sameDir ? e.path : joinPath(dest, baseName(e.path));
+      var reqURL = fileURL(e.path) + (sameDir ? '?backup=1' : '');
       try {
-        var res = await apiFetch(fileURL(e.path), {
+        var res = await apiFetch(reqURL, {
           method: 'COPY',
           headers: {
             'Destination': location.origin + fileURL(target),
@@ -5707,7 +5733,18 @@
           }
         });
         if (res.status === 201 || res.status === 204) {
-          ok++;
+          if (sameDir) {
+            backups++;
+            var p = res.headers.get('X-Gofs-Backup-Path');
+            if (p && !backupName) {
+              try {
+                var decoded = decodeURIComponent(p);
+                backupName = decoded.substring(decoded.lastIndexOf('/') + 1);
+              } catch (_) { /* 头里不是合法编码就不显示名字 */ }
+            }
+          } else {
+            copied++;
+          }
         } else if (res.status === 412) {
           conflict++;
         } else {
@@ -5719,13 +5756,18 @@
     }
 
     var parts = [];
-    if (ok) parts.push('成功复制 ' + ok + ' 项');
+    if (copied) parts.push('成功复制 ' + copied + ' 项');
+    if (backups) {
+      parts.push('在原目录备份 ' + backups + ' 项' +
+        (backupName ? '（如 ' + backupName + '）' : ''));
+    }
+    if (skipped) parts.push(skipped + ' 项已跳过');
     if (conflict) parts.push(conflict + ' 项目标同名已存在（未覆盖）');
     var msg = parts.join('，') || '没有需要复制的项';
 
     if (failed.length) {
       toast('err', msg + '；失败 ' + failed.length + ' 项：' + failed[0], 6000);
-    } else if (conflict) {
+    } else if (conflict || skipped) {
       toast('warn', msg, 5000);
     } else {
       toast('ok', msg);

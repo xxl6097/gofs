@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,77 @@ func TestCopyChecksDestinationPermission(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "docs", "a.txt")); err != nil {
 		t.Errorf("被拒绝的复制把源文件弄没了：%v", err)
+	}
+}
+
+// TestCopySameDirBackup 同目录复制：默认拒绝，带 ?backup=1 时在原目录生成
+// 一份带时间戳的备份副本，源文件保持不变。
+func TestCopySameDirBackup(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.txt"), []byte("hello"))
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	// 不带 backup 参数：目标就是自己，直接拒绝。
+	got := do(t, s, MethodCopy, testHost+"/a.txt", nil,
+		map[string]string{"Destination": testHost + "/a.txt"})
+	if got.code != http.StatusBadRequest {
+		t.Fatalf("同目录复制返回 %d，期望 400：%s", got.code, got.body)
+	}
+
+	got = do(t, s, MethodCopy, testHost+"/a.txt?backup=1", nil,
+		map[string]string{"Destination": testHost + "/a.txt"})
+	if got.code != http.StatusCreated {
+		t.Fatalf("同目录备份返回 %d，期望 201：%s", got.code, got.body)
+	}
+
+	src, err := os.ReadFile(filepath.Join(root, "a.txt"))
+	if err != nil || string(src) != "hello" {
+		t.Fatalf("源文件被改动了：%v %q", err, src)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(root, "a-*.txt"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("备份文件数量 = %d，期望 1：%v %v", len(matches), matches, err)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("备份内容不对：%v %q", err, data)
+	}
+
+	gotPath := got.head.Get(copyBackupPathHeader)
+	if gotPath == "" {
+		t.Fatal("响应缺少备份路径头")
+	}
+	decoded, err := url.PathUnescape(gotPath)
+	if err != nil {
+		t.Fatalf("备份路径头无法解码：%v", err)
+	}
+	wantRel, _ := filepath.Rel(root, matches[0])
+	if decoded != "/"+filepath.ToSlash(wantRel) {
+		t.Errorf("备份路径头 = %q，期望 /%s", decoded, filepath.ToSlash(wantRel))
+	}
+}
+
+// TestCopySameDirBackupDirectory 目录同目录备份同样整棵复制，源目录保留。
+func TestCopySameDirBackupDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "docs", "a.txt"), []byte("A"))
+	s := newTestServer(t, testConfig(t, root, "-A"))
+
+	got := do(t, s, MethodCopy, testHost+"/docs?backup=1", nil,
+		map[string]string{"Destination": testHost + "/docs"})
+	if got.code != http.StatusCreated {
+		t.Fatalf("目录同目录备份返回 %d，期望 201：%s", got.code, got.body)
+	}
+	matches, _ := filepath.Glob(filepath.Join(root, "docs-*"))
+	if len(matches) != 1 {
+		t.Fatalf("备份目录数量 = %d，期望 1：%v", len(matches), matches)
+	}
+	if data, err := os.ReadFile(filepath.Join(matches[0], "a.txt")); err != nil || string(data) != "A" {
+		t.Fatalf("备份目录内容不对：%v %q", err, data)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "a.txt")); err != nil {
+		t.Errorf("源目录被改动了：%v", err)
 	}
 }
 

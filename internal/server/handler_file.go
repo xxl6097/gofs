@@ -880,6 +880,29 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 
+	// 目标就是源本身（同目录复制）默认没有意义：发出去只会覆盖/撞上自己。
+	// 带 ?backup=1 时改成在**原目录**生成一份带时间戳的备份副本，
+	// 原文件保持不动；备份名的选择与上传冲突备份沿用同一套规则。
+	backupRel := ""
+	if src == dst {
+		if !copyBackupRequested(r) {
+			http.Error(w, "400 Bad Request: 不能把目录复制到它自己里面；如需在原目录备份，请带上 ?backup=1", http.StatusBadRequest)
+			return
+		}
+		dst, err = s.backupPath(dst, info)
+		if err != nil {
+			s.writeErr(w, err)
+			return
+		}
+		rel, rerr := s.res.Rel(dst)
+		if rerr != nil {
+			http.Error(w, "403 Forbidden: 备份路径超出服务范围", http.StatusForbidden)
+			return
+		}
+		destPath = rel
+		backupRel = rel
+	}
+
 	if s.res.IsRoot(dst) {
 		http.Error(w, "403 Forbidden: 不允许把目标设为服务根目录", http.StatusForbidden)
 		return
@@ -940,11 +963,24 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, urlPath stri
 		return
 	}
 
+	if backupRel != "" {
+		// 告诉前端实际生成的备份路径（可能带 -2 之类的去重后缀）。
+		w.Header().Set(copyBackupPathHeader, url.PathEscape(backupRel))
+	}
 	if existed {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+// copyBackupPathHeader 返回同目录备份复制实际落到的 URL 路径。
+const copyBackupPathHeader = "X-Gofs-Backup-Path"
+
+// copyBackupRequested 判断调用方是否要求「原位复制改为生成备份」。
+func copyBackupRequested(r *http.Request) bool {
+	v := r.URL.Query().Get("backup")
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // copyTree 递归复制文件或目录。

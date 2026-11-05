@@ -366,6 +366,9 @@ curl -X MOVE -u user:pass \
 
 - **目标同名已存在时不覆盖**（`Overwrite: F`），会报「目标同名已存在（未覆盖）」，
   目标文件和源文件都不动。
+- **目标就是源所在目录时**会先询问是否需要备份：确认后在原目录生成一份
+  带时间戳的副本（文件形如 `name-20261105-153000.txt`，目录则整体复制），
+  原文件 / 原目录保持不变；选择「跳过」则不复制这些项。
 - 复制目录是**递归**的：子目录、文件都会保留相对结构。
 - 不能把目录复制到它自己里面（例如 `/a` → `/a/b`），界面禁用候选，
   服务端也会返回 `400 不能把目录复制到它自己里面`。
@@ -381,6 +384,15 @@ curl -X COPY -u user:pass \
   -H "Destination: http://host/archive/a.txt" \
   -H "Overwrite: F" \
   http://host/a.txt
+```
+
+同目录备份把 `Destination` 指向源路径并带 `?backup=1`，服务端会生成
+不重名的时间戳副本，并在 `X-Gofs-Backup-Path` 响应头里返回实际路径：
+
+```bash
+curl -X COPY -u user:pass \
+  -H "Destination: http://host/docs/a.txt" \
+  "http://host/docs/a.txt?backup=1"
 ```
 
 ## 批量重命名
