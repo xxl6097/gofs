@@ -100,6 +100,9 @@ func (s *Server) getWebDAVAPI() *webdav.API {
 		s.logger.Errorf("WebDAV 初始化失败: %v", err)
 		return nil
 	}
+	// 用多根解析器接管路径映射：授权目录既可以写主目录下的 "/docs"，
+	// 也可以写附加站点的 "/work"；运行期增删站点也不需要重建 WebDAV。
+	webdavServer.SetResolver(s.res)
 	// 协议端点挂在 /dav/ 下；Prefix 让请求路径正确映射到服务根目录。
 	webdavServer.SetPrefix(webDAVMountPath)
 

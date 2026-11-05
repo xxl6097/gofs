@@ -1478,6 +1478,7 @@
     download: '<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/><path d="M4 20h16"/>',
     preview: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',
     move: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M9 13h7"/><path d="m13.5 10.5 2.5 2.5-2.5 2.5"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4"/><path d="m15.4 6.5-6.8 4"/>',
     folder: '<path d="M4 7a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>',
@@ -2506,6 +2507,11 @@
       // 站点条目不参与移动/重命名/删除：它代表的是**另一个挂载根**，
       // 服务端按解析后的绝对路径判定并 403（见 Roots.IsRoot），
       // 与其让按钮点了报错，不如先不显示。
+      // 复制只要求源可读：从只读目录把文件复制到有写权限的地方是合法操作，
+      // 目标是否可写由服务端按路径权限判定。
+      if (can('read') && !e.site) {
+        actions.push({ kind: 'copy', label: '复制', run: function () { openCopyDialog([e]); } });
+      }
       if (can('write') && !e.site) {
         // 移动排在重命名前面：改个名字用它自己的输入框就够，
         // 挪窝才是需要挑目标的那件事。
@@ -5500,7 +5506,7 @@
       footer: modalFoot([
         { label: '取消', onClick: function () { m.close(); } },
         {
-          label: '移到这里', cls: 'primary',
+          label: opts.confirmLabel || '移到这里', cls: 'primary',
           onClick: function () { var dest = cur; m.close(); opts.onPick(dest); }
         }
       ]),
@@ -5571,7 +5577,7 @@
           var blocked = exclude.indexOf(e.path) >= 0;
           listBox.appendChild(makeRow(
             e.name, 'folder', !blocked,
-            blocked ? '正在移动这个目录' : '',
+            blocked ? (opts.excludedHint || '正在移动这个目录') : '',
             function () { cur = e.path; render(); }
           ));
         });
@@ -5654,6 +5660,70 @@
 
     if (failed.length) {
       // 失败时把第一条原因带出来，否则用户只知道「失败了」不知道为啥。
+      toast('err', msg + '；失败 ' + failed.length + ' 项：' + failed[0], 6000);
+    } else if (conflict) {
+      toast('warn', msg, 5000);
+    } else {
+      toast('ok', msg);
+    }
+
+    state.selected.clear();
+    navigate(state.path, false);
+  }
+
+  // openCopyDialog 把若干条目复制到用户选定的目录。和移动共用目录选择器，
+  // 区别是源文件保留不动。
+  function openCopyDialog(entries) {
+    entries = entries || [];
+    if (!entries.length) return;
+    if (!can('read')) { toast('warn', '没有读取权限'); return; }
+
+    var multi = entries.length > 1;
+    openDirPicker({
+      title: multi ? '复制 ' + entries.length + ' 项到…' : '复制「' + entries[0].name + '」到…',
+      startPath: state.path || '/',
+      excludePaths: entries.map(function (e) { return e.path; }),
+      excludedHint: '不能复制到它自己里面',
+      confirmLabel: '复制到这里',
+      note: '原文件会保留；目标目录已有同名项时提示冲突，不会覆盖。',
+      onPick: function (dest) { doCopy(entries, dest); }
+    });
+  }
+
+  // doCopy 逐个发 COPY。与 MOVE 一样用 Overwrite: F —— 复制过去静默覆盖
+  // 别人的同名文件，比失败更糟。
+  async function doCopy(entries, dest) {
+    var ok = 0, conflict = 0, failed = [];
+
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var target = joinPath(dest, baseName(e.path));
+      try {
+        var res = await apiFetch(fileURL(e.path), {
+          method: 'COPY',
+          headers: {
+            'Destination': location.origin + fileURL(target),
+            'Overwrite': 'F'
+          }
+        });
+        if (res.status === 201 || res.status === 204) {
+          ok++;
+        } else if (res.status === 412) {
+          conflict++;
+        } else {
+          failed.push(e.name + '：' + (await res.text()).trim());
+        }
+      } catch (err) {
+        failed.push(e.name + '：' + err.message);
+      }
+    }
+
+    var parts = [];
+    if (ok) parts.push('成功复制 ' + ok + ' 项');
+    if (conflict) parts.push(conflict + ' 项目标同名已存在（未覆盖）');
+    var msg = parts.join('，') || '没有需要复制的项';
+
+    if (failed.length) {
       toast('err', msg + '；失败 ' + failed.length + ' 项：' + failed[0], 6000);
     } else if (conflict) {
       toast('warn', msg, 5000);

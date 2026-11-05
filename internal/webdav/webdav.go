@@ -2,6 +2,7 @@
 package webdav
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"net/http"
@@ -26,11 +27,21 @@ type Account struct {
 	UpdatedAt    int64    `json:"updated_at"`
 }
 
+// Resolver 把 WebDAV 的 URL 路径（已去掉挂载前缀）解析为磁盘绝对路径。
+//
+// 单根部署用 New 就够了；gofs 的多站点根（"/work" 指向另一个磁盘目录）
+// 实现这个接口后通过 SetResolver 注入，文件操作、目录浏览和账号目录校验
+// 就都会走同一套解析，而不是傻拼在第一个根目录下面。
+type Resolver interface {
+	Resolve(urlPath string) (string, error)
+}
+
 // Server 是 WebDAV 服务器实例。
 type Server struct {
 	mu       sync.RWMutex
 	accounts map[string]*Account
 	rootDir  string
+	resolver Resolver
 	prefix   string // 挂载前缀，例如 "/dav/"
 	handler  *webdav.Handler
 }
@@ -41,15 +52,17 @@ func New(rootDir string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析根目录失败: %w", err)
 	}
+	absRoot = filepath.Clean(absRoot)
 
 	s := &Server{
 		accounts: make(map[string]*Account),
 		rootDir:  absRoot,
+		resolver: singleRoot(absRoot),
 	}
 
 	// 创建 WebDAV 处理器
 	s.handler = &webdav.Handler{
-		FileSystem: webdav.Dir(absRoot),
+		FileSystem: &resolvedFS{s: s},
 		LockSystem: webdav.NewMemLS(),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
@@ -59,6 +72,108 @@ func New(rootDir string) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// SetResolver 注入 URL 路径解析器，让附加站点（"/work" 之类）也能被访问。
+//
+// 解析器在每次请求时调用，所以运行期增删站点无需重建 WebDAV 服务。
+func (s *Server) SetResolver(res Resolver) {
+	s.mu.Lock()
+	s.resolver = res
+	s.mu.Unlock()
+}
+
+// resolve 把 URL 路径交给当前解析器；没注入时退回单根目录。
+func (s *Server) resolve(urlPath string) (string, error) {
+	s.mu.RLock()
+	res := s.resolver
+	s.mu.RUnlock()
+	if res == nil {
+		return singleRoot(s.rootDir).Resolve(urlPath)
+	}
+	return res.Resolve(urlPath)
+}
+
+// isRoot 判断磁盘路径是否正好是某个挂载根（主目录或附加站点）。
+// 不支持这个查询的解析器（单根）返回 false。
+func (s *Server) isRoot(abs string) bool {
+	s.mu.RLock()
+	res := s.resolver
+	s.mu.RUnlock()
+	checker, ok := res.(interface{ IsRoot(string) bool })
+	return ok && checker.IsRoot(abs)
+}
+
+// singleRoot 是单根目录的解析器：URL 路径直接相对 root。
+type singleRoot string
+
+func (r singleRoot) Resolve(urlPath string) (string, error) {
+	root := string(r)
+	clean := filepath.Clean("/" + strings.TrimPrefix(urlPath, "/"))
+	full := filepath.Join(root, filepath.FromSlash(clean))
+	// filepath.Join 已经消掉了 ".."，这里再确认一次没有跑出根目录。
+	if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("路径越界: %s", urlPath)
+	}
+	return full, nil
+}
+
+// resolvedFS 让 webdav.Handler 的文件操作先经过 Resolver。
+//
+// 直接用 webdav.Dir 只能绑定一个根目录，"/work/..." 会被当成主目录下的
+// work 子目录；换成这层适配后，每个请求都能落到正确的挂载站点。
+type resolvedFS struct{ s *Server }
+
+func (fs *resolvedFS) Mkdir(_ context.Context, name string, perm os.FileMode) error {
+	p, err := fs.s.resolve(name)
+	if err != nil {
+		return err
+	}
+	return os.Mkdir(p, perm)
+}
+
+func (fs *resolvedFS) OpenFile(_ context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
+	p, err := fs.s.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(p, flag, perm)
+}
+
+func (fs *resolvedFS) RemoveAll(_ context.Context, name string) error {
+	p, err := fs.s.resolve(name)
+	if err != nil {
+		return err
+	}
+	// 授权目录可能就是站点根本身；WebDAV 的 DELETE 不该把整个挂载目录端掉
+	// （主目录同理）。目录里的内容仍然可以正常删除。
+	if fs.s.isRoot(p) {
+		return os.ErrPermission
+	}
+	return os.RemoveAll(p)
+}
+
+func (fs *resolvedFS) Rename(_ context.Context, oldName, newName string) error {
+	oldPath, err := fs.s.resolve(oldName)
+	if err != nil {
+		return err
+	}
+	newPath, err := fs.s.resolve(newName)
+	if err != nil {
+		return err
+	}
+	if fs.s.isRoot(oldPath) || fs.s.isRoot(newPath) {
+		return os.ErrPermission
+	}
+	return os.Rename(oldPath, newPath)
+}
+
+func (fs *resolvedFS) Stat(_ context.Context, name string) (os.FileInfo, error) {
+	p, err := fs.s.resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	return os.Stat(p)
 }
 
 // SetPrefix 设置挂载前缀（例如 "/dav/"）。
@@ -92,6 +207,11 @@ func (s *Server) AddAccount(username, password string, allowedDirs []string) err
 		return fmt.Errorf("密码不能为空")
 	}
 
+	dirs, err := s.normalizeAllowedDirs(allowedDirs)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,20 +219,10 @@ func (s *Server) AddAccount(username, password string, allowedDirs []string) err
 		return fmt.Errorf("用户 %s 已存在", username)
 	}
 
-	// 验证目录是否存在
-	for _, dir := range allowedDirs {
-		fullPath := filepath.Join(s.rootDir, dir)
-		if info, err := os.Stat(fullPath); err != nil {
-			return fmt.Errorf("目录 %s 不存在: %w", dir, err)
-		} else if !info.IsDir() {
-			return fmt.Errorf("%s 不是目录", dir)
-		}
-	}
-
 	now := timeNow().Unix()
 	account := &Account{
 		Username:    username,
-		AllowedDirs: allowedDirs,
+		AllowedDirs: dirs,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -137,8 +247,56 @@ func (s *Server) RemoveAccount(username string) error {
 	return nil
 }
 
+// normalizeAllowedDirs 规范化并校验账号的允许目录。
+//
+// 目录是服务侧的 URL 路径（"/docs"、挂载站点 "/work"），必须交给
+// Resolver 解析后再 stat —— 直接拼在 rootDir 下面会把挂载站点误判为
+// 「目录不存在」。顺带去掉重复项和尾部斜杠，避免 ACL 里出现两条等价规则。
+func (s *Server) normalizeAllowedDirs(allowedDirs []string) ([]string, error) {
+	if len(allowedDirs) == 0 {
+		return nil, fmt.Errorf("至少需要指定一个允许访问的目录")
+	}
+
+	out := make([]string, 0, len(allowedDirs))
+	seen := make(map[string]bool, len(allowedDirs))
+	for _, dir := range allowedDirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		clean := filepath.ToSlash(filepath.Clean("/" + strings.TrimPrefix(dir, "/")))
+		if seen[clean] {
+			continue
+		}
+
+		abs, err := s.resolve(clean)
+		if err != nil {
+			return nil, fmt.Errorf("目录 %s 不存在: %w", dir, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return nil, fmt.Errorf("目录 %s 不存在: %w", dir, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("%s 不是目录", dir)
+		}
+
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("至少需要指定一个允许访问的目录")
+	}
+	return out, nil
+}
+
 // UpdateAccount 更新账号的允许目录列表。
 func (s *Server) UpdateAccount(username string, allowedDirs []string) error {
+	dirs, err := s.normalizeAllowedDirs(allowedDirs)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -147,17 +305,7 @@ func (s *Server) UpdateAccount(username string, allowedDirs []string) error {
 		return fmt.Errorf("用户 %s 不存在", username)
 	}
 
-	// 验证目录是否存在
-	for _, dir := range allowedDirs {
-		fullPath := filepath.Join(s.rootDir, dir)
-		if info, err := os.Stat(fullPath); err != nil {
-			return fmt.Errorf("目录 %s 不存在: %w", dir, err)
-		} else if !info.IsDir() {
-			return fmt.Errorf("%s 不是目录", dir)
-		}
-	}
-
-	account.AllowedDirs = allowedDirs
+	account.AllowedDirs = dirs
 	account.UpdatedAt = timeNow().Unix()
 
 	return nil
@@ -254,6 +402,32 @@ func (s *Server) isPathAllowed(username, requestPath string) bool {
 	return false
 }
 
+// stripPrefix 去掉 WebDAV 的挂载前缀，得到用于 ACL 与磁盘解析的路径。
+func stripPrefix(p, prefix string) string {
+	if prefix == "" {
+		return p
+	}
+	if strings.HasPrefix(p, prefix) {
+		return "/" + strings.TrimPrefix(p, prefix)
+	}
+	if p+"/" == prefix {
+		return "/"
+	}
+	return p
+}
+
+// forbidden 返回 403，并把账号的授权目录附在消息里。
+//
+// 客户端连到 /dav/ 根目录时只拿到一个干巴巴的 403，很难看出「要连子目录」；
+// 带上授权目录能直接指路。
+func (s *Server) forbidden(w http.ResponseWriter, username string) {
+	msg := "无权访问此路径"
+	if dirs := s.allowedDirs(username); len(dirs) > 0 {
+		msg += "；该账号只被授权访问: " + strings.Join(dirs, ", ")
+	}
+	http.Error(w, msg, http.StatusForbidden)
+}
+
 // allowedDirs 返回账号被授权的目录（副本）。
 func (s *Server) allowedDirs(username string) []string {
 	s.mu.RLock()
@@ -283,30 +457,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 检查路径权限。ACL 里的目录是相对服务根目录的（"/docs"），
+	// 检查路径权限。ACL 里的目录是相对服务根目录的（"/docs"、"/work"），
 	// 而请求路径带着挂载前缀（"/dav/docs"），比较前先剥掉前缀。
 	s.mu.RLock()
 	prefix := s.prefix
 	s.mu.RUnlock()
 
-	aclPath := r.URL.Path
-	if prefix != "" {
-		if strings.HasPrefix(aclPath, prefix) {
-			aclPath = "/" + strings.TrimPrefix(aclPath, prefix)
-		} else if aclPath+"/" == prefix {
-			aclPath = "/"
-		}
+	aclPath := stripPrefix(r.URL.Path, prefix)
+	if !s.isPathAllowed(username, aclPath) {
+		s.forbidden(w, username)
+		return
 	}
 
-	if !s.isPathAllowed(username, aclPath) {
-		// 把授权目录一并回给已认证的用户：客户端连到 /dav/ 根目录时只拿到
-		// 一个干巴巴的 403，很难看出「要连子目录」这件事。
-		msg := "无权访问此路径"
-		if dirs := s.allowedDirs(username); len(dirs) > 0 {
-			msg += "；该账号只被授权访问: " + strings.Join(dirs, ", ")
+	// COPY / MOVE 的目标路径也要过 ACL。只检查请求路径（源）的话，
+	// 一个只被授权 "/docs" 的账号可以把它挪到 "/work" 或其它目录里。
+	if r.Method == "COPY" || r.Method == "MOVE" {
+		if dst := r.Header.Get("Destination"); dst != "" {
+			if u, err := url.Parse(dst); err == nil {
+				dstPath := u.Path
+				if dstPath == "" {
+					dstPath = u.Opaque
+				}
+				if !s.isPathAllowed(username, stripPrefix(dstPath, prefix)) {
+					s.forbidden(w, username)
+					return
+				}
+			}
 		}
-		http.Error(w, msg, http.StatusForbidden)
-		return
 	}
 
 	// 浏览器直接打开目录时 GET 会得到 405（列目录应该是 PROPFIND），
@@ -331,9 +508,9 @@ func (s *Server) serveDirectoryLanding(w http.ResponseWriter, r *http.Request, u
 	}
 
 	clean := filepath.Clean("/" + strings.TrimPrefix(aclPath, "/"))
-	fsPath := filepath.Join(s.rootDir, filepath.FromSlash(clean))
-	// filepath.Clean 已经消掉了 ".."，这里再确认一次没有跑出服务根目录。
-	if fsPath != s.rootDir && !strings.HasPrefix(fsPath, s.rootDir+string(filepath.Separator)) {
+	// 目录浏览和 WebDAV 文件操作走同一个解析器，挂载站点里的目录也能列出来。
+	fsPath, err := s.resolve(clean)
+	if err != nil {
 		return false
 	}
 

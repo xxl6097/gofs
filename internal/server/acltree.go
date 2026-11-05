@@ -66,6 +66,29 @@ func (s *Server) requireDeleteTree(r *http.Request, abs string) (string, bool) {
 	})
 }
 
+// requireCopyTree 用于复制目录：源里每个后代都必须可读、目标里每个新位置
+// 都必须可写。
+//
+// 只校验源根/目标根是不够的：`/docs:r` + `/docs/secret:none` 这种规则下，
+// 一次递归复制就能把无权查看的子项内容带出来；反过来 `/dst:rw` +
+// `/dst/ro:r` 时，复制也不该在只读子目录里写文件。
+func (s *Server) requireCopyTree(r *http.Request, srcAbs, srcURL, dstURL string) (string, bool) {
+	return s.walkTree(srcAbs, func(p, oldURL string) string {
+		relPart, err := filepath.Rel(srcAbs, p)
+		if err != nil {
+			return oldURL
+		}
+		newURL := path.Join(dstURL, filepath.ToSlash(relPart))
+		if s.checkPermExact(r, oldURL) < auth.PermRead {
+			return oldURL + "（源没有读取权限）"
+		}
+		if s.checkPerm(r, newURL) != auth.PermReadWrite {
+			return newURL + "（目标没有写权限）"
+		}
+		return ""
+	})
+}
+
 // requireMoveTree 用于移动 / 重命名目录：每个后代在新路径上的权限
 // **不得高于**旧路径，否则可以把只读子项搬到一个规则更宽的位置再改写。
 func (s *Server) requireMoveTree(r *http.Request, srcAbs, srcURL, dstURL string) (string, bool) {

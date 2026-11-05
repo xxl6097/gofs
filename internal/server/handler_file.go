@@ -807,6 +807,146 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request, urlPath stri
 	w.WriteHeader(http.StatusCreated)
 }
 
+// handleCopy 复制文件或目录（WebDAV COPY）。目标取自 Destination 头，
+// 源保留不动 —— 这是它和 handleMove 唯一的语义差别。
+//
+// 权限口径与 MOVE 不同：MOVE 会删掉源，所以要求源可写；COPY 只读源，
+// 因此源可读即可，但**目标**必须可写，且目录复制时整棵源树都要可读
+// （否则等于借复制把无权查看的子项内容带出去）。
+func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, urlPath string, p permResult) {
+	if !s.cfg.AllowUpload {
+		http.Error(w, "403 Forbidden: 未开启复制（--allow-upload）", http.StatusForbidden)
+		return
+	}
+	if p.Perm < auth.PermRead {
+		http.Error(w, "403 Forbidden: 没有读取权限", http.StatusForbidden)
+		return
+	}
+	if isRootPath(urlPath) {
+		http.Error(w, "403 Forbidden: 不允许复制服务根目录", http.StatusForbidden)
+		return
+	}
+
+	destURL := r.Header.Get("Destination")
+	if destURL == "" {
+		http.Error(w, "400 Bad Request: 缺少 Destination 头", http.StatusBadRequest)
+		return
+	}
+	destPath := destURL
+	if u, err := url.Parse(destURL); err == nil && u.Path != "" {
+		destPath = u.Path
+	}
+	if pre := s.PathPrefix(); pre != "" {
+		switch {
+		case destPath == pre:
+			destPath = "/"
+		case strings.HasPrefix(destPath, pre+"/"):
+			destPath = strings.TrimPrefix(destPath, pre)
+		}
+	}
+	canon, ok := s.canonicalPath(r, destPath)
+	if !ok {
+		http.Error(w, "403 Forbidden: 目标路径超出服务范围或无法安全规范化", http.StatusForbidden)
+		return
+	}
+	destPath = canon
+
+	if !s.checkNameLength(w, destPath) {
+		return
+	}
+
+	src, err := s.res.Resolve(urlPath)
+	if err != nil {
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+	if s.res.IsRoot(src) {
+		http.Error(w, "403 Forbidden: 不允许复制服务根目录", http.StatusForbidden)
+		return
+	}
+	dst, err := s.res.Resolve(destPath)
+	if err != nil {
+		if errors.Is(err, fsutil.ErrEscaped) {
+			http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "403 Forbidden: 目标路径非法", http.StatusForbidden)
+		return
+	}
+
+	info, err := os.Lstat(src)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+
+	if s.res.IsRoot(dst) {
+		http.Error(w, "403 Forbidden: 不允许把目标设为服务根目录", http.StatusForbidden)
+		return
+	}
+	if s.checkPerm(r, destPath) != auth.PermReadWrite {
+		http.Error(w, "403 Forbidden: 对目标路径没有写权限", http.StatusForbidden)
+		return
+	}
+	if realURL, within := s.realURLOf(dst); within {
+		if s.checkPerm(r, realURL) != auth.PermReadWrite {
+			http.Error(w, "403 Forbidden: 对目标真实路径没有写权限", http.StatusForbidden)
+			return
+		}
+	} else if s.shareTokenOf(r) != "" || !s.cfg.AllowSymlink {
+		http.Error(w, "403 Forbidden: 目标路径超出服务范围", http.StatusForbidden)
+		return
+	}
+
+	// 复制到自己的子目录里会无限递归，必须挡掉。
+	if insideOrSame(src, dst) {
+		http.Error(w, "400 Bad Request: 不能把目录复制到它自己里面", http.StatusBadRequest)
+		return
+	}
+
+	// 目录复制：源整棵树可读、目标每个新位置可写。
+	if info.IsDir() {
+		if bad, ok := s.requireCopyTree(r, src, urlPath, destPath); !ok {
+			http.Error(w, "403 Forbidden: "+bad, http.StatusForbidden)
+			return
+		}
+	}
+
+	overwrite := strings.EqualFold(r.Header.Get("Overwrite"), "T")
+	existed := false
+	if st, lerr := os.Lstat(dst); lerr == nil {
+		if !overwrite {
+			http.Error(w, "412 Precondition Failed: 目标已存在", http.StatusPreconditionFailed)
+			return
+		}
+		existed = true
+		if st.IsDir() {
+			if bad, ok := s.requireDeleteTree(r, dst); !ok {
+				http.Error(w, "403 Forbidden: 目标目录内的 "+bad+" 没有写权限", http.StatusForbidden)
+				return
+			}
+		}
+		if err := s.secureRemoveAll(dst); err != nil {
+			s.writeErr(w, err)
+			return
+		}
+	}
+	if err := s.secureMkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := s.copyTree(r, src, dst, s.cfg.AllowSymlink); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+
+	if existed {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
 // copyTree 递归复制文件或目录。
 //
 // followSymlinks 为 false（默认的 !--allow-symlink）时跳过软链，不跟随。

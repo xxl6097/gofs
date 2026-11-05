@@ -13,6 +13,7 @@
 
   var G = window.GOFS;
   var EP = G.raw('/api/webdav/accounts');
+  var SETTINGS_EP = G.raw('/api/settings');
 
   // ---------------------------------------------------------------- 小工具
 
@@ -55,6 +56,24 @@
     });
   }
 
+  // loadMounts 读取当前挂载的附加站点（/work 之类），用于在目录编辑器里
+  // 一键添加。读不到（非管理员、旧服务端）时返回空数组，不影响手填路径。
+  function loadMounts() {
+    return G.apiFetch(SETTINGS_EP, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) {
+        return res.ok ? res.json() : null;
+      })
+      .then(function (data) {
+        if (!data || !data.roots) return [];
+        return data.roots
+          .filter(function (r) { return r.url && r.url !== '/'; })
+          .map(function (r) {
+            return { label: r.label, url: r.url.replace(/\/+$/, ''), root: r.root };
+          });
+      })
+      .catch(function () { return []; });
+  }
+
   // ---------------------------------------------------------------- 目录编辑
 
   // dirEditor 维护一组「允许访问的目录」输入行。返回 { el, dirs() }。
@@ -88,9 +107,43 @@
     });
     add.style.marginTop = '6px';
 
+    // 挂载站点快捷入口：点一下就把 "/work" 加进允许目录，避免用户猜标签名。
+    var siteBox = document.createElement('div');
+    siteBox.className = 'pw-row';
+    siteBox.style.marginTop = '8px';
+    siteBox.hidden = true;
+
+    loadMounts().then(function (mounts) {
+      if (!mounts.length) return;
+
+      var label = document.createElement('span');
+      label.className = 'key-detail';
+      label.textContent = '挂载站点：';
+      siteBox.appendChild(label);
+
+      mounts.forEach(function (m) {
+        var btn = G.btn(m.url, 'btn-sm', function () {
+          var inputs = wrap.querySelectorAll('.rule-path');
+          for (var i = 0; i < inputs.length; i++) {
+            var v = inputs[i].value.trim();
+            if (v && v.charAt(0) !== '/') v = '/' + v;
+            if (v.replace(/\/+$/, '') === m.url) {
+              inputs[i].focus();
+              return;
+            }
+          }
+          addRow(m.url).focus();
+        });
+        btn.title = '挂载目录：' + m.root;
+        siteBox.appendChild(btn);
+      });
+      siteBox.hidden = false;
+    });
+
     var box = document.createElement('div');
     box.appendChild(wrap);
     box.appendChild(add);
+    box.appendChild(siteBox);
 
     return {
       el: box,
@@ -182,7 +235,8 @@
     dirField.appendChild(dirs.el);
     var dirHint = document.createElement('div');
     dirHint.className = 'key-hint';
-    dirHint.textContent = '只能访问列出的目录及其子目录；其它路径一律拒绝。';
+    dirHint.textContent = '只能访问列出的目录及其子目录；其它路径一律拒绝。' +
+      '附加站点可直接点选，也可手填 /work 这类标签路径。';
     dirField.appendChild(dirHint);
     body.appendChild(dirField);
 

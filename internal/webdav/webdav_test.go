@@ -148,6 +148,171 @@ func TestPrefixedMount(t *testing.T) {
 	}
 }
 
+// fakeMultiRoot 模拟 gofs 的多根解析：首段命中挂载标签时交给另一个目录，
+// 其余路径交给主目录。
+type fakeMultiRoot struct {
+	primary string
+	mounts  map[string]string
+}
+
+func (f fakeMultiRoot) Resolve(urlPath string) (string, error) {
+	clean := filepath.Clean("/" + strings.TrimPrefix(urlPath, "/"))
+	trimmed := strings.TrimPrefix(clean, "/")
+	first, rest := trimmed, "/"
+	if i := strings.IndexByte(trimmed, '/'); i >= 0 {
+		first, rest = trimmed[:i], trimmed[i:]
+	}
+	if root, ok := f.mounts[first]; ok {
+		full := filepath.Join(root, filepath.FromSlash(rest))
+		if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
+			return "", os.ErrPermission
+		}
+		return full, nil
+	}
+	return filepath.Join(f.primary, filepath.FromSlash(clean)), nil
+}
+
+func (f fakeMultiRoot) IsRoot(abs string) bool {
+	abs = filepath.Clean(abs)
+	if abs == filepath.Clean(f.primary) {
+		return true
+	}
+	for _, root := range f.mounts {
+		if filepath.Clean(root) == abs {
+			return true
+		}
+	}
+	return false
+}
+
+// TestMountedSiteAllowedDirs 覆盖本功能的核心：账号的授权目录可以是附加站点
+// 的标签（"/work"），目录校验、读写和目录浏览都要落到站点目录上。
+func TestMountedSiteAllowedDirs(t *testing.T) {
+	primary := t.TempDir()
+	site := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(primary, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primary, "docs", "p.txt"), []byte("primary"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primary, "hello.txt"), []byte("primary-root"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(site, "hello.txt"), []byte("mounted"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := New(primary)
+	if err != nil {
+		t.Fatalf("创建服务器失败: %v", err)
+	}
+	server.SetResolver(fakeMultiRoot{primary: primary, mounts: map[string]string{"work": site}})
+	server.SetPrefix("/dav/")
+
+	// 挂载站点标签必须能通过目录校验（不能只 stat 主目录下的 work）。
+	if err := server.AddAccount("alice", "secret", []string{"/work"}); err != nil {
+		t.Fatalf("挂载站点目录校验失败: %v", err)
+	}
+	// 不存在的路径仍然要拒绝。
+	if err := server.AddAccount("bob", "secret", []string{"/missing"}); err == nil {
+		t.Error("不存在的目录不应通过校验")
+	}
+
+	do := func(method, path, body string, hdr map[string]string) *httptest.ResponseRecorder {
+		var rd *strings.Reader
+		if body == "" {
+			rd = strings.NewReader("")
+		} else {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd)
+		req.SetBasicAuth("alice", "secret")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		return w
+	}
+
+	// 站点内的文件真的从站点目录读出来，而不是主目录。
+	if w := do("GET", "/dav/work/hello.txt", "", nil); w.Code != http.StatusOK {
+		t.Fatalf("GET /dav/work/hello.txt 期望 200，得到 %d", w.Code)
+	} else if w.Body.String() != "mounted" {
+		t.Fatalf("读到的不是站点文件: %q", w.Body.String())
+	}
+
+	// 主目录里的同名文件不在授权范围内。
+	if w := do("GET", "/dav/hello.txt", "", nil); w.Code != http.StatusForbidden {
+		t.Errorf("GET /dav/hello.txt 期望 403，得到 %d", w.Code)
+	}
+
+	// 浏览器打开站点根目录应列出站点内容。
+	if w := do("GET", "/dav/work/", "", nil); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "hello.txt") {
+		t.Errorf("站点目录浏览失败: %d %q", w.Code, w.Body.String())
+	}
+
+	// 写入也落到站点目录。
+	if w := do("PUT", "/dav/work/new.txt", "new", nil); w.Code != http.StatusCreated {
+		t.Fatalf("PUT 到站点期望 201，得到 %d: %s", w.Code, w.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(site, "new.txt")); err != nil || string(data) != "new" {
+		t.Fatalf("文件没有写到站点目录: %v %q", err, data)
+	}
+
+	// 站点根目录是挂载点，不能被 DELETE 端掉；里面的文件仍可删除。
+	if w := do("DELETE", "/dav/work", "", nil); w.Code == http.StatusNoContent || w.Code == http.StatusOK {
+		t.Errorf("DELETE 站点根目录不应成功，得到 %d", w.Code)
+	}
+	if _, err := os.Stat(site); err != nil {
+		t.Fatalf("站点目录被删掉了: %v", err)
+	}
+	if w := do("DELETE", "/dav/work/new.txt", "", nil); w.Code != http.StatusNoContent {
+		t.Errorf("DELETE 站点内文件期望 204，得到 %d", w.Code)
+	}
+}
+
+// TestCopyDestinationChecksACL 目标路径也要过 ACL，不能借 COPY/MOVE 把
+// 只授权目录里的内容写到别的目录（包括挂载站点）。
+func TestCopyDestinationChecksACL(t *testing.T) {
+	primary := t.TempDir()
+	site := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(primary, "docs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primary, "docs", "a.txt"), []byte("A"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := New(primary)
+	if err != nil {
+		t.Fatalf("创建服务器失败: %v", err)
+	}
+	server.SetResolver(fakeMultiRoot{primary: primary, mounts: map[string]string{"work": site}})
+	server.SetPrefix("/dav/")
+	if err := server.AddAccount("alice", "secret", []string{"/docs"}); err != nil {
+		t.Fatalf("添加账号失败: %v", err)
+	}
+
+	req := httptest.NewRequest("COPY", "/dav/docs/a.txt", nil)
+	req.SetBasicAuth("alice", "secret")
+	req.Header.Set("Destination", "http://example.com/dav/work/a.txt")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("复制到未授权站点期望 403，得到 %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(site, "a.txt")); err == nil {
+		t.Error("文件竟然被复制到了未授权的站点")
+	}
+	if _, err := os.Stat(filepath.Join(primary, "docs", "a.txt")); err != nil {
+		t.Errorf("源文件被弄没了: %v", err)
+	}
+}
+
 func TestAccountManagement(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "webdav-test-*")
 	if err != nil {

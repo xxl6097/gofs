@@ -1298,10 +1298,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.handleMkcol(w, r, urlPath, abs, p)
 	case MethodMove:
 		s.handleMove(w, r, urlPath, p)
+	case MethodCopy:
+		s.handleCopy(w, r, urlPath, p)
 	case MethodConflict:
 		s.handleConflict(w, r, urlPath, abs, p)
 	default:
-		w.Header().Set("Allow", "GET, HEAD, PUT, POST, DELETE, MKCOL, MOVE, CONFLICT, OPTIONS")
+		w.Header().Set("Allow", "GET, HEAD, PUT, POST, DELETE, MKCOL, MOVE, COPY, CONFLICT, OPTIONS")
 		http.Error(w, "405 Method Not Allowed", http.StatusMethodNotAllowed)
 	}
 }
