@@ -2974,7 +2974,9 @@ html.booting body::after {
 }
 .ed-markdown table.md-table th { background: var(--bg-soft); font-weight: 620; }
 /* mermaid 图：渲染前是源码代码块（沿用 .md-code），成功后换成 SVG 卡片。
-   卡片给个浅底 + 居中，宽图横向可滚，别把预览页撑破。 */
+   卡片给个浅底；SVG 用 margin:auto 居中（窄图居中、宽图左对齐后横向滚动，
+   不会像 text-align:center 那样把左侧一起裁掉）。宽图按自然尺寸显示，靠
+   overflow-x 滚动，而不是缩成一条看不清的细线。 */
 .ed-markdown .md-mermaid { margin: .9em 0; }
 .ed-markdown .md-mermaid.rendered {
   background: var(--bg-soft);
@@ -2982,9 +2984,8 @@ html.booting body::after {
   border-radius: var(--radius-sm);
   padding: 12px;
   overflow-x: auto;
-  text-align: center;
 }
-.ed-markdown .md-mermaid.rendered svg { max-width: 100%; height: auto; }
+.ed-markdown .md-mermaid.rendered svg { display: block; margin: 0 auto; }
 .ed-markdown .md-mermaid-error {
   margin: .5em 0 .9em;
   padding: 8px 12px;

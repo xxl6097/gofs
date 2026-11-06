@@ -373,7 +373,6 @@
             startOnLoad: false,
             securityLevel: 'strict', // 消毒 SVG 输出，防恶意图文本注入
             theme: 'neutral',
-            flowchart: { useMaxWidth: true },
             themeVariables: themeVars
           });
         } catch (e) { /* 配置失败也继续，用 mermaid 默认值 */ }
@@ -386,7 +385,8 @@
   }
 
   // renderMermaidBlocks 逐个渲染 mermaid 图块。把宿主元素直接交给 mermaid
-  // 当容器：它能按预览栏的实际宽度排布，而不是按整页宽度画完再被压缩。
+  // 当容器，渲染成功后按 SVG 的 viewBox 恢复自然尺寸显示 —— 否则 mermaid
+  // 默认的 width=100% + max-width 会把宽图缩成一条看不清的细线。
   function renderMermaidBlocks(mermaid, hosts, seq) {
     hosts.forEach(function (host, i) {
       var codeEl = host.querySelector('code[data-lang="mermaid"]');
@@ -394,6 +394,12 @@
       mermaid.render('md-mermaid-' + seq + '-' + i, src, host).then(function (res) {
         if (seq !== mdMermaidSeq) return;
         host.innerHTML = res.svg; // strict 模式已消毒
+        var svg = host.querySelector('svg');
+        if (svg && svg.viewBox && svg.viewBox.baseVal) {
+          svg.style.width = svg.viewBox.baseVal.width + 'px';
+          svg.style.height = 'auto';
+          svg.style.maxWidth = 'none';
+        }
         host.classList.add('rendered');
       }).catch(function (e) {
         if (seq !== mdMermaidSeq) return;
