@@ -1546,13 +1546,16 @@ func TestAssetsServed(t *testing.T) {
 	root := makeFixture(t)
 	s := newTestServer(t, testConfig(t, root, "-A"))
 
-	for _, name := range []string{"app.js", "style.css"} {
+	for _, name := range []string{"app.js", "style.css", "mermaid.min.js"} {
 		r := do(t, s, http.MethodGet, "/fs/assets/"+name, nil, nil)
 		if r.code != 200 {
 			t.Errorf("%s 状态码 = %d", name, r.code)
 		}
 		if len(r.body) < 100 {
 			t.Errorf("%s 内容过短", name)
+		}
+		if name == "mermaid.min.js" && !strings.Contains(r.body, "mermaid") {
+			t.Errorf("mermaid.min.js 缺少 mermaid 标记，可能不是正确的库文件")
 		}
 	}
 	// 目录穿越尝试

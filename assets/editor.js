@@ -106,8 +106,16 @@
           i++;
         }
         i++; // 跳过结束围栏
-        out.push('<pre class="md-code"><code' + (lang ? ' data-lang="' + escapeHTML(lang) + '"' : '') +
-          '>' + escapeHTML(buf.join('\n')) + '</code></pre>');
+        var codeHTML = escapeHTML(buf.join('\n'));
+        if (lang.toLowerCase() === 'mermaid') {
+          // mermaid 图在预览阶段异步渲染成 SVG；这里先保留代码块，
+          // 既当占位符，也是渲染失败时的回退。
+          out.push('<div class="md-mermaid"><pre class="md-code"><code data-lang="mermaid">' +
+            codeHTML + '</code></pre></div>');
+        } else {
+          out.push('<pre class="md-code"><code' + (lang ? ' data-lang="' + escapeHTML(lang) + '"' : '') +
+            '>' + codeHTML + '</code></pre>');
+        }
         continue;
       }
 
@@ -287,7 +295,100 @@
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
     });
+
+    // mermaid 图：检测到才加载渲染库（2MB+，别为普通 Markdown 白白加载）。
+    var blocks = box.querySelectorAll('.md-mermaid code[data-lang="mermaid"]');
+    if (blocks.length) {
+      var seq = ++mdMermaidSeq;
+      loadMermaid().then(function (mermaid) {
+        if (seq !== mdMermaidSeq) return; // 预览已经刷新，丢弃过期结果
+        renderMermaidBlocks(mermaid, blocks, seq);
+      }).catch(function (e) {
+        if (seq !== mdMermaidSeq) return;
+        markMermaidErrors(blocks, e);
+      });
+    }
     return box;
+  }
+
+  // ---------------------------------------------------------------- mermaid
+
+  // mdMermaidSeq 是 markdown 预览的代次：用户边敲边预览时，上一轮的异步
+  // 渲染可能在新一轮之后才回来，凭代次判断要不要丢弃。
+  var mdMermaidSeq = 0;
+
+  // mdMermaidPromise 缓存 mermaid 库的加载（只在第一次遇到 mermaid 块时加载）。
+  var mdMermaidPromise = null;
+
+  // loadMermaid 懒加载内嵌的 mermaid.min.js，返回全局 mermaid 对象。
+  function loadMermaid() {
+    if (window.mermaid && window.mermaid.initialize) {
+      return Promise.resolve(window.mermaid);
+    }
+    if (mdMermaidPromise) return mdMermaidPromise;
+
+    mdMermaidPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = G.raw('/fs/assets/mermaid.min.js');
+      s.onload = function () {
+        var m = window.mermaid;
+        if (!m || !m.initialize) {
+          reject(new Error('mermaid 库加载失败'));
+          return;
+        }
+        try {
+          var dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+            ((!document.documentElement.getAttribute('data-theme') ||
+              document.documentElement.getAttribute('data-theme') === 'auto') &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches);
+          m.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict', // 消毒 SVG 输出，防恶意图文本注入
+            theme: dark ? 'dark' : 'default'
+          });
+        } catch (e) { /* 配置失败也继续，用 mermaid 默认值 */ }
+        resolve(m);
+      };
+      s.onerror = function () { reject(new Error('mermaid 库加载失败')); };
+      document.head.appendChild(s);
+    });
+    return mdMermaidPromise;
+  }
+
+  // renderMermaidBlocks 逐个渲染 mermaid 图块，SVG 直接替换占位的代码块。
+  function renderMermaidBlocks(mermaid, blocks, seq) {
+    blocks.forEach(function (codeEl, i) {
+      var host = codeEl.closest('.md-mermaid');
+      if (!host) return;
+      var src = codeEl.textContent;
+      mermaid.render('md-mermaid-' + seq + '-' + i, src).then(function (res) {
+        if (seq !== mdMermaidSeq) return;
+        var wrap = document.createElement('div');
+        wrap.className = 'md-mermaid-svg';
+        wrap.innerHTML = res.svg; // strict 模式已消毒
+        host.textContent = '';
+        host.appendChild(wrap);
+      }).catch(function (e) {
+        if (seq !== mdMermaidSeq) return;
+        appendMermaidError(host, e);
+      });
+    });
+  }
+
+  // markMermaidErrors 是「库都没加载成功」的整体兜底：所有 mermaid 块都标错。
+  function markMermaidErrors(blocks, e) {
+    blocks.forEach(function (codeEl) {
+      var host = codeEl.closest('.md-mermaid');
+      if (host) appendMermaidError(host, e);
+    });
+  }
+
+  // appendMermaidError 在图块下方补一条错误提示，代码块本身保留作回退。
+  function appendMermaidError(host, e) {
+    var err = document.createElement('div');
+    err.className = 'md-mermaid-error';
+    err.textContent = 'Mermaid 渲染失败：' + ((e && e.message) || e);
+    host.appendChild(err);
   }
 
   // ---------------------------------------------------------------- 格式化

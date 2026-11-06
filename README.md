@@ -108,7 +108,7 @@
 
 - 支持 txt / markdown / html / json / xml / yaml / toml / ini / csv 以及各语言源码
 - 单击文件名直接进编辑器；行号、Tab 缩进、回车自动续缩进、`Ctrl/⌘ + S` 保存
-- **Markdown 渲染预览**（自研渲染器，支持标题/列表/表格/代码块/引用/任务列表）
+- **Markdown 渲染预览**（自研渲染器，支持标题/列表/表格/代码块/引用/任务列表/Mermaid 图）
 - **HTML 沙箱预览**、**JSON 着色预览**、**XML 结构校验**
 - 预览支持**全屏**：弹窗铺满整个窗口，左边继续改、右边实时预览；
   也可切到「仅预览」收起编辑区，沉浸阅读；`Esc` 只退出全屏、不关弹窗
@@ -452,8 +452,9 @@ curl -X POST http://host/fs/rename-batch \
 
 `docx` / `xlsx` / `pptx` 单击文件名直接在弹窗里读，不用下载再用 Word 打开。
 
-**浏览器不认这些格式，而 gofs 除 WebDAV 外不引第三方依赖** —— 连 Markdown
-渲染器都是自研的。所以这里的做法是：服务端用标准库（`archive/zip` +
+**浏览器不认这些格式，而 gofs 除 WebDAV 外不引第三方依赖** —— Markdown
+渲染器是自研的（仅 Mermaid 图的内嵌渲染库除外，见「在线编辑文本」）。
+所以这里的做法是：服务端用标准库（`archive/zip` +
 `encoding/xml`）把文档解成**结构化内容**，前端再渲染。
 
 ```bash
@@ -719,7 +720,7 @@ tf / hcl / proto / graphql … 以及 `Makefile` `Dockerfile` `.gitignore` `.env
 
 | 类型 | 预览方式 |
 | --- | --- |
-| Markdown | 自研渲染器，支持标题 / **粗体** / *斜体* / 行内代码 / 围栏代码块 / 列表 / 任务列表 / 表格 / 引用 / 分隔线 / 链接 / 图片 |
+| Markdown | 自研渲染器，支持标题 / **粗体** / *斜体* / 行内代码 / 围栏代码块 / 列表 / 任务列表 / 表格 / 引用 / 分隔线 / 链接 / 图片 / Mermaid 图 |
 | HTML | `iframe sandbox=""`（**禁止脚本、禁止同源**，否则预览自己上传的 HTML 会让其中的脚本拿到凭据） |
 | JSON | 格式化 + 语法着色，非法时指出解析错误 |
 | XML | `DOMParser` 结构校验，非法时指出出错位置 |
@@ -731,6 +732,13 @@ tf / hcl / proto / graphql … 以及 `Makefile` `Dockerfile` `.gitignore` `.env
 `Esc` 只退出全屏、不关弹窗。没开预览时点「全屏」会先打开预览。
 
 Markdown 渲染前先对所有文本做 HTML 转义，链接还会过滤 `javascript:` / `data:` 协议。
+
+**Mermaid 图**用 ``` ```mermaid ``` 围栏代码块写，预览时渲染成 SVG（流程图、时序图、
+甘特图、饼图、状态图等）。渲染库 `mermaid` 已内嵌进二进制（`assets/mermaid.min.js`），
+**不依赖 CDN、离线可用**；只在第一次遇到 mermaid 块时才懒加载，普通 Markdown
+不额外付出体积。渲染走 mermaid 的 `securityLevel: 'strict'`，SVG 输出先消毒再
+插入预览，恶意图文本不会被当作 HTML 执行；图的内容本身仍按普通代码块转义，
+渲染失败时回退显示源码并标出错误。图会自动跟随浅色 / 深色主题。
 
 ### 格式化
 
@@ -3202,6 +3210,7 @@ gofs/
 │   ├── style.css
 │   ├── app.js                   目录浏览、上传、认证、Toast、弹窗
 │   ├── editor.js                文本编辑器与四种预览
+│   ├── mermaid.min.js           Markdown 预览的 Mermaid 渲染库（懒加载，MIT）
 │   ├── settings.js              设置弹窗（标签外壳：常规 / 密钥 / 用户 / 升级与重启）
 │   ├── users.js                 用户与权限面板（由设置弹窗挂载）
 │   └── keys.js                  上传密钥面板（由设置弹窗挂载）
@@ -3506,3 +3515,6 @@ MEASURE_OPEN=settings node scripts/measure-layout.mjs http://127.0.0.1:5001 375 
 ## License
 
 MIT
+
+内嵌的 `assets/mermaid.min.js`（Mermaid，用于 Markdown 预览渲染图表）为
+MIT License，版权归其作者所有；其余前端代码与全部 Go 代码均为本项目 MIT 授权。

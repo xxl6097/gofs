@@ -2973,6 +2973,27 @@ html.booting body::after {
   text-align: left;
 }
 .ed-markdown table.md-table th { background: var(--bg-soft); font-weight: 620; }
+/* mermaid 图：SVG 放进一个浅底卡片里，宽图横向可滚，别把预览页撑破。 */
+.ed-markdown .md-mermaid { margin: .9em 0; }
+.ed-markdown .md-mermaid-svg {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  overflow-x: auto;
+}
+.ed-markdown .md-mermaid-svg svg { max-width: 100%; height: auto; }
+.ed-markdown .md-mermaid-error {
+  margin: .5em 0 .9em;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* ================================================================ 上传密钥 */
 
