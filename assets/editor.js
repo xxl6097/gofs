@@ -297,16 +297,21 @@
     });
 
     // mermaid 图：检测到才加载渲染库（2MB+，别为普通 Markdown 白白加载）。
-    var blocks = box.querySelectorAll('.md-mermaid code[data-lang="mermaid"]');
-    if (blocks.length) {
+    var hosts = box.querySelectorAll('.md-mermaid');
+    if (hosts.length) {
       var seq = ++mdMermaidSeq;
-      loadMermaid().then(function (mermaid) {
-        if (seq !== mdMermaidSeq) return; // 预览已经刷新，丢弃过期结果
-        renderMermaidBlocks(mermaid, blocks, seq);
-      }).catch(function (e) {
+      // 等 box 真正挂进预览区、拿到真实宽度后再渲染：mermaid 要按容器
+      // 宽度排布流程图，脱离 DOM 时宽度是 0，图会挤成一团。
+      setTimeout(function () {
         if (seq !== mdMermaidSeq) return;
-        markMermaidErrors(blocks, e);
-      });
+        loadMermaid().then(function (mermaid) {
+          if (seq !== mdMermaidSeq) return; // 预览已经刷新，丢弃过期结果
+          renderMermaidBlocks(mermaid, hosts, seq);
+        }).catch(function (e) {
+          if (seq !== mdMermaidSeq) return;
+          markMermaidErrors(hosts, e);
+        });
+      }, 0);
     }
     return box;
   }
@@ -341,10 +346,35 @@
             ((!document.documentElement.getAttribute('data-theme') ||
               document.documentElement.getAttribute('data-theme') === 'auto') &&
               window.matchMedia('(prefers-color-scheme: dark)').matches);
+          // 用 neutral 主题 + 对齐 gofs 配色的变量：默认 mermaid 主题是
+          // 紫/粉的彩色块，放在这套界面里显得突兀（「一言难尽」）。
+          // 这里统一成白/深底 + 主题蓝描边 + 随主题切换的文字/线条色。
+          var themeVars = dark ? {
+            background: 'transparent',
+            primaryColor: '#1d2127',
+            primaryTextColor: '#e7e9ec',
+            primaryBorderColor: '#4d8dff',
+            secondaryColor: '#23272f',
+            tertiaryColor: '#14161a',
+            lineColor: '#9ba3ae',
+            fontSize: '14px'
+          } : {
+            background: 'transparent',
+            primaryColor: '#ffffff',
+            primaryTextColor: '#1c1f24',
+            primaryBorderColor: '#2563eb',
+            secondaryColor: '#f6f7f9',
+            tertiaryColor: '#eef2f8',
+            lineColor: '#5b6470',
+            fontSize: '14px'
+          };
+          themeVars.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
           m.initialize({
             startOnLoad: false,
             securityLevel: 'strict', // 消毒 SVG 输出，防恶意图文本注入
-            theme: dark ? 'dark' : 'default'
+            theme: 'neutral',
+            flowchart: { useMaxWidth: true },
+            themeVariables: themeVars
           });
         } catch (e) { /* 配置失败也继续，用 mermaid 默认值 */ }
         resolve(m);
@@ -355,19 +385,16 @@
     return mdMermaidPromise;
   }
 
-  // renderMermaidBlocks 逐个渲染 mermaid 图块，SVG 直接替换占位的代码块。
-  function renderMermaidBlocks(mermaid, blocks, seq) {
-    blocks.forEach(function (codeEl, i) {
-      var host = codeEl.closest('.md-mermaid');
-      if (!host) return;
-      var src = codeEl.textContent;
-      mermaid.render('md-mermaid-' + seq + '-' + i, src).then(function (res) {
+  // renderMermaidBlocks 逐个渲染 mermaid 图块。把宿主元素直接交给 mermaid
+  // 当容器：它能按预览栏的实际宽度排布，而不是按整页宽度画完再被压缩。
+  function renderMermaidBlocks(mermaid, hosts, seq) {
+    hosts.forEach(function (host, i) {
+      var codeEl = host.querySelector('code[data-lang="mermaid"]');
+      var src = codeEl ? codeEl.textContent : '';
+      mermaid.render('md-mermaid-' + seq + '-' + i, src, host).then(function (res) {
         if (seq !== mdMermaidSeq) return;
-        var wrap = document.createElement('div');
-        wrap.className = 'md-mermaid-svg';
-        wrap.innerHTML = res.svg; // strict 模式已消毒
-        host.textContent = '';
-        host.appendChild(wrap);
+        host.innerHTML = res.svg; // strict 模式已消毒
+        host.classList.add('rendered');
       }).catch(function (e) {
         if (seq !== mdMermaidSeq) return;
         appendMermaidError(host, e);
@@ -376,11 +403,8 @@
   }
 
   // markMermaidErrors 是「库都没加载成功」的整体兜底：所有 mermaid 块都标错。
-  function markMermaidErrors(blocks, e) {
-    blocks.forEach(function (codeEl) {
-      var host = codeEl.closest('.md-mermaid');
-      if (host) appendMermaidError(host, e);
-    });
+  function markMermaidErrors(hosts, e) {
+    hosts.forEach(function (host) { appendMermaidError(host, e); });
   }
 
   // appendMermaidError 在图块下方补一条错误提示，代码块本身保留作回退。
