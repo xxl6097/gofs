@@ -89,6 +89,8 @@ type settingsReply struct {
 	SitesEditable bool `json:"sites_editable"`
 	// UploadDateDir 为当前的上传归档目录（未开启归档时为空串）。
 	UploadDateDir string `json:"upload_date_dir,omitempty"`
+	// PublicDirs 为公开目录列表（无需登录即可只读访问的路径前缀）。
+	PublicDirs []string `json:"public_dirs"`
 }
 
 // rootInfo 描述一个挂载点。主目录的 URL 是 "/"，附加站点是 "/<标签>"。
@@ -122,6 +124,8 @@ type settingsRequest struct {
 	// 并落盘，不走「取消 / 保存」那套（那样还得做待定操作与回滚）。
 	AddSite    *siteAddRequest `json:"add_site"`
 	RemoveSite *string         `json:"remove_site"`
+	// PublicDirs 是公开目录列表，nil 表示不改，空数组表示清空。
+	PublicDirs *[]string `json:"public_dirs"`
 }
 
 // siteAddRequest 是新增站点的请求体。Label 可留空，按目录名自动分配。
@@ -199,6 +203,7 @@ func (s *Server) buildSettings(admin bool) settingsReply {
 		})
 	}
 	rep.AllowRoots = s.settings.AllowRoots()
+	rep.PublicDirs = s.settings.PublicDirs()
 	return rep
 }
 
@@ -222,7 +227,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.Root == nil && req.UploadMaxSize == nil && req.EditMaxSize == nil &&
 		req.Title == nil && req.PathPrefix == nil &&
 		req.ListenAddr == nil && req.ListenPort == nil &&
-		req.AddSite == nil && req.RemoveSite == nil {
+		req.AddSite == nil && req.RemoveSite == nil && req.PublicDirs == nil {
 		http.Error(w, "400 Bad Request: 没有需要修改的设置项", http.StatusBadRequest)
 		return
 	}
@@ -349,6 +354,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		listenJump = jump
+	}
+
+	if req.PublicDirs != nil {
+		if err := s.settings.SetPublicDirs(*req.PublicDirs); err != nil {
+			s.logger.Errorf("公开目录落盘失败: %v", err)
+			http.Error(w, "500 Internal Server Error: 公开目录已生效，但写入设置文件失败："+
+				err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.logger.Infof("公开目录：%v", *req.PublicDirs)
 	}
 
 	rep := s.buildSettings(true)

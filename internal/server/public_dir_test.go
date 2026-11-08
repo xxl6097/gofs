@@ -14,9 +14,11 @@ func TestPublicDir(t *testing.T) {
 	writeFile(t, filepath.Join(root, "private", "b.txt"), []byte("B"))
 	writeFile(t, filepath.Join(root, "c.txt"), []byte("C"))
 
-	s := newTestServer(t, testConfig(t, root,
-		"--public-dir", "/public",
-		"-a", "admin:pw@/:rw"))
+	s := newTestServer(t, testConfig(t, root, "-a", "admin:pw@/:rw"))
+	// 通过 settings 设置公开目录（运行时配置）
+	if err := s.settings.SetPublicDirs([]string{"/public"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 公开目录：匿名可读。
 	got := do(t, s, http.MethodGet, testHost+"/public/a.txt", nil, nil)
@@ -55,9 +57,10 @@ func TestPublicDirMultiple(t *testing.T) {
 	writeFile(t, filepath.Join(root, "public", "b.txt"), []byte("B"))
 	writeFile(t, filepath.Join(root, "secret", "c.txt"), []byte("C"))
 
-	s := newTestServer(t, testConfig(t, root,
-		"--public-dir", "/docs,/public",
-		"-a", "admin:pw@/:rw"))
+	s := newTestServer(t, testConfig(t, root, "-a", "admin:pw@/:rw"))
+	if err := s.settings.SetPublicDirs([]string{"/docs", "/public"}); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, path := range []string{"/docs/a.txt", "/public/b.txt"} {
 		got := do(t, s, http.MethodGet, testHost+path, nil, nil)
@@ -75,9 +78,10 @@ func TestPublicDirMultiple(t *testing.T) {
 // TestPublicDirAuthResponse 登录响应包含 public_dirs，前端据此提示「该目录公开访问」。
 func TestPublicDirAuthResponse(t *testing.T) {
 	root := t.TempDir()
-	s := newTestServer(t, testConfig(t, root,
-		"--public-dir", "/docs",
-		"-a", "admin:pw@/:rw"))
+	s := newTestServer(t, testConfig(t, root, "-a", "admin:pw@/:rw"))
+	if err := s.settings.SetPublicDirs([]string{"/docs"}); err != nil {
+		t.Fatal(err)
+	}
 
 	got := do(t, s, http.MethodPost, "/fs/auth", nil,
 		map[string]string{"Authorization": basicAuth("admin", "pw")})
@@ -98,9 +102,10 @@ func TestPublicDirNoAuthUsersStillWork(t *testing.T) {
 	writeFile(t, filepath.Join(root, "public", "a.txt"), []byte("A"))
 	writeFile(t, filepath.Join(root, "private", "b.txt"), []byte("B"))
 
-	s := newTestServer(t, testConfig(t, root,
-		"--public-dir", "/public",
-		"-a", "alice:pass@/private:r"))
+	s := newTestServer(t, testConfig(t, root, "-a", "alice:pass@/private:r"))
+	if err := s.settings.SetPublicDirs([]string{"/public"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// alice 能读 /private，不能读 /public（因为她的规则只授予了 /private）。
 	got := do(t, s, http.MethodGet, testHost+"/private/b.txt", nil,

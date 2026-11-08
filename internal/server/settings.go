@@ -74,8 +74,10 @@ type runtimeSettings struct {
 	// --allow-any-site 才放开到主机任意目录。要区分「用户显式写了白名单」
 	// 与「我们替他推出来的默认范围」，就必须把它单独存着。
 	siteRoots []string
-	// allowAnySite 对应 --allow-any-site：显式承担“管理员可挂载主机任意目录”。
+	// allowAnySite 对应 --allow-any-site：显式承担”管理员可挂载主机任意目录”。
 	allowAnySite bool
+	// publicDirs 是无需登录即可只读访问的路径前缀列表。
+	publicDirs []string
 }
 
 // mutate 串行化一次「改内存 + 落盘」。
@@ -192,6 +194,8 @@ type settingsDoc struct {
 	// 与 path_prefix 同一口径：启动参数显式给过就压过文件里的值。
 	ListenBind *string `json:"listen_bind,omitempty"`
 	ListenPort *int    `json:"listen_port,omitempty"`
+	// 公开目录：运行时可修改，会落盘。
+	PublicDirs []string `json:"public_dirs,omitempty"`
 }
 
 // siteRecord 是一个持久化的附加站点。
@@ -269,6 +273,18 @@ func (s *runtimeSettings) loadSettings() {
 			s.listenBind, s.listenPort = nb, np
 		}
 	}
+	// 公开目录：只从 settings.json 读取（不走启动参数）。
+	// 路径校验：只接受以 / 开头的绝对路径前缀。
+	if len(doc.PublicDirs) > 0 {
+		cleaned := make([]string, 0, len(doc.PublicDirs))
+		for _, dir := range doc.PublicDirs {
+			d := fsutil.CleanURLPath(dir)
+			if d != "" && d[0] == '/' {
+				cleaned = append(cleaned, d)
+			}
+		}
+		s.publicDirs = cleaned
+	}
 }
 
 // unixSocketPathUsable 判断持久化的 bind 是否还能用来启动。
@@ -326,6 +342,7 @@ func (s *runtimeSettings) saveSettings() error {
 	doc := settingsDoc{Version: 5, Title: s.title, Sites: append([]siteRecord(nil), s.sites...)}
 	uploadMax, editMax := s.uploadMaxSize, s.editMaxSize
 	pathPrefix, listenBind, listenPort := s.pathPrefix, s.listenBind, s.listenPort
+	publicDirs := append([]string(nil), s.publicDirs...)
 	s.mu.RUnlock()
 
 	// 只在**与启动参数不同**时才写这几项。
@@ -348,6 +365,8 @@ func (s *runtimeSettings) saveSettings() error {
 	if v := listenPort; v != s.cfg.Port {
 		doc.ListenPort = &v
 	}
+	// 公开目录始终写入：这是纯运行期配置，没有对应的启动参数。
+	doc.PublicDirs = publicDirs
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -521,4 +540,31 @@ func (s *runtimeSettings) AllowsRoot(abs string) bool {
 		}
 	}
 	return false
+}
+
+// PublicDirs 返回当前生效的公开目录列表（无需登录即可只读访问的路径前缀）。
+func (s *runtimeSettings) PublicDirs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.publicDirs))
+	copy(out, s.publicDirs)
+	return out
+}
+
+// SetPublicDirs 修改公开目录列表并落盘。
+// 空列表表示没有公开目录（全部路径需要登录）。
+func (s *runtimeSettings) SetPublicDirs(dirs []string) error {
+	// 校验：只接受以 / 开头的绝对路径前缀。
+	cleaned := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		d := fsutil.CleanURLPath(dir)
+		if d != "" && d[0] == '/' {
+			cleaned = append(cleaned, d)
+		}
+	}
+	return s.mutate(func() {
+		s.mu.Lock()
+		s.publicDirs = append([]string(nil), cleaned...)
+		s.mu.Unlock()
+	})
 }

@@ -86,14 +86,7 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		return nil, err
 	}
 	// 鉴权：启动参数给的规则 + 用户表（可运行期增删改）。
-	// 公开目录注入为匿名只读规则：@/path 会被 auth.Open 解析成 anonAcc，
-	// NeedsAuth 对这些前缀返回 false，identityPermOf 返回 PermRead。
-	authRules := cfg.AuthRules
-	for _, dir := range cfg.PublicDirs {
-		d := fsutil.CleanURLPath(dir)
-		authRules = append(authRules, "@"+d)
-	}
-	authn, err := auth.Open(authRules, cfg.UserFile)
+	authn, err := auth.Open(cfg.AuthRules, cfg.UserFile)
 	if err != nil {
 		return nil, err
 	}
@@ -962,6 +955,10 @@ func (s *Server) identityPermOf(r *http.Request, urlPath string) (perm auth.Perm
 	if anonPerm := s.auth.Lookup(urlPath, "", "", false); anonPerm > perm {
 		perm = anonPerm
 	}
+	// 公开目录（运行时配置）也算匿名可读。
+	if perm < auth.PermRead && s.isPublicPath(urlPath) {
+		perm = auth.PermRead
+	}
 	return perm, user, authenticated
 }
 
@@ -980,6 +977,17 @@ func (s *Server) checkPermExact(r *http.Request, urlPath string) auth.Permission
 
 // clientIP 返回经可信代理校正后的客户端地址。
 func (s *Server) clientIP(r *http.Request) string { return clientIP(r, s.trustedProxies) }
+
+// isPublicPath 判断 urlPath 是否匹配公开目录前缀。
+func (s *Server) isPublicPath(urlPath string) bool {
+	dirs := s.settings.PublicDirs()
+	for _, prefix := range dirs {
+		if urlPath == prefix || strings.HasPrefix(urlPath, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // authorize 解析请求凭据并计算对 urlPath 的权限。
 // 需要质询时直接写响应并返回 false。

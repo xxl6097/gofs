@@ -37,6 +37,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 			"authenticated": true,
 			"anonymous":     true,
 			"perms":         s.buildPerms(permResult{Perm: auth.PermReadWrite}),
+			"public_dirs":   s.settings.PublicDirs(),
 		})
 		return
 	}
@@ -195,8 +196,8 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		"allow_uninstall": s.canUninstall(),
 		// 多根模式：界面据此把「服务根目录」那一项变成只读的挂载列表。
 		"multi_root": s.MultiRoot(),
-		// 公开目录：无需登录即可只读访问的路径前缀列表。
-		"public_dirs": s.cfg.PublicDirs,
+		// 公开目录：运行时配置，可在设置界面修改。
+		"public_dirs": s.settings.PublicDirs(),
 		// 落地目录与可达路径，见上面 home 的说明。
 		"home_path":  home,
 		"read_paths": readPaths,
