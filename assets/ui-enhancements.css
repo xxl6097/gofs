@@ -1,0 +1,412 @@
+/* 优化 4-8: UI/UX 增强功能 CSS 样式 */
+
+/* ============================================================================
+   优化 4: 实时路径验证样式
+   ============================================================================ */
+
+.validation-indicator {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 18px;
+  font-weight: bold;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.validation-indicator.valid {
+  color: #16a34a;
+  background: #dcfce7;
+}
+
+.validation-indicator.invalid {
+  color: #dc2626;
+  background: #fee2e2;
+}
+
+.validation-message {
+  margin-top: 4px;
+  font-size: 12px;
+  min-height: 16px;
+  transition: all 0.2s;
+}
+
+/* ============================================================================
+   优化 5: 自动完成建议样式
+   ============================================================================ */
+
+.suggestions-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: white;
+  border: 1px solid #ddd;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 1000;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.suggestion-item {
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.suggestion-item:hover,
+.suggestion-item.active {
+  background: #f0f0f0;
+  color: #007AFF;
+}
+
+.suggestion-item:last-child {
+  border-bottom: none;
+  border-radius: 0 0 8px 8px;
+}
+
+/* ============================================================================
+   优化 6: 目录预览面板样式
+   ============================================================================ */
+
+.dir-preview {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 8px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 999;
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.preview-header {
+  font-weight: bold;
+  font-size: 13px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+  word-break: break-all;
+}
+
+.preview-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 12px;
+}
+
+.preview-label {
+  color: #666;
+  font-weight: 500;
+}
+
+.preview-value {
+  color: #333;
+  font-family: 'Monaco', 'Menlo', monospace;
+  text-align: right;
+  flex: 1;
+  margin-left: 12px;
+  word-break: break-all;
+}
+
+/* ============================================================================
+   优化 7: 批量操作拖拽区域样式
+   ============================================================================ */
+
+input.dragover {
+  background: #f0f9ff !important;
+  border-color: #0ea5e9 !important;
+  box-shadow: inset 0 0 0 2px #0ea5e9;
+}
+
+.batch-import-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.batch-import-hint::before {
+  content: 'ℹ';
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e0e7ff;
+  color: #4f46e5;
+  border-radius: 50%;
+  font-weight: bold;
+  font-size: 11px;
+}
+
+/* ============================================================================
+   优化 8: 拖拽排序样式
+   ============================================================================ */
+
+.public-dirs-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.dir-item {
+  padding: 12px;
+  margin: 8px 0;
+  background: #f5f5f5;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  cursor: move;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.dir-item:hover {
+  background: #e8e8e8;
+  transform: translateY(-2px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.dir-item.dragging {
+  opacity: 0.5;
+  transform: rotate(2deg) scale(0.98);
+  background: #e0e7ff;
+  border-color: #4f46e5;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
+}
+
+.dir-item::before {
+  content: '⋮⋮';
+  color: #999;
+  font-weight: bold;
+  margin-right: 4px;
+  cursor: grab;
+  user-select: none;
+}
+
+.dir-item.dragging::before {
+  cursor: grabbing;
+  color: #4f46e5;
+}
+
+.dir-item-path {
+  flex: 1;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  word-break: break-all;
+  color: #333;
+}
+
+.dir-item-remove {
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  color: #dc2626;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+  transition: all 0.2s;
+}
+
+.dir-item-remove:hover {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* ============================================================================
+   响应式调整（移动端）
+   ============================================================================ */
+
+@media (max-width: 768px) {
+  .dir-preview {
+    position: fixed;
+    bottom: auto;
+    top: 50%;
+    left: 50%;
+    right: auto;
+    transform: translate(-50%, -50%);
+    margin: 0;
+    max-width: 90%;
+    max-height: 60vh;
+  }
+
+  .suggestions-list {
+    max-height: 150px;
+  }
+
+  .dir-item {
+    padding: 16px; /* 增加触摸目标 */
+  }
+
+  .validation-indicator {
+    right: 16px;
+  }
+}
+
+/* ============================================================================
+   无障碍访问支持
+   ============================================================================ */
+
+.dir-item:focus-visible {
+  outline: 2px solid #007AFF;
+  outline-offset: 2px;
+}
+
+.suggestion-item:focus-visible {
+  outline: 2px solid #007AFF;
+  outline-offset: -2px;
+}
+
+.dir-item-remove:focus-visible {
+  outline: 2px solid #dc2626;
+  outline-offset: 2px;
+}
+
+/* ============================================================================
+   动画和过渡
+   ============================================================================ */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.validation-message {
+  animation: fadeIn 0.2s;
+}
+
+.suggestions-list {
+  animation: slideInDown 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================================
+   深色模式支持
+   ============================================================================ */
+
+@media (prefers-color-scheme: dark) {
+  .suggestions-list {
+    background: #2d2d2d;
+    border-color: #444;
+  }
+
+  .suggestion-item {
+    border-bottom-color: #3a3a3a;
+    color: #e0e0e0;
+  }
+
+  .suggestion-item:hover,
+  .suggestion-item.active {
+    background: #3a3a3a;
+    color: #0ea5e9;
+  }
+
+  .dir-preview {
+    background: #2d2d2d;
+    border-color: #444;
+    color: #e0e0e0;
+  }
+
+  .preview-header {
+    border-bottom-color: #444;
+  }
+
+  .preview-label {
+    color: #999;
+  }
+
+  .preview-value {
+    color: #e0e0e0;
+  }
+
+  .dir-item {
+    background: #3a3a3a;
+    color: #e0e0e0;
+  }
+
+  .dir-item:hover {
+    background: #444;
+  }
+
+  .dir-item.dragging {
+    background: #4f46e5;
+    border-color: #7c3aed;
+  }
+
+  .dir-item-path {
+    color: #e0e0e0;
+  }
+
+  input.dragover {
+    background: #1a1a1a !important;
+    border-color: #0ea5e9 !important;
+  }
+}
+
+/* ============================================================================
+   打印样式（隐藏交互元素）
+   ============================================================================ */
+
+@media print {
+  .validation-indicator,
+  .suggestions-list,
+  .dir-preview,
+  .dir-item-remove {
+    display: none !important;
+  }
+
+  .dir-item {
+    page-break-inside: avoid;
+    border: 1px solid #ddd;
+    background: white;
+  }
+}

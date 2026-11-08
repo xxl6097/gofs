@@ -257,6 +257,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/fs/text", s.handleText)
 	mux.HandleFunc("/fs/office", s.handleOffice)
 	mux.HandleFunc("/fs/assets/", s.handleAsset)
+	// 优化 4-8: 公开目录相关路由
+	mux.HandleFunc("/fs/settings/public-dirs/validate", s.handleValidatePublicDirs)
+	mux.HandleFunc("/fs/settings/public-dirs/suggest", s.handleSuggestPublicDirs)
+	mux.HandleFunc("/fs/settings/public-dirs/details", s.handleGetDirDetails)
+	mux.HandleFunc("/fs/settings/public-dirs/import", s.handleImportPublicDirs)
+	mux.HandleFunc("/fs/settings/public-dirs/order", s.handleUpdateDirOrder)
+	// 优化 12: 缓存统计
+	mux.HandleFunc("/fs/cache/stats", s.handleCacheStats)
 	mux.HandleFunc("/", s.handleRoot)
 
 	var h http.Handler = mux
