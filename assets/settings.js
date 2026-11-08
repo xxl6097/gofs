@@ -498,6 +498,7 @@
     var prefixField = null;
     var listenAddrField = null;
     var listenPortField = null;
+    var publicDirsData = [];  // 公开目录数据，需在 fill/dirty/save 间共享
 
     function showErr(msg) {
       errBox.hidden = false;
@@ -687,7 +688,7 @@
       publicDirsList.className = 'list-container';
       publicDirsField.appendChild(publicDirsList);
 
-      var publicDirsData = (cur.public_dirs || []).slice(); // 副本，避免直接改原数组
+      publicDirsData = (cur.public_dirs || []).slice(); // 副本，避免直接改原数组
       var draggedIndex = -1; // 排序：正在拖动的索引
 
       // 过滤词变化时重新渲染列表（只隐藏不匹配项，不改 publicDirsData）。
@@ -728,7 +729,7 @@
       exportBtn.title = '将公开目录列表复制到剪贴板（每行一条）';
       exportBtn.onclick = function () {
         if (!publicDirsData.length) { G.toast('warn', '没有可导出的公开目录'); return; }
-        copyText(publicDirsData.join('\n'))
+        G.copyText(publicDirsData.join('\n'))
           .then(function () { G.toast('ok', '已复制 ' + publicDirsData.length + ' 条到剪贴板'); })
           .catch(function () {
             // 复制失败时用 prompt 展示
