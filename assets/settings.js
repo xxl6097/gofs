@@ -668,6 +668,67 @@
       });
       el.appendChild(editField.field);
 
+      // ---- 公开目录（无需登录即可只读访问的路径前缀）----
+      //
+      // 鉴权时，匹配到这些前缀的路径允许匿名只读。
+      addSection(el, '访问控制');
+      var publicDirsField = makeField('公开目录');
+      var publicDirsList = document.createElement('div');
+      publicDirsList.className = 'list-container';
+      publicDirsField.appendChild(publicDirsList);
+
+      var publicDirsData = (cur.public_dirs || []).slice(); // 副本，避免直接改原数组
+      var publicDirsAddBtn = document.createElement('button');
+      publicDirsAddBtn.className = 'btn btn-sm';
+      publicDirsAddBtn.textContent = '添加公开目录';
+      publicDirsAddBtn.onclick = function () {
+        var path = prompt('输入路径前缀（以 / 开头，如 /public）：', '/');
+        if (path === null) return;
+        path = path.trim();
+        if (!path) {
+          G.toast('warn', '路径不能为空');
+          return;
+        }
+        if (path.charAt(0) !== '/') {
+          G.toast('warn', '路径必须以 / 开头');
+          return;
+        }
+        if (publicDirsData.indexOf(path) >= 0) {
+          G.toast('warn', '该路径已存在');
+          return;
+        }
+        publicDirsData.push(path);
+        renderPublicDirs();
+      };
+      publicDirsField.appendChild(publicDirsAddBtn);
+
+      function renderPublicDirs() {
+        publicDirsList.textContent = '';
+        if (!publicDirsData.length) {
+          var empty = document.createElement('div');
+          empty.className = 'hint';
+          empty.textContent = '暂无公开目录；已启用鉴权时所有路径需登录';
+          publicDirsList.appendChild(empty);
+          return;
+        }
+        publicDirsData.forEach(function (dir, idx) {
+          var line = document.createElement('div');
+          line.className = 'row';
+          var code = document.createElement('code');
+          code.textContent = dir;
+          line.appendChild(code);
+          var rmBtn = G.btn('移除', 'danger', function () {
+            publicDirsData.splice(idx, 1);
+            renderPublicDirs();
+          });
+          rmBtn.classList.add('btn-sm');
+          line.appendChild(rmBtn);
+          publicDirsList.appendChild(line);
+        });
+      }
+      renderPublicDirs();
+      el.appendChild(publicDirsField);
+
       el.appendChild(errBox);
     }
 
@@ -684,6 +745,8 @@
       }
       if (uploadField && uploadField.read() !== cur.upload_max_size) return true;
       if (editField && editField.read() !== cur.edit_max_size) return true;
+      // 公开目录改动检查
+      if (JSON.stringify(publicDirsData) !== JSON.stringify(cur.public_dirs || [])) return true;
       return false;
     }
 
@@ -774,6 +837,11 @@
       }
       if (nextEdit !== cur.edit_max_size) patch.edit_max_size = nextEdit;
 
+      // 公开目录
+      if (JSON.stringify(publicDirsData) !== JSON.stringify(cur.public_dirs || [])) {
+        patch.public_dirs = publicDirsData;
+      }
+
       if (!Object.keys(patch).length) {
         ctx.close();
         G.toast('info', '没有需要保存的改动');
@@ -834,6 +902,7 @@
         // 否则得刷新页面才看得到变化。
         G.data.upload_max_size = out.upload_max_size;
         G.data.edit_max_size = out.edit_max_size;
+        if (out.public_dirs) G.data.public_dirs = out.public_dirs;
 
         // 标题当场生效：标签页与顶栏品牌名都立刻换成新值，
         // 不必等下一次请求（其它已打开的页面仍需刷新才会变）。
