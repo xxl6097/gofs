@@ -115,6 +115,10 @@
     // 多站点模式：站点集合是运行期可变的，登录响应里已经带了这个标记，
     // 前端一直没接 —— 不接的话从登录框进来的页面要等下次请求才知道模式。
     if (typeof info.multi_root === 'boolean') DATA.multi_root = info.multi_root;
+    // 公开目录列表：供行菜单判断「当前路径是否已公开」并给出对应操作。
+    if (Object.prototype.toString.call(info.public_dirs) === '[object Array]') {
+      DATA.public_dirs = info.public_dirs;
+    }
     // 落地目录与可达路径（见 reachable 与 landingPath）。
     if (typeof info.home_path === 'string') DATA.home_path = info.home_path;
     if (Object.prototype.toString.call(info.read_paths) === '[object Array]') {
@@ -966,6 +970,55 @@
     return location.origin + fileURL(path);
   }
 
+  // ---------------------------------------------------------------------------
+  // 公开目录快速操作
+  // ---------------------------------------------------------------------------
+
+  // publicDirs 返回当前已配置的公开目录列表（从 DATA 中读取）。
+  function publicDirs() {
+    return Array.isArray(DATA.public_dirs) ? DATA.public_dirs : [];
+  }
+
+  // isPublicDir 判断某个路径是否已经在公开目录列表里（精确匹配路径前缀，不含子目录判断）。
+  function isPublicDir(urlPath) {
+    var p = urlPath === '/' ? '/' : urlPath.replace(/\/$/, '');
+    return publicDirs().indexOf(p) >= 0;
+  }
+
+  // isUnderPublicDir 判断某个路径是否已经被某条公开目录覆盖（含父目录公开的情况）。
+  function isUnderPublicDir(urlPath) {
+    var p = urlPath === '/' ? '/' : urlPath.replace(/\/$/, '');
+    return publicDirs().some(function (dir) {
+      return p === dir || p.indexOf(dir === '/' ? '/' : dir + '/') === 0;
+    });
+  }
+
+  // setPublicDir 调用 /fs/settings API 添加或移除一条公开目录前缀。
+  async function setPublicDir(urlPath, add) {
+    var p = urlPath === '/' ? '/' : urlPath.replace(/\/$/, '');
+    var cur = publicDirs().slice();
+    var idx = cur.indexOf(p);
+    if (add && idx >= 0) return; // 已经是公开目录，无需重复添加
+    if (!add && idx < 0) return; // 本来就不是公开目录
+
+    if (add) {
+      cur.push(p);
+    } else {
+      cur.splice(idx, 1);
+    }
+    var res = await G.apiFetch('/fs/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_dirs: cur })
+    });
+    if (!res.ok) {
+      throw new Error((await res.text()).trim() || ('HTTP ' + res.status));
+    }
+    var out = await res.json();
+    // 同步回全局状态
+    if (Array.isArray(out.public_dirs)) DATA.public_dirs = out.public_dirs;
+  }
+
   // copyEntryLink 复制某个文件 / 目录的链接。
   async function copyEntryLink(e) {
     var url = fileLink(e.path);
@@ -1498,7 +1551,10 @@
     trash: '<path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 12h10l1-12"/>',
     open: '<path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>',
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5 17.5 10.5"/>',
-    more: '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/>'
+    more: '<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/>',
+    // 公开目录相关图标
+    globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20A14.5 14.5 0 0 0 12 2"/><path d="M2 12h20"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'
   };
 
   function makeOpBtn(kind, label, cls) {
@@ -2448,6 +2504,15 @@
         st.textContent = '站点';
         cell.appendChild(st);
       }
+      // 公开目录徽标：仅当该目录精确匹配一条公开前缀时显示，
+      // 被父目录覆盖（isUnderPublicDir）不显示——避免目录树全打标，只标「根源」。
+      if (e.is_dir && DATA.auth_on && isPublicDir(e.path.replace(/\/$/, '') || '/')) {
+        var pubTag = document.createElement('span');
+        pubTag.className = 'tag public-dir-tag';
+        pubTag.textContent = '公开';
+        pubTag.title = '无需登录即可访问此目录';
+        cell.appendChild(pubTag);
+      }
       tdName.appendChild(cell);
       tr.appendChild(tdName);
 
@@ -2527,6 +2592,55 @@
       }
       if (can('delete') && !e.site) {
         actions.push({ kind: 'trash', label: '删除', cls: 'danger', run: function () { doDelete([e]); } });
+      }
+
+      // 「公开/取消公开」：只有管理员（allow_settings）且是目录时才显示。
+      // 条件：启用了鉴权（DATA.auth_on）且当前账号有设置权限。
+      if (DATA.allow_settings && DATA.auth_on && e.is_dir && !e.site) {
+        var entryPath = e.path.replace(/\/$/, '') || '/';
+        var alreadyPublic = isPublicDir(entryPath);
+        var coveredByParent = !alreadyPublic && isUnderPublicDir(entryPath);
+        if (alreadyPublic) {
+          actions.push({
+            kind: 'lock',
+            label: '取消公开',
+            run: (function (p) {
+              return function () {
+                G.confirm({
+                  title: '取消公开访问？',
+                  message: '「' + p + '」将不再允许匿名访问。',
+                  okLabel: '取消公开',
+                  danger: true
+                }).then(function (ok) {
+                  if (!ok) return;
+                  setPublicDir(p, false)
+                    .then(function () { G.toast('ok', p + ' 已取消公开访问'); })
+                    .catch(function (err) { G.toast('err', '操作失败：' + err.message); });
+                });
+              };
+            })(entryPath)
+          });
+        } else if (!coveredByParent) {
+          actions.push({
+            kind: 'globe',
+            label: '设为公开',
+            run: (function (p) {
+              return function () {
+                G.confirm({
+                  title: '设为公开访问？',
+                  message: '「' + p + '」将允许匿名只读访问，无需登录。',
+                  detail: '已登录账号不受影响；可在设置界面随时取消。',
+                  okLabel: '设为公开'
+                }).then(function (ok) {
+                  if (!ok) return;
+                  setPublicDir(p, true)
+                    .then(function () { G.toast('ok', p + ' 已设为公开访问'); })
+                    .catch(function (err) { G.toast('err', '操作失败：' + err.message); });
+                });
+              };
+            })(entryPath)
+          });
+        }
       }
 
       // 每行只露一个主操作，其余进「更多」。之前一屏几十个彩色文字按钮，

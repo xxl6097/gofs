@@ -37,6 +37,9 @@
   --op-list: var(--text-dim);
   --op-rename: var(--text-dim);
   --op-danger: var(--danger);
+  /* 公开目录相关操作：globe = 设为公开（绿色调），lock = 取消公开（次级色）。 */
+  --op-public: #16a34a;
+  --op-unpublic: var(--text-dim);
   /* 实心危险按钮上的文字色（深色主题下浅红底要配深字才有对比度）。 */
   --danger-text: #ffffff;
   --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
@@ -105,6 +108,9 @@
   --op-list: var(--text-dim);
   --op-rename: var(--text-dim);
   --op-danger: var(--danger);
+  /* 公开目录相关操作：globe = 设为公开（绿色调），lock = 取消公开（次级色）。 */
+  --op-public: #16a34a;
+  --op-unpublic: var(--text-dim);
   --danger-text: #2a0b0b;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
     --select-caret: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ba3ae' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -141,6 +147,9 @@
   --op-list: var(--text-dim);
   --op-rename: var(--text-dim);
   --op-danger: var(--danger);
+  /* 公开目录相关操作：globe = 设为公开（绿色调），lock = 取消公开（次级色）。 */
+  --op-public: #16a34a;
+  --op-unpublic: var(--text-dim);
   --danger-text: #2a0b0b;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
@@ -1200,6 +1209,11 @@ table.listing {
   flex: none;
 }
 .name-cell .tag.zip { background: rgba(180, 83, 9, .14); color: var(--zip); }
+/* 「公开」徽标：绿色调，表示无需登录可访问。 */
+.name-cell .tag.public-dir-tag {
+  background: rgba(22, 163, 74, .12);
+  color: var(--op-public);
+}
 /* 「可解压」现在是一个按钮：点开压缩包内容。
    视觉上仍是标签，但用透明扩展区把可点高度撑到约 36px。 */
 .name-cell .tag-action {
@@ -1295,6 +1309,8 @@ table.listing {
 .op-btn[data-kind="list"] { color: var(--op-list); }
 .op-btn[data-kind="rename"] { color: var(--op-rename); }
 .op-btn[data-kind="trash"] { color: var(--op-danger); }
+.op-btn[data-kind="globe"] { color: var(--op-public); }
+.op-btn[data-kind="lock"] { color: var(--op-unpublic); }
 
 /* hover 提亮而不是统一变灰，色相始终可辨。 */
 .op-btn[data-kind]:hover:not([disabled]) { filter: brightness(1.15); }
@@ -1355,6 +1371,8 @@ table.listing {
 /* 删除是唯一连文字也染色的：它在菜单里必须最显眼。 */
 .action-item[data-kind="trash"] { color: var(--op-danger); }
 .action-item[data-kind="trash"] svg { color: var(--op-danger); }
+.action-item[data-kind="globe"] svg { color: var(--op-public); }
+.action-item[data-kind="lock"] svg { color: var(--op-unpublic); }
 .action-item[disabled] { opacity: .45; cursor: not-allowed; }
 .action-item em {
   font-style: normal;
