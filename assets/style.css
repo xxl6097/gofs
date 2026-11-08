@@ -1662,6 +1662,37 @@ table.listing {
   overflow-wrap: anywhere;
 }
 
+/* 公开目录列表项 */
+.public-dir-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-soft);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: var(--fs-sm);
+}
+.public-dir-item code {
+  flex: 1;
+  color: var(--accent);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+.public-dir-item .btn-drag {
+  flex: none;
+  cursor: grab;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.public-dir-item .btn-drag:hover {
+  color: var(--text);
+}
+.public-dir-item .btn-drag.dragging {
+  opacity: 0.5;
+}
+
+
 .field { margin-bottom: 14px; }
 .field label {
   display: block;

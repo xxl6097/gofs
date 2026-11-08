@@ -678,6 +678,8 @@
       publicDirsField.appendChild(publicDirsList);
 
       var publicDirsData = (cur.public_dirs || []).slice(); // 副本，避免直接改原数组
+      var draggedIndex = -1; // 排序：正在拖动的索引
+
       var publicDirsAddBtn = document.createElement('button');
       publicDirsAddBtn.className = 'btn btn-sm';
       publicDirsAddBtn.textContent = '添加公开目录';
@@ -713,21 +715,60 @@
         }
         publicDirsData.forEach(function (dir, idx) {
           var line = document.createElement('div');
-          line.className = 'row';
+          line.className = 'public-dir-item';
+          line.draggable = true;
+          line.dataset.index = idx;
+
+          // 拖动把手（6 个点的图标）
+          var dragHandle = document.createElement('div');
+          dragHandle.className = 'btn-drag';
+          dragHandle.textContent = '⋮⋮';
+          dragHandle.title = '拖动排序';
+          line.appendChild(dragHandle);
+
+          // 路径
           var code = document.createElement('code');
           code.textContent = dir;
           line.appendChild(code);
+
+          // 移除按钮
           var rmBtn = G.btn('移除', 'danger', function () {
             publicDirsData.splice(idx, 1);
             renderPublicDirs();
           });
           rmBtn.classList.add('btn-sm');
           line.appendChild(rmBtn);
+
+          // 拖动事件
+          line.ondragstart = function (e) {
+            draggedIndex = idx;
+            line.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/html', line.innerHTML);
+          };
+          line.ondragend = function (e) {
+            line.classList.remove('dragging');
+            draggedIndex = -1;
+          };
+          line.ondragover = function (e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            if (draggedIndex >= 0 && draggedIndex !== idx) {
+              // 简单的拖动排序：交换
+              var temp = publicDirsData[draggedIndex];
+              publicDirsData[draggedIndex] = publicDirsData[idx];
+              publicDirsData[idx] = temp;
+              draggedIndex = idx;
+              renderPublicDirs();
+            }
+          };
+
           publicDirsList.appendChild(line);
         });
       }
       renderPublicDirs();
       el.appendChild(publicDirsField);
+
 
       el.appendChild(errBox);
     }
