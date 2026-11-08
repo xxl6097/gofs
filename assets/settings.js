@@ -673,12 +673,25 @@
       // 鉴权时，匹配到这些前缀的路径允许匿名只读。
       addSection(el, '访问控制');
       var publicDirsField = makeField('公开目录');
+
+      // 过滤输入框（目录多时用于快速查找）
+      var publicDirsFilter = document.createElement('input');
+      publicDirsFilter.type = 'text';
+      publicDirsFilter.placeholder = '过滤路径…';
+      publicDirsFilter.className = 'key-input';
+      publicDirsFilter.style.marginBottom = '6px';
+      publicDirsFilter.style.display = 'none'; // 默认隐藏，≥4条时才显示
+      publicDirsField.appendChild(publicDirsFilter);
+
       var publicDirsList = document.createElement('div');
       publicDirsList.className = 'list-container';
       publicDirsField.appendChild(publicDirsList);
 
       var publicDirsData = (cur.public_dirs || []).slice(); // 副本，避免直接改原数组
       var draggedIndex = -1; // 排序：正在拖动的索引
+
+      // 过滤词变化时重新渲染列表（只隐藏不匹配项，不改 publicDirsData）。
+      publicDirsFilter.oninput = function () { renderPublicDirs(); };
 
       var publicDirsAddBtn = document.createElement('button');
       publicDirsAddBtn.className = 'btn btn-sm';
@@ -704,8 +717,77 @@
       };
       publicDirsField.appendChild(publicDirsAddBtn);
 
+      // 批量操作：导出、导入、清空
+      var batchRow = document.createElement('div');
+      batchRow.className = 'row';
+      batchRow.style.marginTop = '6px';
+
+      var exportBtn = document.createElement('button');
+      exportBtn.className = 'btn btn-sm';
+      exportBtn.textContent = '导出';
+      exportBtn.title = '将公开目录列表复制到剪贴板（每行一条）';
+      exportBtn.onclick = function () {
+        if (!publicDirsData.length) { G.toast('warn', '没有可导出的公开目录'); return; }
+        copyText(publicDirsData.join('\n'))
+          .then(function () { G.toast('ok', '已复制 ' + publicDirsData.length + ' 条到剪贴板'); })
+          .catch(function () {
+            // 复制失败时用 prompt 展示
+            prompt('公开目录列表（每行一条）：', publicDirsData.join('\n'));
+          });
+      };
+      batchRow.appendChild(exportBtn);
+
+      var importBtn = document.createElement('button');
+      importBtn.className = 'btn btn-sm';
+      importBtn.textContent = '导入';
+      importBtn.title = '从文本导入公开目录（每行一条路径）';
+      importBtn.onclick = function () {
+        var raw = prompt('粘贴公开目录列表（每行一条，以 / 开头）：', publicDirsData.join('\n'));
+        if (raw === null) return;
+        var lines = raw.split('\n')
+          .map(function (s) { return s.trim(); })
+          .filter(function (s) { return s && s.charAt(0) === '/'; });
+        // 去重合并
+        var added = 0;
+        lines.forEach(function (p) {
+          if (publicDirsData.indexOf(p) < 0) {
+            publicDirsData.push(p);
+            added++;
+          }
+        });
+        renderPublicDirs();
+        G.toast('ok', '导入完成，新增 ' + added + ' 条');
+      };
+      batchRow.appendChild(importBtn);
+
+      var clearBtn = document.createElement('button');
+      clearBtn.className = 'btn btn-sm danger';
+      clearBtn.textContent = '清空';
+      clearBtn.title = '移除所有公开目录';
+      clearBtn.onclick = function () {
+        if (!publicDirsData.length) return;
+        G.confirm({
+          title: '清空公开目录？',
+          message: '将移除全部 ' + publicDirsData.length + ' 条公开目录配置。',
+          okLabel: '清空',
+          danger: true
+        }).then(function (ok) {
+          if (!ok) return;
+          publicDirsData = [];
+          renderPublicDirs();
+        });
+      };
+      batchRow.appendChild(clearBtn);
+      publicDirsField.appendChild(batchRow);
+
       function renderPublicDirs() {
         publicDirsList.textContent = '';
+        // 过滤词
+        var filterText = publicDirsFilter.value.trim().toLowerCase();
+
+        // 过滤输入框：条数 ≥ 4 时才显示
+        publicDirsFilter.style.display = publicDirsData.length >= 4 ? '' : 'none';
+
         if (!publicDirsData.length) {
           var empty = document.createElement('div');
           empty.className = 'hint';
@@ -713,7 +795,14 @@
           publicDirsList.appendChild(empty);
           return;
         }
+
+        // 过滤后可见条目计数
+        var visibleCount = 0;
         publicDirsData.forEach(function (dir, idx) {
+          // 过滤：路径中不含关键词则隐藏
+          if (filterText && dir.toLowerCase().indexOf(filterText) < 0) return;
+          visibleCount++;
+
           var line = document.createElement('div');
           line.className = 'public-dir-item';
           line.draggable = true;
@@ -726,9 +815,23 @@
           dragHandle.title = '拖动排序';
           line.appendChild(dragHandle);
 
-          // 路径
+          // 路径（高亮过滤词）
           var code = document.createElement('code');
-          code.textContent = dir;
+          if (filterText) {
+            var lower = dir.toLowerCase();
+            var pos = lower.indexOf(filterText);
+            if (pos >= 0) {
+              code.appendChild(document.createTextNode(dir.slice(0, pos)));
+              var mark = document.createElement('mark');
+              mark.textContent = dir.slice(pos, pos + filterText.length);
+              code.appendChild(mark);
+              code.appendChild(document.createTextNode(dir.slice(pos + filterText.length)));
+            } else {
+              code.textContent = dir;
+            }
+          } else {
+            code.textContent = dir;
+          }
           line.appendChild(code);
 
           // 移除按钮
@@ -744,9 +847,8 @@
             draggedIndex = idx;
             line.classList.add('dragging');
             e.dataTransfer.effectAllowed = 'move';
-            e.dataTransfer.setData('text/html', line.innerHTML);
           };
-          line.ondragend = function (e) {
+          line.ondragend = function () {
             line.classList.remove('dragging');
             draggedIndex = -1;
           };
@@ -754,7 +856,6 @@
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
             if (draggedIndex >= 0 && draggedIndex !== idx) {
-              // 简单的拖动排序：交换
               var temp = publicDirsData[draggedIndex];
               publicDirsData[draggedIndex] = publicDirsData[idx];
               publicDirsData[idx] = temp;
@@ -765,6 +866,14 @@
 
           publicDirsList.appendChild(line);
         });
+
+        // 若过滤后无结果，给出提示
+        if (filterText && visibleCount === 0) {
+          var noMatch = document.createElement('div');
+          noMatch.className = 'hint';
+          noMatch.textContent = '没有匹配「' + filterText + '」的公开目录';
+          publicDirsList.appendChild(noMatch);
+        }
       }
       renderPublicDirs();
       el.appendChild(publicDirsField);

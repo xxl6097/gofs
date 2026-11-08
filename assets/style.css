@@ -1214,6 +1214,14 @@ table.listing {
   background: rgba(22, 163, 74, .12);
   color: var(--op-public);
 }
+
+/* 公开目录过滤框中的关键词高亮 */
+.public-dir-item code mark {
+  background: rgba(22, 163, 74, .25);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
 /* 「可解压」现在是一个按钮：点开压缩包内容。
    视觉上仍是标签，但用透明扩展区把可点高度撑到约 36px。 */
 .name-cell .tag-action {
