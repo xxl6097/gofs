@@ -1121,6 +1121,13 @@
           if (patch.edit_max_size !== undefined) {
             parts.push('编辑上限 ' + G.fmtSize(out.edit_max_size));
           }
+          if (patch.public_dirs !== undefined) {
+            var n = (out.public_dirs || []).length;
+            parts.push('公开目录 ' + n + ' 条');
+            // 同步为服务端实际返回值（服务端可能修剪了非法路径）
+            publicDirsData = (out.public_dirs || []).slice();
+            cur.public_dirs = publicDirsData.slice();
+          }
           G.toast('ok', '已保存：' + parts.join('，'));
           if (G.refresh) G.refresh();
         }
