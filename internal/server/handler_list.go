@@ -101,6 +101,8 @@ type pageData struct {
 	AllowUninstall bool `json:"allow_uninstall"`
 	// AllowUsers 表示当前用户可以在页面上管理用户（增删改）。
 	AllowUsers bool `json:"allow_users"`
+	// PublicDirs 为公开目录列表，前端据此在徽标和行菜单中标注公开状态。
+	PublicDirs []string `json:"public_dirs"`
 }
 
 // extractLimits 把解压安全上限透给前端展示。
@@ -140,6 +142,7 @@ type restrictedPageData struct {
 	Listing    *fsutil.Listing `json:"listing"`
 	Perms      permsData       `json:"perms"`
 	NotFound   bool            `json:"not_found,omitempty"`
+	PublicDirs []string        `json:"public_dirs"`
 }
 
 // extractLimitsConfigured 表示三个解压上限都已配置。
@@ -203,6 +206,7 @@ func (s *Server) newPageData(p permResult, listing *fsutil.Listing, query string
 		UploadMaxSize: s.settings.UploadMaxSize(),
 		AllowSettings: admin,
 		AllowUsers:    s.cfg.AllowUserManage && s.auth.Enabled() && admin,
+		PublicDirs:    s.settings.PublicDirs(),
 		Extract: extractLimits{
 			MaxTotalBytes: s.cfg.ExtractMaxTotal,
 			MaxFiles:      s.cfg.ExtractMaxFiles,
@@ -232,6 +236,7 @@ func (s *Server) pageFor(p permResult, listing *fsutil.Listing, query string, ad
 		Listing:    listing,
 		Perms:      s.buildPerms(p),
 		NotFound:   notFound,
+		PublicDirs: s.settings.PublicDirs(),
 	}
 }
 
