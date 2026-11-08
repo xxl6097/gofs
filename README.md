@@ -167,6 +167,9 @@ go build -o gofs ./cmd/gofs
 # 只开在线编辑，不开上传删除
 ./gofs --allow-edit ./docs
 
+# 公开目录：/public 匿名只读，其余路径需登录
+./gofs -a admin:secret@/:rw --public-dir /public ./data
+
 # 完整示例：鉴权 + 编辑 + 解压 + 密钥
 ./gofs -A -a boss:123@/:rw -b 127.0.0.1 -p 5000 ./data
 ```
@@ -210,6 +213,9 @@ gofs [选项] [serve-path ...]
                              或连续斜杠 //，也不能有 . / .. 段
       --hidden <value>       目录列表中隐藏的路径 glob，例如 tmp,*.log
   -a, --auth <rules>         鉴权规则，例如 user:pass@/dir1:rw,/dir2
+      --public-dir <paths>   无需登录即可只读访问的路径前缀，可多次指定或用逗号分隔。
+                             启用鉴权时，匹配到这些前缀的路径允许匿名只读，
+                             未匹配的路径仍按普通鉴权规则处理
   -A, --allow-all            允许所有操作
       --allow-upload         允许上传
       --allow-edit           允许在线编辑文本文件（默认跟随 --allow-upload）

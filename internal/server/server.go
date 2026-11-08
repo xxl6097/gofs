@@ -86,7 +86,14 @@ func New(cfg *config.Config, embedded fs.FS) (*Server, error) {
 		return nil, err
 	}
 	// 鉴权：启动参数给的规则 + 用户表（可运行期增删改）。
-	authn, err := auth.Open(cfg.AuthRules, cfg.UserFile)
+	// 公开目录注入为匿名只读规则：@/path 会被 auth.Open 解析成 anonAcc，
+	// NeedsAuth 对这些前缀返回 false，identityPermOf 返回 PermRead。
+	authRules := cfg.AuthRules
+	for _, dir := range cfg.PublicDirs {
+		d := fsutil.CleanURLPath(dir)
+		authRules = append(authRules, "@"+d)
+	}
+	authn, err := auth.Open(authRules, cfg.UserFile)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +208,7 @@ func (s *Server) restoreSites() {
 		// 上次更宽的白名单加进来的。用的是**站点**的那套判定，别跟
 		// 「换根」的默认范围混了。
 		//
-		// 对**已经落盘**的站点采取“祖父条款”：升级前的部署可能一直用着
+		// 对**已经落盘**的站点采取"祖父条款"：升级前的部署可能一直用着
 		// 范围外的目录，直接跳过会让站点在升级后凭空消失。这里恢复它，
 		// 但明确记一条安全提示；通过 /fs/settings **新增**站点仍按新默认
 		// 收紧。运维确认不需要时应移除该站点，或补上 --root-allow。
@@ -486,7 +493,7 @@ type permResult struct {
 	User string
 	// Authenticated 表示请求是否已获授权。
 	//
-	// ⚠️ 分享令牌也会把它置为 true（“拿着链接的人可以访问”），
+	// ⚠️ 分享令牌也会把它置为 true（"拿着链接的人可以访问"），
 	// 所以它**不能**用来判断「背后是否真的有一个登录账号」。区分登录态请用
 	// Account，页面数据也据此决定下发完整配置还是分享范围。
 	Authenticated bool
@@ -546,7 +553,7 @@ func credentials(r *http.Request) (user, pass string, ok bool) {
 // queryAuthCrossSite 判断当前请求是否来自其他站点。
 //
 // 只用于决定是否采信查询串凭据，不影响非浏览器客户端：没有来源信息时
-// 返回 false（与 CSRF 校验“没有来源信息就放行”的口径一致）。
+// 返回 false（与 CSRF 校验"没有来源信息就放行"的口径一致）。
 func queryAuthCrossSite(r *http.Request) bool {
 	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
 		return true
@@ -909,7 +916,7 @@ func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permiss
 	// 一条只读分享的 Cookie 会随浏览器带到同路径的后续请求上，若无条件
 	// 优先，管理员打开一次分享链接就会被降级成只读，连服务设置都进不去
 	// （实测可稳定复现）。反过来，显式身份权限更低时仍可借分享读到内容，
-	// 不会因为“身份优先”把已登录用户挡在分享之外。
+	// 不会因为"身份优先"把已登录用户挡在分享之外。
 	if tok := s.shareTokenOf(r); tok != "" {
 		if k, err := s.keys.Verify(tok); err == nil && s.shareTokenAllowed(r, k, urlPath) {
 			if sp := sharePerm(k); sp > idPerm {
@@ -923,10 +930,10 @@ func (s *Server) permOfExact(r *http.Request, urlPath string) (perm auth.Permiss
 // identityPermOf 只按显式凭据或会话 Cookie 计算权限，忽略分享令牌。
 //
 // 单独抽出来是为了让「分享权限」与「真实身份权限」可以比较后取较高值，
-// 也供 isAdminRequest 判断“这个请求背后是否真的有一个管理员身份”。
+// 也供 isAdminRequest 判断"这个请求背后是否真的有一个管理员身份"。
 func (s *Server) identityPermOf(r *http.Request, urlPath string) (perm auth.Permission, user string, authenticated bool) {
 	if !s.auth.Enabled() {
-		// 未启用鉴权时没有“身份”可言：查询串里的 user 只是客户端自报的
+		// 未启用鉴权时没有"身份"可言：查询串里的 user 只是客户端自报的
 		// 名字，不能写进访问日志，也不该参与管理员判定。
 		return auth.PermReadWrite, "", false
 	}
@@ -934,19 +941,28 @@ func (s *Server) identityPermOf(r *http.Request, urlPath string) (perm auth.Perm
 	switch {
 	case hasCred:
 		// 显式凭据：走原来的路径，密码要现验。LookupChecked 同时告诉我们
-		// “密码不对”与“密码对但该路径没权限”—— 后者不能计入失败限速，
+		// "密码不对"与"密码对但该路径没权限"—— 后者不能计入失败限速，
 		// 否则一个只被授予 /docs 的账号正常访问 / 十次就会被锁。
 		p, valid := s.auth.LookupChecked(urlPath, user, pass, true)
 		if valid {
 			s.noteVerifiedUser(r, user)
+			perm, authenticated = p, true
+		} else {
+			return auth.PermNone, user, false
 		}
-		return p, user, valid
 	case cookieUser != "":
 		// 会话身份：密码在登录那一刻已经验过，这里只按身份取权限。
-		return s.auth.PermFor(cookieUser, urlPath), cookieUser, true
+		perm, user, authenticated = s.auth.PermFor(cookieUser, urlPath), cookieUser, true
+	default:
+		// 匿名。
+		perm = s.auth.Lookup(urlPath, "", "", false)
 	}
-	// 匿名。
-	return s.auth.Lookup(urlPath, "", "", false), "", false
+	// 显式凭据与匿名规则取较高权限：公开目录应该对所有人（包括已登录账号）可读。
+	// 否则只被授予 /docs 的账号连公开的 /public 都读不到，那就不叫「公开」了。
+	if anonPerm := s.auth.Lookup(urlPath, "", "", false); anonPerm > perm {
+		perm = anonPerm
+	}
+	return perm, user, authenticated
 }
 
 // checkPerm 计算对 urlPath 的权限，不写任何响应。
@@ -1193,7 +1209,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		perm, _, idAuthenticated := s.permOf(r, urlPath)
 		if perm == auth.PermNone {
-			// 只有“密码/账号不对”才算失败；密码正确但对当前路径无权限
+			// 只有"密码/账号不对"才算失败；密码正确但对当前路径无权限
 			// （例如只被授予 /docs 的账号访问 /）不应把账号打进节流桶。
 			// 无效会话 Cookie 同样不再计数：它不是可猜测的口令。
 			//
@@ -1255,7 +1271,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if !(leafLink && (r.Method == http.MethodDelete || r.Method == MethodMove || r.Method == MethodConflict)) {
 		realURL, realAbs, realPerm, within := s.realPermOf(r, abs)
 		// 记录授权时看到的真实目标，后续 open 用它做 inode 复核，堵住
-		// “检查完再把路径换成软链”的 TOCTOU。
+		// "检查完再把路径换成软链"的 TOCTOU。
 		s.noteAuthorizedPath(r, urlPath, realAbs)
 		if realURL != urlPath {
 			s.noteAuthorizedPath(r, realURL, realAbs)
@@ -1731,7 +1747,7 @@ func (s *Server) sanitizeErrorText(err error) string {
 	return msg
 }
 
-// setUserContentCache 给“可能受鉴权保护”的文件/列表响应设置缓存边界。
+// setUserContentCache 给"可能受鉴权保护"的文件/列表响应设置缓存边界。
 //
 // 不能一律 no-store：视频拖动与重复下载依赖浏览器缓存。启用鉴权时用
 // private + Vary，允许用户自己的浏览器缓存，但禁止共享缓存/CDN 把

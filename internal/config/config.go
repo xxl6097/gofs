@@ -299,6 +299,11 @@ type Config struct {
 	// AuthRules 为原始鉴权规则串，交由 auth 包解析。
 	AuthRules []string
 
+	// PublicDirs 是无需任何凭据即可只读访问的路径前缀列表。
+	// 启用鉴权时，匹配到这些前缀的路径允许匿名只读；
+	// 未匹配的路径仍按普通鉴权规则处理。
+	PublicDirs []string
+
 	// 权限开关。
 	// AllowAll 打开全部开关。
 	AllowAll bool
@@ -662,6 +667,7 @@ func Defaults() *Config {
 		PathPrefix:         "",
 		Hidden:             nil,
 		AuthRules:          nil,
+		PublicDirs:         nil,
 		AllowAll:           false,
 		AllowEdit:          false,
 		EditMaxSize:        DefaultEditMaxSize,
@@ -749,6 +755,7 @@ func (c *Config) ApplyEnv() {
 	c.PathPrefix = envStr("GOFS_PATH_PREFIX", c.PathPrefix)
 	c.Hidden = envList("GOFS_HIDDEN", c.Hidden)
 	c.AuthRules = envAuthList("GOFS_AUTH", c.AuthRules)
+	c.PublicDirs = envList("GOFS_PUBLIC_DIRS", c.PublicDirs)
 	c.AllowAll = envBool("GOFS_ALLOW_ALL", c.AllowAll)
 	c.AllowEdit = envBool("GOFS_ALLOW_EDIT", c.AllowEdit)
 	c.EditMaxSize = envInt64("GOFS_EDIT_MAX_SIZE", c.EditMaxSize)
@@ -843,6 +850,10 @@ func Parse(args []string, stdout io.Writer) (*Config, error) {
 	})
 	fs.Func("auth", "添加鉴权规则，例如 user:pass@/dir1:rw,/dir2", func(v string) error {
 		cfg.AuthRules = append(cfg.AuthRules, v)
+		return nil
+	})
+	fs.Func("public-dir", "设为无需登录即可只读访问的路径前缀，可多次指定", func(v string) error {
+		cfg.PublicDirs = append(cfg.PublicDirs, splitList(v)...)
 		return nil
 	})
 	fs.BoolVar(&cfg.AllowAll, "A", cfg.AllowAll, "允许所有操作")
