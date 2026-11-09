@@ -20,7 +20,7 @@ func main() {
 	// 示例服务只监听回环，不暴露到所有网卡。BindSet/PortSet 必须置位：
 	// 否则真实的 ~/.config/gofs/settings.json 里的 listen_bind 会覆盖这里，
 	// 一条曾经存在过的 0.0.0.0 记录就能把固定口令的示例服务推到公网。
-	cfg.Bind = "127.0.0.1"
+	cfg.Bind = "0.0.0.0"
 	cfg.BindSet = true
 	cfg.Port = 5000
 	cfg.PortSet = true
